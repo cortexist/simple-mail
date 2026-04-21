@@ -304,7 +304,70 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Copy scalar contact fields into new multi-value child tables (one-time, flagged)
     migrate_contacts_multivalue(conn);
 
+    // Repair Gmail accounts: sync used to map \All (All Mail) to the local
+    // "archive" folder, which caused every inbox row to get overwritten to
+    // folder='archive' by the Message-ID dedup path. Restore those rows to
+    // their original folder using imap_uid_map as the source of truth, then
+    // drop the stale archive UID entries and reset archive sync state.
+    migrate_repair_gmail_all_mail(conn);
+
     Ok(())
+}
+
+/// One-time: undo the All-Mail → Archive folder mis-assignment.
+fn migrate_repair_gmail_all_mail(conn: &Connection) {
+    let already: bool = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'gmail_all_mail_repaired'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    if already {
+        return;
+    }
+
+    // For any email currently in 'archive' that also has a non-archive
+    // imap_uid_map entry, move it back to the non-archive folder. Prefer
+    // inbox, then sent/drafts/deleted/junk.
+    conn.execute(
+        "UPDATE emails
+            SET folder = (
+                SELECT folder FROM imap_uid_map
+                 WHERE imap_uid_map.email_id   = emails.id
+                   AND imap_uid_map.account_id = emails.account_id
+                   AND imap_uid_map.folder    != 'archive'
+                 ORDER BY CASE imap_uid_map.folder
+                     WHEN 'inbox'   THEN 0
+                     WHEN 'sent'    THEN 1
+                     WHEN 'drafts'  THEN 2
+                     WHEN 'deleted' THEN 3
+                     WHEN 'junk'    THEN 4
+                     ELSE 5 END
+                 LIMIT 1
+            )
+          WHERE folder = 'archive'
+            AND EXISTS (
+                SELECT 1 FROM imap_uid_map
+                 WHERE imap_uid_map.email_id   = emails.id
+                   AND imap_uid_map.account_id = emails.account_id
+                   AND imap_uid_map.folder    != 'archive'
+            )",
+        [],
+    ).ok();
+
+    // Drop the stale archive UID entries so the next sync doesn't trip over
+    // them, and clear archive folder state so Gmail's All Mail (which we no
+    // longer sync) doesn't leave orphaned state behind.
+    conn.execute("DELETE FROM imap_uid_map     WHERE folder = 'archive'", []).ok();
+    conn.execute("DELETE FROM imap_folder_state WHERE folder = 'archive'", []).ok();
+
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('gmail_all_mail_repaired', '1')",
+        [],
+    ).ok();
 }
 
 /// One-time: fan out legacy scalar contacts.email/phone/mobile/address into child tables.

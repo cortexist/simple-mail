@@ -172,7 +172,7 @@ pub fn map_folder_name(imap_name: &str) -> Option<&'static str> {
         "drafts" | "draft" | "[gmail]/drafts" => Some("drafts"),
         "trash" | "deleted items" | "deleted" | "[gmail]/trash" | "[gmail]/bin" => Some("deleted"),
         "junk" | "junk email" | "spam" | "bulk mail" | "[gmail]/spam" => Some("junk"),
-        "archive" | "archives" | "[gmail]/all mail" => Some("archive"),
+        "archive" | "archives" => Some("archive"),
         _ => None,
     }
 }
@@ -540,7 +540,13 @@ pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<(String, Stri
             NameAttribute::Drafts   => Some("drafts"),
             NameAttribute::Trash    => Some("deleted"),
             NameAttribute::Junk     => Some("junk"),
-            NameAttribute::Archive | NameAttribute::All => Some("archive"),
+            NameAttribute::Archive => Some("archive"),
+            // Skip \All (Gmail's "All Mail"): it contains every message in
+            // the account, so syncing it retriggers the Message-ID dedup path
+            // in sync_mail and moves Inbox rows to Archive. Gmail users keep
+            // their Inbox/Sent/Trash folders; archived-only mail remains
+            // reachable via Gmail web. Matches Thunderbird's default.
+            NameAttribute::All => Some(""),
             _ => None,
         });
 

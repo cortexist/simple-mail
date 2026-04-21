@@ -121,6 +121,22 @@ npm run tauri build
 
 The production binary and installer are output to `src-tauri/target/release/bundle/`.
 
+## Provider Notes
+
+### Gmail
+
+Gmail no longer accepts your regular Google password over IMAP/SMTP. Use an **App Password**:
+
+1. Go to https://myaccount.google.com/security and enable **2-Step Verification**. This is a required separate step — Google may already send SMS codes to your phone on risky sign-ins, but that is *not* the same as having 2-Step Verification turned on, and the App Passwords page stays hidden until you explicitly enable it.
+2. Once 2-Step Verification is on, visit https://myaccount.google.com/apppasswords and generate a 16-character app password for Simple Mail.
+3. In Simple Mail, add a Gmail account with:
+   - IMAP: `imap.gmail.com` port `993`, SSL/TLS
+   - SMTP: `smtp.gmail.com` port `465` (SSL) or `587` (STARTTLS)
+   - Username: your full Gmail address
+   - Password: the 16-character app password (not your Google password)
+
+Gmail's `[Gmail]/All Mail` is intentionally not synced — on IMAP it contains every message in the account, including everything already visible in Inbox/Sent/Trash, so syncing it would duplicate the entire mailbox. This matches Thunderbird's default behavior. Messages you archived in Gmail web (removed from Inbox but kept only in All Mail) remain on the server and are reachable via the browser.
+
 ## Project Structure
 
 ```
