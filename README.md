@@ -3,6 +3,8 @@ by Cortexist
 
 A privacy-focused desktop mail, calendar, and contacts client built with Tauri, Svelte 5, and Rust. All data stays on your machine — no third-party cloud, no telemetry. Ships with light, dark, and system color themes, full internationalization in nine languages, and runs natively on Windows, macOS, and Linux.
 
+[![Buy Me A Coffee](https://img.shields.io/badge/-buy_me_a_coffee-gray?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/cortexist)
+
 ![Simple Mail by Cortexist](./screenshots/theme-i18n.png)
 
 ## Features
