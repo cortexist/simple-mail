@@ -1,6 +1,6 @@
 {
   "name": "simple-mail",
-  "version": "0.8.0",
+  "version": "0.8.3",
   "description": "",
   "type": "module",
   "scripts": {
@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "version": "node scripts/sync-version.mjs && git add src-tauri/Cargo.toml"
   },
   "license": "MIT",
   "dependencies": {

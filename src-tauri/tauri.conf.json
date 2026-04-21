@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "simple-mail",
-  "version": "0.8.2",
   "identifier": "com.cortexist.simple-mail",
   "build": {
     "beforeDevCommand": "npm run dev",
