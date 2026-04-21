@@ -38,6 +38,7 @@
     sendEmail,
     updateEmailReplied,
     fetchEmailBody,
+    fetchPreviewsAround,
     openAttachment,
     flushOutbox,
     saveCalendarEvent,
@@ -1136,6 +1137,36 @@
     }
   }
 
+  // Track in-flight preview-window fetches to avoid hammering IMAP while the
+  // user scrolls fast. Keyed by anchor email id.
+  const previewFetchesInFlight = new Set<string>();
+
+  async function handlePreviewMissing(email: Email) {
+    if (!activeAccountId || previewFetchesInFlight.has(email.id)) return;
+    previewFetchesInFlight.add(email.id);
+    try {
+      const updates = await fetchPreviewsAround(activeAccountId, email.id, 20, 10);
+      if (!updates.length) return;
+      const byId = new Map(updates.map(u => [u.id, u]));
+      emails = emails.map((e) => {
+        const u = byId.get(e.id);
+        if (!u) return e;
+        return {
+          ...e,
+          body: u.body || e.body,
+          preview: u.preview || e.preview,
+          authResults: u.authResults ?? e.authResults,
+          hasAttachment: u.hasAttachment ?? e.hasAttachment,
+          attachments: u.attachments ?? e.attachments,
+        };
+      });
+    } catch (err) {
+      console.error('Failed to prefetch previews:', err);
+    } finally {
+      previewFetchesInFlight.delete(email.id);
+    }
+  }
+
   async function handleOpenAttachment(attachmentIndex: number) {
     if (!selectedEmail || !activeAccountId) return;
     try {
@@ -2220,6 +2251,7 @@
                 onToggleFocused={handleToggleFocused}
                 onDeleteEmail={handleDeleteEmail}
                 onClearSelection={() => (selectedEmailId = '')}
+                onPreviewMissing={handlePreviewMissing}
                 bind:visibleList={messageVisibleList}
                 focused={focusedPane === 'messages'}
                 bind:checkedIds={checkedEmailIds}

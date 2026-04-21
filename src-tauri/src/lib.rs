@@ -1484,6 +1484,162 @@ async fn fetch_email_body(
     }))
 }
 
+// ── Fetch previews around a viewport anchor ─────────────
+
+/// Fill previews for messages near a given anchor in the same folder, in one
+/// IMAP round trip. Called by the frontend when a blank-preview row scrolls
+/// into view: `ahead` rows older than the anchor, `behind` rows newer, plus
+/// the anchor itself. Only rows whose preview is currently empty are fetched.
+#[tauri::command]
+async fn fetch_previews_around(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    email_id: String,
+    ahead: u32,
+    behind: u32,
+) -> Result<serde_json::Value, String> {
+    let (settings, anchor_folder, anchor_date, targets) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+        let settings = sync_state::load_mail_settings(&conn, &account_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("No mail settings")?;
+
+        let (anchor_folder, anchor_date): (String, String) = conn
+            .query_row(
+                "SELECT folder, date FROM emails WHERE id = ?1 AND account_id = ?2",
+                rusqlite::params![email_id, account_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| "Anchor email not found".to_string())?;
+
+        // Collect rows in the window: anchor + `ahead` older + `behind` newer,
+        // all with empty preview and a known IMAP UID in the same folder.
+        let mut targets: Vec<(String, u32)> = Vec::new();
+
+        // Anchor itself (only if still blank)
+        if let Ok((id, uid)) = conn.query_row(
+            "SELECT e.id, m.uid
+               FROM emails e
+               JOIN imap_uid_map m ON m.email_id = e.id AND m.folder = e.folder
+              WHERE e.id = ?1 AND e.preview = ''",
+            rusqlite::params![email_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+        ) {
+            targets.push((id, uid));
+        }
+
+        // Older than anchor (date DESC — closest first)
+        let mut older_stmt = conn.prepare(
+            "SELECT e.id, m.uid
+               FROM emails e
+               JOIN imap_uid_map m ON m.email_id = e.id AND m.folder = e.folder
+              WHERE e.account_id = ?1
+                AND e.folder     = ?2
+                AND e.preview    = ''
+                AND e.date       < ?3
+              ORDER BY e.date DESC
+              LIMIT ?4"
+        ).map_err(|e| e.to_string())?;
+        if let Ok(rows) = older_stmt.query_map(
+            rusqlite::params![account_id, anchor_folder, anchor_date, ahead as i64],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+        ) {
+            for r in rows.flatten() { targets.push(r); }
+        }
+
+        // Newer than anchor (date ASC — closest first)
+        let mut newer_stmt = conn.prepare(
+            "SELECT e.id, m.uid
+               FROM emails e
+               JOIN imap_uid_map m ON m.email_id = e.id AND m.folder = e.folder
+              WHERE e.account_id = ?1
+                AND e.folder     = ?2
+                AND e.preview    = ''
+                AND e.date       > ?3
+              ORDER BY e.date ASC
+              LIMIT ?4"
+        ).map_err(|e| e.to_string())?;
+        if let Ok(rows) = newer_stmt.query_map(
+            rusqlite::params![account_id, anchor_folder, anchor_date, behind as i64],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+        ) {
+            for r in rows.flatten() { targets.push(r); }
+        }
+
+        (settings, anchor_folder, anchor_date, targets)
+    };
+    let _ = anchor_date; // retained above for the query; not needed further
+
+    if targets.is_empty() {
+        return Ok(serde_json::json!({ "updates": [] }));
+    }
+
+    let uids: Vec<u32> = targets.iter().map(|(_, u)| *u).collect();
+    let uid_to_email_id: std::collections::HashMap<u32, String> = targets
+        .into_iter()
+        .map(|(id, uid)| (uid, id))
+        .collect();
+
+    let mut session = imap_client::connect(&settings)
+        .await
+        .map_err(|e| format!("IMAP connect failed: {}", e))?;
+
+    let remote_folders = imap_client::list_folders(&mut session)
+        .await
+        .map_err(|e| e.to_string())?;
+    let imap_name = remote_folders.iter()
+        .find(|(_, mapped)| *mapped == anchor_folder)
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| anchor_folder.clone());
+
+    let fetched = imap_client::fetch_bodies_full_batch(&mut session, &imap_name, &uids)
+        .await
+        .unwrap_or_default();
+
+    session.logout().await.ok();
+
+    // Persist and build the response payload.
+    let mut updates = Vec::with_capacity(fetched.len());
+    {
+        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for (uid, html, preview, auth, has_attach, attach_meta) in &fetched {
+            let Some(id) = uid_to_email_id.get(uid) else { continue };
+            tx.execute(
+                "UPDATE emails SET body = ?2, preview = ?3, auth_results = ?4, has_attachment = ?5 WHERE id = ?1",
+                rusqlite::params![id, html, preview, auth, *has_attach as i32],
+            ).ok();
+            tx.execute("DELETE FROM email_attachments WHERE email_id = ?1", rusqlite::params![id]).ok();
+            for (idx, meta) in attach_meta.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO email_attachments (email_id, idx, filename, mime_type, size) VALUES (?1,?2,?3,?4,?5)",
+                    rusqlite::params![id, idx as i64, meta.filename, meta.mime_type, meta.size as i64],
+                ).ok();
+            }
+            let attachments: Vec<serde_json::Value> = attach_meta.iter().enumerate().map(|(idx, m)| {
+                serde_json::json!({
+                    "index": idx,
+                    "filename": m.filename,
+                    "mimeType": m.mime_type,
+                    "size": m.size
+                })
+            }).collect();
+            updates.push(serde_json::json!({
+                "id": id,
+                "body": html,
+                "preview": preview,
+                "authResults": auth,
+                "hasAttachment": *has_attach,
+                "attachments": attachments,
+            }));
+        }
+        tx.commit().ok();
+    }
+
+    Ok(serde_json::json!({ "updates": updates }))
+}
+
 // ── Open attachment ─────────────────────────────────────
 
 #[tauri::command]
@@ -4441,6 +4597,7 @@ pub fn run() {
             load_carddav_settings,
             sync_mail,
             fetch_email_body,
+            fetch_previews_around,
             open_attachment,
             save_attachment,
             send_email,

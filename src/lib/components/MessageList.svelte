@@ -15,12 +15,15 @@
     onToggleFocused?: (email: Email) => void;
     onDeleteEmail?: (email: Email) => void;
     onClearSelection?: () => void;
+    /** Fired when a row with an empty preview scrolls into the viewport.
+     *  Parent uses this to fetch previews for the anchor plus nearby rows. */
+    onPreviewMissing?: (email: Email) => void;
     visibleList?: Email[];
     focused?: boolean;
     checkedIds?: Set<string>;
   }
 
-  let { emails, selectedEmail, currentFolder, folderName, onSelectEmail, onOpenDraft, onToggleStar, onTogglePin, onToggleFocused, onDeleteEmail, onClearSelection, visibleList = $bindable([]), focused = false, checkedIds = $bindable(new Set<string>()) }: Props = $props();
+  let { emails, selectedEmail, currentFolder, folderName, onSelectEmail, onOpenDraft, onToggleStar, onTogglePin, onToggleFocused, onDeleteEmail, onClearSelection, onPreviewMissing, visibleList = $bindable([]), focused = false, checkedIds = $bindable(new Set<string>()) }: Props = $props();
 
   let activeTab = $state<'focused' | 'other'>('focused');
   let filterSort = $state<'date' | 'starred' | 'unread'>('date');
@@ -118,6 +121,71 @@
     const el = emailItemsEl.querySelector('.email-item.selected') as HTMLElement | null;
     if (el) el.scrollIntoView({ block: 'nearest' });
   });
+
+  // ── Viewport-triggered preview prefetch ──
+  // When a row with no preview becomes visible, notify the parent with that
+  // row as the anchor. The parent batches one IMAP round trip covering the
+  // anchor plus a window around it, so scrolling slowly loads in groups and
+  // a fast Ctrl+End / jump keeps the next visible rows primed too.
+  const firedAnchors = new Set<string>(); // anchors already requested this session
+  let pendingAnchor: Email | null = null;
+  let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function scheduleFetch(email: Email) {
+    if (firedAnchors.has(email.id)) return;
+    pendingAnchor = email;
+    if (pendingTimer) return;
+    pendingTimer = setTimeout(() => {
+      pendingTimer = null;
+      const target = pendingAnchor;
+      pendingAnchor = null;
+      if (!target || firedAnchors.has(target.id)) return;
+      firedAnchors.add(target.id);
+      onPreviewMissing?.(target);
+    }, 150);
+  }
+
+  /** Svelte action: observe a row and trigger a prefetch when it enters view. */
+  function observePreview(node: HTMLElement, email: Email) {
+    let observer: IntersectionObserver | null = null;
+    let currentEmail = email;
+
+    const setup = (e: Email) => {
+      observer?.disconnect();
+      observer = null;
+      // Only observe rows that actually need a preview.
+      if (e.preview && e.preview.length > 0) return;
+      if (firedAnchors.has(e.id)) return;
+      if (!('IntersectionObserver' in window)) {
+        scheduleFetch(e);
+        return;
+      }
+      observer = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            scheduleFetch(currentEmail);
+            observer?.disconnect();
+            observer = null;
+            break;
+          }
+        }
+      }, { root: emailItemsEl ?? null, rootMargin: '200px 0px', threshold: 0.01 });
+      observer.observe(node);
+    };
+
+    setup(currentEmail);
+
+    return {
+      update(next: Email) {
+        const changed = next.id !== currentEmail.id || (!currentEmail.preview && !!next.preview);
+        currentEmail = next;
+        if (changed) setup(next);
+      },
+      destroy() {
+        observer?.disconnect();
+      },
+    };
+  }
 </script>
 
 <svelte:window onclick={() => { showFilterMenu = false; }} />
@@ -204,6 +272,7 @@
   <div class="email-items" class:focused bind:this={emailItemsEl}>
     {#each visibleEmails as email (email.id)}
       <div
+        use:observePreview={email}
         class="email-item"
         class:selected={selectedEmail?.id === email.id}
         class:unread={!email.isRead}

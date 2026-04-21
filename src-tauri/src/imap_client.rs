@@ -461,6 +461,48 @@ pub async fn fetch_raw(session: &mut ImapSession, imap_folder: &str, uid: u32) -
     bail!("No raw body found for UID {}", uid)
 }
 
+/// Fetch full body + derived metadata for multiple UIDs at once (paged).
+/// Mirrors the second pass in `sync_folder` but callable for backfill.
+/// Returns `(uid, html, preview, auth_results, has_attachment, attachments)`.
+pub async fn fetch_bodies_full_batch(
+    session: &mut ImapSession,
+    imap_folder: &str,
+    uids: &[u32],
+) -> Result<Vec<(u32, String, String, String, bool, Vec<AttachmentMeta>)>> {
+    if uids.is_empty() { return Ok(Vec::new()); }
+
+    session.select(imap_folder).await?;
+
+    let mut results = Vec::with_capacity(uids.len());
+
+    for chunk in uids.chunks(25) {
+        let range: Vec<String> = chunk.iter().map(|u| u.to_string()).collect();
+        let range_str = range.join(",");
+
+        match session.uid_fetch(&range_str, "(UID BODY.PEEK[])").await {
+            Ok(stream) => {
+                let fetches: Vec<Fetch> = stream.try_collect().await.unwrap_or_default();
+                for fetch in &fetches {
+                    if let (Some(uid), Some(raw_bytes)) = (fetch.uid, fetch.body()) {
+                        let raw = String::from_utf8_lossy(raw_bytes);
+                        let html = extract_html_body(&raw);
+                        let preview = extract_preview(&raw);
+                        let auth = extract_auth_results(&raw);
+                        let has_attach = detect_has_attachment(&raw);
+                        let attach_meta = extract_attachment_meta(&raw);
+                        results.push((uid, html, preview, auth, has_attach, attach_meta));
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("fetch_bodies_full_batch: chunk failed on {}: {}", imap_folder, e);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
 /// Fetch bodies for multiple UIDs at once (paged).
 pub async fn fetch_bodies_batch(
     session: &mut ImapSession,
@@ -837,18 +879,44 @@ fn parse_loose_date(s: &str) -> Option<String> {
 }
 
 /// Extract a short plain-text preview (~200 chars) from a raw MIME message snippet.
+///
+/// Guarantee: the returned string is never empty if the message was parsed at
+/// all. A genuinely textless message (e.g. attachment-only) yields a single
+/// space so callers can distinguish "fetched, nothing to preview" from
+/// "envelope-only, preview not yet fetched" (which stays as `""`).
 fn extract_preview(raw: &str) -> String {
+    let result = extract_preview_inner(raw);
+    if result.is_empty() { " ".to_string() } else { result }
+}
+
+fn extract_preview_inner(raw: &str) -> String {
     if let Some(msg) = mail_parser::MessageParser::default().parse(raw.as_bytes()) {
         // Prefer plain text part, but skip it if it looks like CSS/code
         if let Some(text) = msg.body_text(0) {
             let trimmed = text.trim();
             if !trimmed.is_empty() && !looks_like_css(trimmed) {
-                return clean_preview(&text);
+                let cleaned = clean_preview(&text);
+                if !cleaned.is_empty() {
+                    return cleaned;
+                }
             }
         }
-        // Fall back to HTML stripped of tags and style/script content
-        if let Some(html) = msg.body_html(0) {
-            return clean_preview(&strip_html_tags(&html));
+        // Fall back to HTML stripped of tags and style/script/hidden content.
+        // Email marketers routinely open with a hidden preheader stuffed with
+        // invisible spacer characters, so an initial preview that reduces to
+        // empty or a handful of punctuation marks isn't meaningful — retry
+        // the next HTML part.
+        for idx in 0..msg.parts.len().max(1) {
+            if let Some(html) = msg.body_html(idx) {
+                let cleaned = clean_preview(&strip_html_tags(&html));
+                if has_visible_text(&cleaned) {
+                    return cleaned;
+                }
+            }
+        }
+        // Last resort: plain text part even if it's mostly whitespace.
+        if let Some(text) = msg.body_text(0) {
+            return clean_preview(&text);
         }
     }
     // Fallback: skip headers, strip tags from body
@@ -856,6 +924,25 @@ fn extract_preview(raw: &str) -> String {
         return clean_preview(&strip_html_tags(body));
     }
     String::new()
+}
+
+/// Cheap combining-mark check covering the three core Unicode ranges. We
+/// don't need perfect coverage — the goal is to drop stray combining diacritics
+/// that marketing preheaders leave over base characters to pad the preview.
+fn is_combining_mark(c: char) -> bool {
+    matches!(c as u32,
+        0x0300..=0x036F | // Combining Diacritical Marks
+        0x1AB0..=0x1AFF | // Combining Diacritical Marks Extended
+        0x1DC0..=0x1DFF | // Combining Diacritical Marks Supplement
+        0x20D0..=0x20FF | // Combining Diacritical Marks for Symbols
+        0xFE20..=0xFE2F)  // Combining Half Marks
+}
+
+/// Return true if `s` has at least a few printable, non-punctuation characters.
+/// Used to reject preview strings that reduce to only spacer punctuation after
+/// invisible characters are stripped.
+fn has_visible_text(s: &str) -> bool {
+    s.chars().filter(|c| c.is_alphanumeric()).count() >= 3
 }
 
 /// Metadata for a single MIME attachment part.
@@ -936,11 +1023,15 @@ fn looks_like_css(text: &str) -> bool {
     brace_count >= 3 || sample.contains("!important") || sample.contains("font-weight:") || sample.contains("line-height:")
 }
 
-/// Strip HTML tags and style/script content for preview generation.
+/// Strip HTML tags and content inside style/script and visually-hidden
+/// elements (preheader spacers). Handles the common inline-style patterns
+/// used by marketing mail: `display:none`, `visibility:hidden`, `opacity:0`,
+/// and Outlook's `mso-hide:all`.
 fn strip_html_tags(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
-    let mut skip_content = false;
+    let mut skip_verbatim = false;                 // inside <style> / <script>
+    let mut hidden_stack: Vec<String> = Vec::new(); // nested hidden elements
     let mut tag_buf = String::new();
     for ch in html.chars() {
         match ch {
@@ -951,30 +1042,76 @@ fn strip_html_tags(html: &str) -> String {
             '>' if in_tag => {
                 in_tag = false;
                 let tag_lower = tag_buf.to_lowercase();
+
+                // style/script — skip their text content wholesale
                 if tag_lower.starts_with("style") || tag_lower.starts_with("script") {
-                    skip_content = true;
+                    skip_verbatim = true;
                 } else if tag_lower.starts_with("/style") || tag_lower.starts_with("/script") {
-                    skip_content = false;
+                    skip_verbatim = false;
                 }
+
+                // Extract the element name (first word after "/" if closing).
+                let is_closing = tag_lower.starts_with('/');
+                let name: String = tag_lower
+                    .trim_start_matches('/')
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                let is_self_closing = tag_buf.trim_end().ends_with('/');
+
+                if !name.is_empty() {
+                    if is_closing {
+                        // Pop the innermost matching hidden element.
+                        if let Some(pos) = hidden_stack.iter().rposition(|n| n == &name) {
+                            hidden_stack.truncate(pos);
+                        }
+                    } else if !is_self_closing && is_hidden_tag(&tag_lower) {
+                        hidden_stack.push(name);
+                    }
+                }
+
                 tag_buf.clear();
             }
             _ if in_tag => { tag_buf.push(ch); }
-            _ if !skip_content => out.push(ch),
+            _ if !skip_verbatim && hidden_stack.is_empty() => out.push(ch),
             _ => {}
         }
     }
     out
 }
 
+/// Heuristic: does this opening tag's attribute blob indicate the element is
+/// visually hidden? Operates on the already-lowercased tag contents, e.g.
+/// `div style="display:none; ...; mso-hide:all"`.
+fn is_hidden_tag(tag_lower: &str) -> bool {
+    // Collapse whitespace so "display : none" matches too.
+    let normalized: String = tag_lower.chars().filter(|c| !c.is_whitespace()).collect();
+    normalized.contains("display:none")
+        || normalized.contains("visibility:hidden")
+        || normalized.contains("opacity:0")
+        || normalized.contains("max-height:0")
+        || normalized.contains("mso-hide:all")
+        || normalized.contains("hidden=\"true\"")
+        || normalized.contains("hidden=true")
+}
+
 /// Collapse whitespace and truncate to ~200 chars for the message list.
 fn clean_preview(text: &str) -> String {
     let trimmed = text.trim_start_matches('\u{FEFF}');
-    // Strip zero-width and other invisible Unicode characters used as email preview spacers
+    // Strip zero-width and other invisible Unicode characters used as email preview spacers.
+    // U+034F (COMBINING GRAPHEME JOINER) shows up rendered as `͏` and is a
+    // favorite preheader filler; the combining-mark ranges below catch stray
+    // diacritics left behind by Gmail-style spacer trickery.
     let stripped: String = trimmed.chars().filter(|&c| !matches!(c,
+        '\u{034F}' |
+        '\u{00AD}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}' |
+        '\u{180E}' |
         '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{200E}' | '\u{200F}' |
-        '\u{00AD}' | '\u{2060}' | '\u{FEFF}' | '\u{180E}' |
-        '\u{2028}' | '\u{2029}'
-    )).collect();
+        '\u{202A}' | '\u{202B}' | '\u{202C}' | '\u{202D}' | '\u{202E}' |
+        '\u{2028}' | '\u{2029}' | '\u{2060}' | '\u{2061}' | '\u{2062}' | '\u{2063}' | '\u{2064}' |
+        '\u{FEFF}' |
+        '\u{3164}' | '\u{FFA0}'
+    ) && !is_combining_mark(c)).collect();
     let collapsed: String = stripped
         .split_whitespace()
         .collect::<Vec<_>>()

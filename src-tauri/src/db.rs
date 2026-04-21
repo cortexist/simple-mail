@@ -311,7 +311,64 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // drop the stale archive UID entries and reset archive sync state.
     migrate_repair_gmail_all_mail(conn);
 
+    // Clear previews that are just preheader spacer residue so the viewport
+    // prefetch re-fetches them with the improved extractor.
+    migrate_clear_spacer_previews(conn);
+
     Ok(())
+}
+
+/// One-time: clear cached preview strings that contain fewer than three
+/// alphanumeric characters. These are almost always hidden-preheader residue
+/// (invisible spacers, punctuation) that the old extractor let through; the
+/// new extractor skips them, and clearing the column lets the viewport
+/// prefetch pull a fresh preview from the server on next view.
+fn migrate_clear_spacer_previews(conn: &Connection) {
+    let already: bool = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'spacer_previews_cleared'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    if already {
+        return;
+    }
+
+    let candidates: Vec<(String, String)> = {
+        let mut stmt = match conn.prepare("SELECT id, preview FROM emails WHERE preview != ''") {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    };
+
+    let mut cleared = 0usize;
+    for (id, preview) in candidates {
+        let alnum = preview.chars().filter(|c| c.is_alphanumeric()).count();
+        if alnum < 3 {
+            if conn
+                .execute(
+                    "UPDATE emails SET preview = '' WHERE id = ?1",
+                    rusqlite::params![id],
+                )
+                .is_ok()
+            {
+                cleared += 1;
+            }
+        }
+    }
+
+    log::info!("migrate_clear_spacer_previews: cleared {} preview(s)", cleared);
+
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('spacer_previews_cleared', '1')",
+        [],
+    ).ok();
 }
 
 /// One-time: undo the All-Mail → Archive folder mis-assignment.

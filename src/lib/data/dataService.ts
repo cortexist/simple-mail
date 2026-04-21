@@ -524,6 +524,29 @@ export async function fetchEmailBody(accountId: string, emailId: string): Promis
   return (await inv('fetch_email_body', { accountId, emailId })) as { body: string; preview: string; authResults?: string; hasAttachment?: boolean; attachments?: import('$lib/types').Attachment[] };
 }
 
+/** Fill previews for messages near an anchor (one IMAP round trip). */
+export interface PreviewUpdate {
+  id: string;
+  body: string;
+  preview: string;
+  authResults?: string;
+  hasAttachment?: boolean;
+  attachments?: import('$lib/types').Attachment[];
+}
+
+export async function fetchPreviewsAround(
+  accountId: string,
+  emailId: string,
+  ahead: number = 20,
+  behind: number = 10,
+): Promise<PreviewUpdate[]> {
+  if (!isTauri()) return [];
+  const inv = await getInvoke();
+  if (!inv) return [];
+  const res = (await inv('fetch_previews_around', { accountId, emailId, ahead, behind })) as { updates: PreviewUpdate[] };
+  return res?.updates ?? [];
+}
+
 /** Open an attachment using the system default application. */
 export async function openAttachment(accountId: string, emailId: string, attachmentIndex: number): Promise<void> {
   if (!isTauri()) return;
