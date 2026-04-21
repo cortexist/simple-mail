@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(grep \"is not \\\\`Send\\\\`\\\\|help:\\\\|note:\")",
+      "Bash(xargs grep:*)",
+      "Bash(npx svelte-check:*)",
+      "Bash(cargo check:*)",
+      "Bash(grep:*)",
+      "Bash(sort -t: -k3 -rn)",
+      "Bash(find src -type f \\\\\\(-name *.tsx -o -name *.ts -o -name *.svelte \\\\\\))",
+      "Bash(python3:*)"
+    ]
+  }
+}

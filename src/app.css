@@ -1,0 +1,302 @@
+/* ── Outlook for Windows 11 — Global Styles ── */
+
+:root {
+  /* Accent */
+  --accent: #0078d4;
+  --accent-hover: #106ebe;
+  --accent-active: #005a9e;
+  --accent-light: #ebf3fc;
+
+  /* Backgrounds */
+  --bg-primary: #fafafa;
+  --bg-secondary: #f0f0f0;
+  --bg-tertiary: #e3e3e3;
+  --bg-nav: #f3f3f3;
+  --bg-hover: #d5d5d5;
+  --bg-selected: #eff6fc;
+  --bg-compose-btn: #0078d4;
+
+  /* Text */
+  --text-primary: #242424;
+  --text-secondary: #616161;
+  --text-tertiary: #afafaf;
+  --text-on-accent: #ffffff;
+
+  /* Borders */
+  --border: #e0e0e0;
+  --border-light: #ebebeb;
+  --border-subtle: #f0f0f0;
+
+  /* Semantic */
+  --danger: #d13438;
+  --success: #107c10;
+  --warning: #ffb900;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+
+  /* Typography */
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+button {
+  font-family: inherit;
+  border: none;
+  cursor: pointer;
+  background: none;
+  color: inherit;
+}
+
+input {
+  font-family: inherit;
+  border: none;
+  outline: none;
+  background: none;
+  color: inherit;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+/* ── Dark theme ── */
+[data-theme="dark"] {
+  --accent: #4cc2ff;
+  --accent-hover: #62cdff;
+  --accent-active: #2eb8ff;
+  --accent-light: #1a3a4a;
+
+  --bg-primary: #1e1e1e;
+  --bg-secondary: #252525;
+  --bg-tertiary: #2d2d2d;
+  --bg-nav: #252525;
+  --bg-hover: #3a3a3a;
+  --bg-selected: #1a3a4a;
+  --bg-compose-btn: #4cc2ff;
+
+  --text-primary: #e0e0e0;
+  --text-secondary: #a0a0a0;
+  --text-tertiary: #6a6a6a;
+  --text-on-accent: #000000;
+
+  --border: #3a3a3a;
+  --border-light: #333333;
+  --border-subtle: #2a2a2a;
+
+  --danger: #ff6b6b;
+  --success: #4caf50;
+  --warning: #ffc107;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+[data-theme="dark"] ::selection {
+  background: var(--accent-light);
+  color: var(--text-primary);
+}
+
+/* ── Scrollbar — Outlook thin style ── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+/* ── Selection ── */
+::selection {
+  background: var(--accent-light);
+  color: var(--text-primary);
+}
+
+/* ── Custom Tooltips (body-appended via JS) ── */
+.tooltip-bubble {
+  position: fixed;
+  z-index: 99999;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 400;
+  padding: 4px 8px;
+  border-radius: 4px;
+  white-space: pre;
+  max-width: none;
+  box-shadow: var(--shadow-md);
+  border: 1px solid var(--border);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.tooltip-bubble.visible {
+  opacity: 1;
+}
+
+.tooltip-arrow {
+  position: fixed;
+  z-index: 99999;
+  width: 0;
+  height: 0;
+  border: 4px solid transparent;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.tooltip-arrow.visible {
+  opacity: 1;
+}
+
+.tooltip-arrow[data-placement="bottom"],
+.tooltip-arrow[data-placement="bottom-start"],
+.tooltip-arrow[data-placement="bottom-end"] {
+  border-bottom-color: var(--bg-tertiary);
+  filter: drop-shadow(0 -1px 1px rgba(0, 0, 0, 0.05));
+}
+
+.tooltip-arrow[data-placement="top"] {
+  border-top-color: var(--bg-tertiary);
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.05));
+}
+
+.tooltip-arrow[data-placement="right"] {
+  border-right-color: var(--bg-tertiary);
+  filter: drop-shadow(-1px 0 1px rgba(0, 0, 0, 0.05));
+}
+
+.tooltip-arrow[data-placement="left"] {
+  border-left-color: var(--bg-tertiary);
+  filter: drop-shadow(1px 0 1px rgba(0, 0, 0, 0.05));
+}
+
+/* ── Print styles ── */
+@page {
+  margin: 15mm 15mm 20mm 15mm;
+}
+
+@media print {
+  /* Hide app chrome */
+  .title-bar,
+  .command-bar,
+  .nav-rail,
+  .folder-pane,
+  .message-list,
+  .settings-overlay,
+  .sync-error-banner,
+  .folder-modal-overlay,
+  .tooltip-bubble,
+  .tooltip-arrow {
+    display: none !important;
+  }
+
+  /* Reset layout to flow for print */
+  html, body {
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  .app-layout {
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  .app-body {
+    display: block !important;
+    overflow: visible !important;
+  }
+
+  .app-main {
+    display: block !important;
+    overflow: visible !important;
+  }
+
+  .app-content {
+    display: block !important;
+    overflow: visible !important;
+  }
+
+  /* Reading pane fills the page */
+  .reading-pane {
+    min-width: 0 !important;
+    overflow: visible !important;
+  }
+
+  .email-content {
+    overflow: visible !important;
+    padding: 0 !important;
+  }
+
+  .email-body {
+    padding: 0 !important;
+  }
+
+  .body-iframe {
+    min-height: 0 !important;
+  }
+
+  /* Compose pane fills the page */
+  .compose-pane {
+    min-width: 0 !important;
+    overflow: visible !important;
+  }
+
+  /* Hide compose chrome (toolbar, send button, discard) */
+  .compose-toolbar,
+  .compose-footer,
+  .compose-header-actions {
+    display: none !important;
+  }
+
+  .compose-body-wrap {
+    overflow: visible !important;
+  }
+
+  /* No-selection state hidden in print */
+  .no-selection {
+    display: none !important;
+  }
+}

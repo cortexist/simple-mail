@@ -1,0 +1,71 @@
+[package]
+name = "simple-mail"
+version = "0.8.0"
+description = "A privacy-focused desktop mail, calendar, and contacts client"
+authors = ["Cortexist, LLC"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "mail_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-log = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+futures = "0.3"
+
+# IMAP
+async-imap = "0.10"
+async-native-tls = "0.5"
+
+# SMTP (sending)
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+
+# HTTP client for CalDAV / CardDAV
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "charset", "http2"] }
+
+# XML parsing for DAV responses
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# iCalendar parsing
+ical = "0.11"
+
+# vCard parsing
+vcard_parser = "0.2"
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+log = "0.4"
+anyhow = "1"
+url = "2"
+mime_guess = "2"
+mail-parser = "0.9"
+
+# Embedded DAV server
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+tauri-plugin-single-instance = "2.4.0"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+aes-gcm = "0.10.3"
+rand = "0.10.0"
+
