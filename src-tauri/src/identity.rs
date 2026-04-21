@@ -13,12 +13,12 @@ pub const fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// `CortexistSimpleMail/0.8.0 (+https://cortexist.com; com.cortexist.simple-mail)`
+/// `CortexistSimpleMail/0.8.1 (+https://cortexist.com; com.cortexist.simple-mail)`
 pub fn http_user_agent() -> String {
     format!("{}/{} (+{}; {})", PRODUCT_TOKEN, version(), SUPPORT_URL, BUNDLE_ID)
 }
 
-/// `Cortexist Simple Mail 0.8.0` — for outgoing mail's User-Agent: header.
+/// `Cortexist Simple Mail 0.8.1` — for outgoing mail's User-Agent: header.
 pub fn mail_user_agent() -> String {
     format!("{} {}", PRODUCT_NAME, version())
 }
