@@ -8,7 +8,7 @@
 //!   • Paged fetches in chunks of 100 to avoid memory spikes on huge mailboxes
 //!   • Multi-device safe: detects UID validity changes and does full re-sync
 
-use anyhow::{Result, Context, anyhow, bail};
+use anyhow::{Result, Context, bail};
 use async_imap::types::{Fetch, Flag};
 use async_native_tls::TlsConnector;
 use base64::Engine;
@@ -43,6 +43,11 @@ pub struct EnvelopeInfo {
     pub body: String,
     /// Parsed Authentication-Results: "spf=pass dkim=pass dmarc=pass" etc.
     pub auth_results: String,
+    /// Gmail labels (X-GM-LABELS) including internal markers like \Inbox or
+    /// CATEGORY_PERSONAL. Empty for non-Gmail servers. Display-side strips the
+    /// internal markers; storage keeps them so the Priority mapper can read
+    /// them without a second round trip.
+    pub labels: Vec<String>,
     /// Per-attachment metadata extracted during body fetch.
     #[serde(skip)]
     pub attachments: Vec<AttachmentMeta>,
@@ -92,9 +97,7 @@ pub async fn connect(settings: &MailServerSettings) -> Result<ImapSession> {
             client
                 .read_response()
                 .await
-                .transpose()
-                .with_context(|| format!("Failed to read IMAP greeting from {}:{}", host, port))?
-                .ok_or_else(|| anyhow!("IMAP server {}:{} closed the connection before sending a greeting", host, port))?;
+                .with_context(|| format!("Failed to read IMAP greeting from {}:{}", host, port))?;
             client
         }
         "tls" => {
@@ -102,9 +105,7 @@ pub async fn connect(settings: &MailServerSettings) -> Result<ImapSession> {
             client
                 .read_response()
                 .await
-                .transpose()
-                .with_context(|| format!("Failed to read IMAP greeting from {}:{} before STARTTLS", host, port))?
-                .ok_or_else(|| anyhow!("IMAP server {}:{} closed the connection before STARTTLS greeting", host, port))?;
+                .with_context(|| format!("Failed to read IMAP greeting from {}:{} before STARTTLS", host, port))?;
             client
                 .run_command_and_check_ok("STARTTLS", None)
                 .await
@@ -122,9 +123,7 @@ pub async fn connect(settings: &MailServerSettings) -> Result<ImapSession> {
             client
                 .read_response()
                 .await
-                .transpose()
-                .with_context(|| format!("Failed to read IMAP greeting from {}:{}", host, port))?
-                .ok_or_else(|| anyhow!("IMAP server {}:{} closed the connection before sending a greeting", host, port))?;
+                .with_context(|| format!("Failed to read IMAP greeting from {}:{}", host, port))?;
             client
         }
         _ => {
@@ -154,6 +153,16 @@ pub async fn connect(settings: &MailServerSettings) -> Result<ImapSession> {
     }
 
     Ok(session)
+}
+
+/// Probe the post-login server for the X-GM-EXT-1 capability (Gmail-only).
+/// Returning false on error is intentional — non-Gmail servers shouldn't be
+/// burdened with a Gmail-specific FETCH atom.
+pub async fn detect_gmail(session: &mut ImapSession) -> bool {
+    match session.capabilities().await {
+        Ok(caps) => caps.has_str("X-GM-EXT-1"),
+        Err(_) => false,
+    }
 }
 
 /// Map IMAP folder name to our local folder id.
@@ -195,6 +204,7 @@ pub async fn sync_folder(
     account_id: &str,
     imap_folder: &str,
     local_folder: &str,
+    is_gmail: bool,
 ) -> Result<SyncResult> {
     const FETCH_PAGE_SIZE: usize = 100;
 
@@ -271,7 +281,11 @@ pub async fn sync_folder(
     // Fetch new message envelopes (body + preview fetched on demand)
     if fetch_from < uid_next || result.full_resync {
         let range = format!("{}:*", fetch_from);
-        let query = "(UID FLAGS ENVELOPE)";
+        let query = if is_gmail {
+            "(UID FLAGS ENVELOPE X-GM-LABELS)"
+        } else {
+            "(UID FLAGS ENVELOPE)"
+        };
 
         log::info!("sync_folder {}/{}: uid_fetch range='{}' query='{}'", account_id, local_folder, range, query);
         let fetches: Vec<Fetch> = session.uid_fetch(&range, query).await?.try_collect().await?;
@@ -298,6 +312,7 @@ pub async fn sync_folder(
                     preview: String::new(),
                     body: String::new(),
                     auth_results: String::new(),
+                    labels: extract_gmail_labels(fetch),
                     attachments: Vec::new(),
                 };
                 result.new_emails.push(env);
@@ -379,17 +394,97 @@ pub async fn sync_folder(
         log::info!("sync_folder {}/{}: body fetch complete", account_id, local_folder);
     }
 
-    // Detect deleted messages: compare server UIDs with our local UID set
+    // Reconcile server UIDs with our local UID set: detect deletions AND
+    // backfill any UIDs the server still has that we don't. The backfill
+    // recovers from local data loss (crash mid-sync, or historical bugs that
+    // nuked rows) — without it, a gap-fill only happens when the user
+    // deletes sync state or bumps UIDVALIDITY.
     if !result.full_resync {
-        if !local_uids.is_empty() {
+        // Always query the full server UID list when we have prior state,
+        // even if local_uids is empty — that case is exactly when the local
+        // store was wiped and we need to recover.
+        let need_reconcile = prev_state.is_some() || !local_uids.is_empty();
+        if need_reconcile {
+            const GAP_FILL_CAP: usize = 200;
+
             let local_uid_set: HashSet<u32> = local_uids.iter().map(|(u, _)| *u).collect();
-            // Fetch current server UIDs (just UIDs, minimal bandwidth)
             let fetches: Vec<Fetch> = session.uid_fetch("1:*", "(UID)").await?.try_collect().await?;
             let server_uids: HashSet<u32> = fetches.iter().filter_map(|f| f.uid).collect();
 
             for uid in &local_uid_set {
                 if !server_uids.contains(uid) {
                     result.deleted_uids.push(*uid);
+                }
+            }
+
+            // Backfill: UIDs server has that we don't, and that we haven't
+            // already fetched in this pass (the UID-next range above covers
+            // fetch_from..*; exclude those to avoid double-work).
+            let already_fetched: HashSet<u32> = result.new_emails.iter().map(|e| e.uid).collect();
+            let mut missing: Vec<u32> = server_uids.iter()
+                .filter(|u| !local_uid_set.contains(u) && !already_fetched.contains(u))
+                .copied()
+                .collect();
+            if !missing.is_empty() {
+                missing.sort_unstable_by(|a, b| b.cmp(a)); // newest-first
+                if missing.len() > GAP_FILL_CAP {
+                    missing.truncate(GAP_FILL_CAP);
+                    log::warn!(
+                        "sync_folder {}/{}: {} missing UIDs exceeds cap; backfilling top {} by UID and deferring the rest",
+                        account_id, local_folder, missing.len() + GAP_FILL_CAP, GAP_FILL_CAP
+                    );
+                } else {
+                    log::info!(
+                        "sync_folder {}/{}: backfilling {} missing server UID(s)",
+                        account_id, local_folder, missing.len()
+                    );
+                }
+
+                // Batch envelope fetch for the missing UIDs.
+                let query = if is_gmail {
+                    "(UID FLAGS ENVELOPE X-GM-LABELS)"
+                } else {
+                    "(UID FLAGS ENVELOPE)"
+                };
+                for chunk in missing.chunks(100) {
+                    let range: Vec<String> = chunk.iter().map(|u| u.to_string()).collect();
+                    let range_str = range.join(",");
+                    match session.uid_fetch(&range_str, query).await {
+                        Ok(stream) => {
+                            let chunk_fetches: Vec<Fetch> = stream.try_collect().await.unwrap_or_default();
+                            for fetch in &chunk_fetches {
+                                if let Some(uid) = fetch.uid {
+                                    let envelope = parse_envelope(fetch);
+                                    result.new_emails.push(EnvelopeInfo {
+                                        uid,
+                                        from_name: envelope.0,
+                                        from_email: envelope.1,
+                                        to_list: envelope.2,
+                                        cc_list: envelope.3,
+                                        reply_to: envelope.4,
+                                        message_id: envelope.5,
+                                        subject: envelope.6,
+                                        date: envelope.7,
+                                        is_read: has_flag(fetch, Flag::Seen),
+                                        is_starred: has_flag(fetch, Flag::Flagged),
+                                        is_replied: has_flag(fetch, Flag::Answered),
+                                        has_attachment: envelope.8,
+                                        preview: String::new(),
+                                        body: String::new(),
+                                        auth_results: String::new(),
+                                        labels: extract_gmail_labels(fetch),
+                                        attachments: Vec::new(),
+                                    });
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "sync_folder {}/{}: gap-fill fetch failed for range {}: {}",
+                                account_id, local_folder, range_str, e
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -709,6 +804,43 @@ pub async fn append_to_mailbox(
 
 fn has_flag(fetch: &Fetch, flag: Flag<'_>) -> bool {
     fetch.flags().any(|f| f == flag)
+}
+
+/// Extract Gmail X-GM-LABELS as owned strings; empty Vec on non-Gmail or
+/// when the FETCH didn't request labels.
+///
+/// Labels returned as IMAP quoted-strings need unescaping: imap-proto's
+/// `quoted` parser uses nom's `escaped` combinator, which preserves
+/// `\\` and `\"` escape sequences in its output rather than decoding them.
+/// Without this pass, `\Important` comes through as `\\Important` (two
+/// backslashes) because Gmail quotes it on the wire as `"\\Important"`.
+fn extract_gmail_labels(fetch: &Fetch) -> Vec<String> {
+    fetch.gmail_labels()
+        .map(|labels| labels.iter().map(|c| unescape_imap_quoted(c)).collect())
+        .unwrap_or_default()
+}
+
+/// Reverse IMAP quoted-string escaping: `\\` → `\`, `\"` → `"`. Leaves
+/// unquoted/atom-parsed labels unchanged.
+fn unescape_imap_quoted(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                if next == '\\' || next == '"' {
+                    out.push(next);
+                    chars.next();
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn flag_to_str(flag: &Flag<'_>) -> String {

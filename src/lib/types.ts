@@ -92,6 +92,8 @@ export interface Email {
   draftData?: ComposeDraft;
   /** True while the email is being sent in the background (hidden from the drafts list). */
   isSending?: boolean;
+  /** User-visible labels (currently Gmail X-GM-LABELS sans internal markers). */
+  labels?: string[];
 }
 
 export interface Folder {

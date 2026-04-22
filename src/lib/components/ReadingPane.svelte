@@ -15,9 +15,12 @@
     onSaveAttachment?: (index: number, filename: string) => void;
     showAllHeaders?: boolean;
     multiSelectCount?: number;
+    /** Fired when a label chip is clicked. Parent uses this to route to a
+     *  label:<name> search query. */
+    onLabelClick?: (label: string) => void;
   }
 
-  let { email, loadingBody = false, darkMode = false, isJunk = false, focused = false, onFocus, onOpenAttachment, onSaveAttachment, showAllHeaders = $bindable(false), multiSelectCount = 0 }: Props = $props();
+  let { email, loadingBody = false, darkMode = false, isJunk = false, focused = false, onFocus, onOpenAttachment, onSaveAttachment, showAllHeaders = $bindable(false), multiSelectCount = 0, onLabelClick }: Props = $props();
 
   // ── Attachment context menu ──
   let attachMenu: { x: number; y: number; index: number; filename: string } | null = $state(null);
@@ -278,7 +281,16 @@
     <div class="email-content" bind:this={contentEl} class:pane-focused={focused}>
       <!-- Header -->
       <div class="email-header">
-        <h1 class="email-subject">{email.subject}</h1>
+        <div class="email-subject-row">
+          <h1 class="email-subject">{email.subject}</h1>
+          {#if email.labels && email.labels.length > 0}
+            <div class="email-labels" aria-label="Labels">
+              {#each email.labels as label (label)}
+                <button class="label-chip" type="button" onclick={() => onLabelClick?.(label)}>{label}</button>
+              {/each}
+            </div>
+          {/if}
+        </div>
 
         {#if showAllHeaders}
           <table class="all-headers">
@@ -467,13 +479,49 @@
     padding: 16px 32px;
   }
 
+  .email-subject-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
   .email-subject {
+    flex: 1 1 auto;
+    min-width: 0;
     font-size: 20px;
     font-weight: 600;
     line-height: 1.3;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    color: var(--text-primary);
+  }
+
+  .email-labels {
+    flex: 0 1 auto;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 4px;
+    overflow: hidden;
+  }
+  .label-chip {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: var(--bg-hover);
+    border: 1px solid var(--border-subtle);
+    cursor: pointer;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .label-chip:hover {
+    background: var(--bg-hover-strong, var(--bg-hover));
     color: var(--text-primary);
   }
 

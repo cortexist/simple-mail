@@ -9,7 +9,14 @@
       "Bash(grep:*)",
       "Bash(sort -t: -k3 -rn)",
       "Bash(find src -type f \\\\\\(-name *.tsx -o -name *.ts -o -name *.svelte \\\\\\))",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(curl -s https://crates.io/api/v1/crates/async-imap)",
+      "Bash(mkdir -p /tmp/ai-check)",
+      "Read(//tmp/**)",
+      "Bash(curl -sL https://static.crates.io/crates/async-imap/async-imap-0.11.2.crate)",
+      "Bash(tar xz *)",
+      "Bash(mkdir -p /tmp/ip-check)",
+      "Bash(curl -sL https://static.crates.io/crates/imap-proto/imap-proto-0.16.7.crate)"
     ]
   }
 }

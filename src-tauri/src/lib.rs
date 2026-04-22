@@ -153,6 +153,9 @@ pub struct Email {
     pub message_id: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub auth_results: String,
+    /// Display-side labels (currently Gmail X-GM-LABELS minus internal markers).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -729,6 +732,34 @@ struct MailSyncResult {
     errors: Vec<String>,
 }
 
+/// Replace the label set for `email_id` with `labels`, then apply Gmail's
+/// category labels to `is_focused` (Priority bucketing). User-pinned focus
+/// (`is_focused_manual = 1`) is never overridden.
+fn apply_email_labels(
+    conn: &rusqlite::Connection,
+    account_id: &str,
+    email_id: &str,
+    labels: &[String],
+) {
+    // Replace the per-message label set. Cheap on small label counts.
+    conn.execute(
+        "DELETE FROM email_labels WHERE email_id = ?1",
+        rusqlite::params![email_id],
+    ).ok();
+    for label in labels {
+        if label.is_empty() { continue; }
+        conn.execute(
+            "INSERT OR IGNORE INTO email_labels (account_id, email_id, label) VALUES (?1, ?2, ?3)",
+            rusqlite::params![account_id, email_id, label],
+        ).ok();
+    }
+
+    // Priority/Regular is applied centrally by the post-sync reclassifier
+    // (see `sync_mail`), which reads the now-populated email_labels rows and
+    // combines them with the sender heuristic. Doing it here too would race
+    // with that sweep.
+}
+
 #[tauri::command]
 async fn sync_mail(
     state: tauri::State<'_, AppState>,
@@ -785,6 +816,13 @@ async fn sync_mail(
         log::info!("  remote folder: \"{}\" → mapped=\"{}\"", rname, mapped);
     }
 
+    // Detect Gmail so we can request X-GM-LABELS during envelope FETCH and
+    // surface labels as chips in the reading pane.
+    let is_gmail = imap_client::detect_gmail(&mut session).await;
+    if is_gmail {
+        log::info!("sync_mail [{}]: server advertises X-GM-EXT-1; will fetch X-GM-LABELS", account_id);
+    }
+
     let mut total_new = 0usize;
     let mut total_deleted = 0usize;
     let mut total_flags = 0usize;
@@ -827,7 +865,7 @@ async fn sync_mail(
         log::info!("sync_mail [{}]: syncing local '{}' ↔ remote '{}'", account_id, local_id, imap_name);
 
         let sync_result = imap_client::sync_folder(
-            &mut session, prev_state, local_uids, &account_id, &imap_name, local_id,
+            &mut session, prev_state, local_uids, &account_id, &imap_name, local_id, is_gmail,
         )
         .await
         .map_err(|e| {
@@ -877,6 +915,7 @@ async fn sync_mail(
                         "UPDATE emails SET folder = ?1, is_read = ?2, is_starred = ?3 WHERE id = ?4",
                         rusqlite::params![local_id, env.is_read as i32, env.is_starred as i32, existing_id],
                     ).ok();
+                    apply_email_labels(&tx, &account_id, &existing_id, &env.labels);
                     sync_state::insert_imap_uid(&tx, &account_id, local_id, env.uid, &existing_id).ok();
                     continue;
                 }
@@ -933,6 +972,9 @@ async fn sync_mail(
                     ).ok();
                 }
 
+                // Persist Gmail labels and apply category → Priority mapping.
+                apply_email_labels(&tx, &account_id, &email_id, &env.labels);
+
                 // Auto-junk: move to junk if sender is blocked or auth hard-fails
                 if local_id == "inbox" {
                     let blocked = db::is_sender_blocked(&tx, &env.from_email, &account_id);
@@ -958,14 +1000,38 @@ async fn sync_mail(
                 let uid_map = sync_state::load_imap_uids(&tx, &account_id, local_id)
                     .unwrap_or_default();
 
-                for uid in &sync_result.deleted_uids {
-                    if let Some((_, email_id)) = uid_map.iter().find(|(u, _)| *u == *uid) {
-                        tx.execute("DELETE FROM emails WHERE id = ?1", rusqlite::params![email_id]).ok();
-                    }
-                    total_deleted += 1;
-                }
+                // Drop the per-folder UID mappings first so the "any other
+                // folder still has this email?" check below sees the correct
+                // state. Keeping `emails` rows whose Message-ID was re-parented
+                // to a different folder during this same sync (Gmail "Not Junk"
+                // → Primary) is the whole reason this ordering matters.
                 if !sync_result.deleted_uids.is_empty() {
                     sync_state::delete_imap_uids(&tx, &account_id, local_id, &sync_result.deleted_uids).ok();
+                }
+
+                for uid in &sync_result.deleted_uids {
+                    if let Some((_, email_id)) = uid_map.iter().find(|(u, _)| *u == *uid) {
+                        // Only remove the email row if no other folder still
+                        // has a UID mapping for it. This makes per-folder
+                        // deletion behave as "drop membership" — the row
+                        // stays alive for other folders to claim.
+                        let still_referenced: i64 = tx
+                            .query_row(
+                                "SELECT COUNT(*) FROM imap_uid_map WHERE email_id = ?1",
+                                rusqlite::params![email_id],
+                                |row| row.get(0),
+                            )
+                            .unwrap_or(0);
+                        if still_referenced == 0 {
+                            tx.execute("DELETE FROM emails WHERE id = ?1", rusqlite::params![email_id]).ok();
+                        } else {
+                            log::info!(
+                                "sync_mail [{}]: folder '{}' dropped UID {} for email {}; row retained ({} other folder(s) still reference it)",
+                                account_id, local_id, uid, email_id, still_referenced
+                            );
+                        }
+                    }
+                    total_deleted += 1;
                 }
 
                 for (uid, is_read, is_starred, is_replied) in &sync_result.flag_changes {
@@ -986,11 +1052,31 @@ async fn sync_mail(
         }
     }
 
-    // Reclassify inbox emails now that all folders (incl. sent recipients) are in the DB
+    // Reclassify inbox emails now that all folders (incl. sent recipients)
+    // and Gmail labels are in the DB. Priority signals from Gmail itself
+    // (`CATEGORY_PERSONAL`, `\Important`) win over our sender heuristic —
+    // they're generally more accurate and match what the user sees in
+    // Gmail web. Messages Gmail has classified into non-Primary categories
+    // go to Regular. Everything else falls through to the sender heuristic,
+    // which defaults to Regular for unknown senders (the conservative
+    // choice that keeps non-Gmail accounts' behavior unchanged).
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE emails SET is_focused = CASE
+               -- Gmail signals first (authoritative when present).
+               WHEN EXISTS (
+                 SELECT 1 FROM email_labels el
+                 WHERE el.email_id = emails.id
+                   AND el.label IN ('CATEGORY_PERSONAL', '\\Important')
+               ) THEN 1
+               WHEN EXISTS (
+                 SELECT 1 FROM email_labels el
+                 WHERE el.email_id = emails.id
+                   AND el.label IN ('CATEGORY_PROMOTIONS','CATEGORY_SOCIAL','CATEGORY_UPDATES','CATEGORY_FORUMS')
+               ) THEN 0
+
+               -- Sender heuristic for everything else
                WHEN lower(from_email) GLOB 'noreply*'
                  OR lower(from_email) GLOB 'no-reply*'
                  OR lower(from_email) GLOB 'no_reply*'
@@ -3766,6 +3852,7 @@ fn query_emails(conn: &Connection, account_id: &str) -> Vec<Email> {
         let (to_recipients, cc_recipients) = query_email_recipients(conn, &id);
         let photo_url = contact_photos.get(&fe.to_lowercase()).cloned();
         let attachments = query_email_attachments(conn, &id);
+        let labels = query_email_user_labels(conn, &id);
         Email {
             id,
             from: Contact { name: imap_client::decode_mime_header(&fn_), email: fe, initials: fi, color: fc, photo_url },
@@ -3787,9 +3874,61 @@ fn query_emails(conn: &Connection, account_id: &str) -> Vec<Email> {
             reply_to,
             message_id,
             auth_results,
+            labels,
         }
     })
     .collect()
+}
+
+/// Return user-visible labels for `email_id`, stripping IMAP / Gmail
+/// internal markers that would clutter the chip row in the reading pane.
+/// The leading `\` on any system marker that survives filtering (e.g.
+/// `\Important`) is dropped for display — chip text reads as `Important`,
+/// and a `label:Important` search still matches because the frontend
+/// compares against the same transformed list.
+fn query_email_user_labels(conn: &Connection, email_id: &str) -> Vec<String> {
+    let mut stmt = match conn.prepare(
+        "SELECT label FROM email_labels WHERE email_id = ?1 ORDER BY label"
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map(rusqlite::params![email_id], |row| row.get::<_, String>(0))
+        .map(|rows| rows
+            .filter_map(|r| r.ok())
+            .filter(|l| !is_internal_label(l))
+            .map(|l| l.trim_start_matches('\\').to_string())
+            .collect())
+        .unwrap_or_default()
+}
+
+/// True for Gmail / IMAP labels we never want to show as chips. This is an
+/// explicit hide-list rather than a "drop everything starting with `\`" rule:
+/// `\Important` is Gmail's orange-arrow importance marker, distinct from
+/// star/priority, and it belongs on the chip row. `\Starred` is hidden
+/// because we already surface star state visually. Folder-like system labels
+/// (`\Inbox`, `\Sent`, `\Drafts`, `\Trash`, `\Spam`) are already expressed
+/// by the folder pane. `CATEGORY_*` get consumed by the Priority mapping.
+fn is_internal_label(label: &str) -> bool {
+    matches!(label,
+        "\\Inbox"
+        | "\\Sent"
+        | "\\Draft"
+        | "\\Drafts"
+        | "\\Trash"
+        | "\\Spam"
+        | "\\Junk"
+        | "\\Muted"
+        | "\\Starred"
+        | "\\Flagged"
+        | "CATEGORY_PERSONAL"
+        | "CATEGORY_PROMOTIONS"
+        | "CATEGORY_SOCIAL"
+        | "CATEGORY_UPDATES"
+        | "CATEGORY_FORUMS"
+        | "CATEGORY_RESERVATIONS"
+        | "CATEGORY_PURCHASES"
+    )
 }
 
 fn query_email_attachments(conn: &Connection, email_id: &str) -> Vec<AttachmentEntry> {

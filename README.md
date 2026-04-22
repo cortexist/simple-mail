@@ -60,6 +60,10 @@ Highlights since late March 2026:
 - **Extra headers** fetch & display.
 - **Attachment context menu** for save / open.
 - **Autodiscover** improvements for mail server configuration.
+- **Gmail labels as chips.** When the server advertises `X-GM-EXT-1`, `X-GM-LABELS` is fetched alongside envelopes and surfaced as read-only chips under the subject line in the reading pane. Internal markers (`\Inbox`, `\Sent`, `\Important`, `\Starred`, `CATEGORY_*`) are filtered out — they duplicate state already expressed elsewhere.
+- **Gmail categories drive Priority bucketing.** Messages labeled `CATEGORY_PERSONAL` (Gmail's "Primary") land in Priority; `CATEGORY_PROMOTIONS` / `SOCIAL` / `UPDATES` / `FORUMS` go to Regular. Uncategorized messages keep the built-in heuristic. A manual Priority/Regular override by the user is never clobbered by a sync.
+- **Viewport-triggered preview prefetch.** Older envelope-only messages fetch their bodies in batches (anchor + 20 after / 10 before) as they scroll into view, so previews fill in without a huge upfront sync. Attachment-only messages with no text body are fetched once and recorded as such so they don't re-trigger on every session.
+- **Operator-aware search.** The search box accepts `from:alice`, `to:bob`, `subject:invoice`, `label:Work` (quote names with spaces: `label:"My Project"`), `is:read|unread|starred|replied|pinned|priority|regular`, and `has:attachment`. Bare words still match subject / sender / preview. Clauses AND-combine. Clicking a label chip in the reading pane populates the search with `label:<name>`.
 
 ### Calendar
 - Keyboard-driven event editing and navigation.
@@ -136,6 +140,29 @@ Gmail no longer accepts your regular Google password over IMAP/SMTP. Use an **Ap
    - Password: the 16-character app password (not your Google password)
 
 Gmail's `[Gmail]/All Mail` is intentionally not synced — on IMAP it contains every message in the account, including everything already visible in Inbox/Sent/Trash, so syncing it would duplicate the entire mailbox. This matches Thunderbird's default behavior. Messages you archived in Gmail web (removed from Inbox but kept only in All Mail) remain on the server and are reachable via the browser.
+
+**Labels.** Simple Mail treats Gmail labels as display-only chips on the message, not as folders in the sidebar. User labels show as clickable chips under the subject line in the reading pane; clicking a chip runs a `label:<name>` search. Gmail's own internal markers (`\Inbox`, `\Starred`, `\Important`, `CATEGORY_*`) are hidden since they already map to other UI state. Custom user labels are currently read-only — adding or removing labels from within Simple Mail is not yet supported.
+
+**Primary / Promotions / Social / Updates / Forums** are mapped to Simple Mail's Priority / Regular split: Primary → Priority, the other four → Regular. Uncategorized messages fall through to the built-in heuristic. If you manually change Priority/Regular on a message, your choice persists through syncs.
+
+## Search
+
+The search box in the command bar supports a small set of operators, AND-combined. Unknown tokens fall back to a subject / sender / preview substring match, so simple searches still work.
+
+| Operator | Example | Matches |
+|----------|---------|---------|
+| `from:` | `from:alice` | Sender name or email contains `alice` |
+| `to:` | `to:team@` | Any recipient (To or Cc) contains the value |
+| `subject:` | `subject:invoice` | Subject contains `invoice` |
+| `label:` | `label:Receipts` / `label:"My Project"` | Message has the given label (exact, case-insensitive) |
+| `is:` | `is:unread`, `is:starred`, `is:replied`, `is:pinned`, `is:priority`, `is:regular`, `is:read` | State flag check |
+| `has:` | `has:attachment` | Message has at least one attachment |
+
+Values with whitespace must be double-quoted. Example:
+
+```
+is:unread has:attachment from:amazon label:"Order Receipts"
+```
 
 ## Project Structure
 

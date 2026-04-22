@@ -206,6 +206,23 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         );
     ").ok();
 
+    // Per-message labels (Gmail X-GM-LABELS, possibly other servers later).
+    // Folders are still single-membership; labels are an orthogonal display
+    // attribute. Internal Gmail markers like \Inbox / CATEGORY_PERSONAL get
+    // stored verbatim and filtered at the read layer.
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS email_labels (
+            account_id TEXT NOT NULL,
+            email_id   TEXT NOT NULL,
+            label      TEXT NOT NULL,
+            PRIMARY KEY (email_id, label),
+            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+            FOREIGN KEY (email_id)   REFERENCES emails(id)   ON DELETE CASCADE
+        );
+    ").ok();
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_labels_email_id ON email_labels(email_id)", []).ok();
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_labels_label    ON email_labels(account_id, label)", []).ok();
+
     // Indexes — hot paths are "emails for this account+folder" and FK joins on email_id
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_account_folder ON emails(account_id, folder)", []).ok();
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_date ON emails(date)", []).ok();
@@ -315,7 +332,80 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // prefetch re-fetches them with the improved extractor.
     migrate_clear_spacer_previews(conn);
 
+    // Normalize double-escaped IMAP quoted-string labels stored before the
+    // unescape fix.
+    migrate_normalize_escaped_labels(conn);
+
     Ok(())
+}
+
+/// One-time: unescape IMAP quoted-string label values (e.g. `\\Important`
+/// → `\Important`) that were stored before we applied the fix at ingest.
+fn migrate_normalize_escaped_labels(conn: &Connection) {
+    let already: bool = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'labels_unescape_normalized'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    if already {
+        return;
+    }
+
+    let rows: Vec<(String, String, String)> = {
+        let mut stmt = match conn.prepare("SELECT account_id, email_id, label FROM email_labels") {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    };
+
+    let mut updated = 0usize;
+    for (account_id, email_id, label) in rows {
+        // Same logic as unescape_imap_quoted in imap_client.rs — kept
+        // local so this migration doesn't depend on that module.
+        if !label.contains('\\') { continue; }
+        let mut fixed = String::with_capacity(label.len());
+        let mut chars = label.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                if let Some(&next) = chars.peek() {
+                    if next == '\\' || next == '"' {
+                        fixed.push(next);
+                        chars.next();
+                        continue;
+                    }
+                }
+            }
+            fixed.push(c);
+        }
+        if fixed == label { continue; }
+
+        // DELETE old, INSERT new — can't UPDATE the PK column directly if
+        // the normalized form collides with an existing row for the same
+        // email_id (INSERT OR IGNORE handles that).
+        conn.execute(
+            "DELETE FROM email_labels WHERE email_id = ?1 AND label = ?2",
+            rusqlite::params![email_id, label],
+        ).ok();
+        conn.execute(
+            "INSERT OR IGNORE INTO email_labels (account_id, email_id, label) VALUES (?1, ?2, ?3)",
+            rusqlite::params![account_id, email_id, fixed],
+        ).ok();
+        updated += 1;
+    }
+
+    log::info!("migrate_normalize_escaped_labels: normalized {} label row(s)", updated);
+
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('labels_unescape_normalized', '1')",
+        [],
+    ).ok();
 }
 
 /// One-time: clear cached preview strings that contain fewer than three

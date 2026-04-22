@@ -60,6 +60,7 @@
   import { requestNotificationPermission, rebuildAlertQueue, clearAlertQueue } from '$lib/eventAlerts';
   import { networkActivity } from '$lib/networkActivity.svelte';
   import type { Email, NavItem, CalendarViewMode, ComposeMode, Theme, Account, CalendarEvent, FullContact, ComposeDraft, ContactList } from '$lib/types';
+  import { parseSearchQuery, emailMatchesQuery } from '$lib/searchQuery';
   import { setLocale, detectLocale, locale, LANGUAGE_NAMES } from '$lib/i18n/index.svelte';
 
   // ── Undo system ──────────────────────────────────────────
@@ -1054,15 +1055,11 @@
 
   let folderEmails = $derived(emails.filter((e) => e.folder === activeFolder && !e.isSending));
 
+  let parsedSearchClauses = $derived(parseSearchQuery(searchQuery));
   let filteredEmails = $derived(
-    searchQuery
-      ? folderEmails.filter(
-          (e) =>
-            e.subject.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            e.from.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            e.preview.toLowerCase().includes(searchQuery.toLowerCase())
-        )
-      : folderEmails
+    parsedSearchClauses.length === 0
+      ? folderEmails
+      : folderEmails.filter((e) => emailMatchesQuery(e, parsedSearchClauses))
   );
 
   let selectedEmail = $derived(emails.find((e) => e.id === selectedEmailId) ?? null);
@@ -1165,6 +1162,12 @@
     } finally {
       previewFetchesInFlight.delete(email.id);
     }
+  }
+
+  function handleLabelClick(label: string) {
+    // Route to operator-aware search. Quote labels that contain whitespace.
+    const value = /\s/.test(label) ? `"${label}"` : label;
+    searchQuery = `label:${value}`;
   }
 
   async function handleOpenAttachment(attachmentIndex: number) {
@@ -2276,7 +2279,7 @@
             {/key}
           {:else}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div style="display:contents" onmousedown={() => (focusedPane = 'reading')}><ReadingPane bind:this={readingPaneRef} email={selectedEmail} loadingBody={fetchingBodyId === selectedEmailId} darkMode={resolvedTheme === 'dark'} isJunk={activeFolder === 'junk'} focused={focusedPane === 'reading'} onFocus={() => (focusedPane = 'reading')} onOpenAttachment={handleOpenAttachment} onSaveAttachment={handleSaveAttachment} bind:showAllHeaders {multiSelectCount} /></div>
+            <div style="display:contents" onmousedown={() => (focusedPane = 'reading')}><ReadingPane bind:this={readingPaneRef} email={selectedEmail} loadingBody={fetchingBodyId === selectedEmailId} darkMode={resolvedTheme === 'dark'} isJunk={activeFolder === 'junk'} focused={focusedPane === 'reading'} onFocus={() => (focusedPane = 'reading')} onOpenAttachment={handleOpenAttachment} onSaveAttachment={handleSaveAttachment} bind:showAllHeaders {multiSelectCount} onLabelClick={handleLabelClick} /></div>
           {/if}
         {:else if activeNav === 'calendar'}
           <CalendarView
