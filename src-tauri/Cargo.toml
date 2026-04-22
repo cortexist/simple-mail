@@ -1,6 +1,6 @@
 [package]
 name = "simple-mail"
-version = "0.8.3"
+version = "0.9.0"
 description = "A privacy-focused desktop mail, calendar, and contacts client"
 authors = ["Cortexist, LLC"]
 edition = "2021"
