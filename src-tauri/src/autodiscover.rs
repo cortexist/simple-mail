@@ -603,7 +603,14 @@ fn extract_attr(e: &quick_xml::events::BytesStart, name: &str) -> Option<String>
     None
 }
 
-/// Expand a username template: replace %EMAILADDRESS%, %EMAILLOCALPART%, %EMAILDOMAIN%
+/// Expand a username template: replace %EMAILADDRESS%, %EMAILLOCALPART%, %EMAILDOMAIN%.
+///
+/// Currently unused — `ServerConfig.username_template` is parsed from autoconfig
+/// XML but not yet consumed when converting to `MailServerSettings`. Providers
+/// that default to `%EMAILADDRESS%` (most) work by accident; providers using
+/// `%EMAILLOCALPART%` (e.g. Fastmail variants) will fail login until this is
+/// wired into the settings conversion.
+#[allow(dead_code)]
 pub fn expand_username(template: &str, email: &str) -> String {
     let (local, domain) = if let Some(at) = email.rfind('@') {
         (&email[..at], &email[at + 1..])

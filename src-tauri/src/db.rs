@@ -236,15 +236,6 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Check whether an email address is on the ignore list.
-pub fn is_address_ignored(conn: &Connection, email: &str) -> bool {
-    conn.query_row(
-        "SELECT 1 FROM ignored_addresses WHERE email = ?1",
-        params![email.to_lowercase()],
-        |_| Ok(()),
-    ).is_ok()
-}
-
 /// Check whether a sender is blocked for a given account.
 /// Returns true if any block entry matches AND no allow entry matches.
 /// Supports exact matches and wildcard domain entries (e.g. *@domain.com).

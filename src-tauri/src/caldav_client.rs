@@ -1028,7 +1028,12 @@ fn resolve_url(base_url: &str, href: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), href)
 }
 
-/// Parse an iCalendar TRIGGER value (e.g. "-PT15M", "-PT1H", "PT0S", "-P1D") into minutes.
+/// Parse an iCalendar TRIGGER duration (e.g. `-PT15M`, `PT1H`, `PT0S`, `-P1D`)
+/// into the app's `alert_minutes` convention: **positive = minutes before the
+/// event** (see `eventAlerts.ts`, which subtracts `alertMinutes * 60000` from
+/// the event start). A leading `-` on the RFC 5545 duration means "before",
+/// so it maps to a positive value; unsigned / `+` means "after" and maps to
+/// a negative value.
 fn parse_trigger_to_minutes(val: &str) -> Option<i32> {
     let s = val.trim();
     let negative = s.starts_with('-');
@@ -1052,7 +1057,7 @@ fn parse_trigger_to_minutes(val: &str) -> Option<i32> {
             _ => {}
         }
     }
-    Some(total) // both -PT15M (15 min before) and PT0S (at time) resolve to the minute value
+    Some(if negative { total } else { -total })
 }
 
 /// Normalize CalDAV color values (may be #RRGGBBAA or other formats).

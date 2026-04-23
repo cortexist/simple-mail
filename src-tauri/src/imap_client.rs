@@ -598,43 +598,17 @@ pub async fn fetch_bodies_full_batch(
     Ok(results)
 }
 
-/// Fetch bodies for multiple UIDs at once (paged).
-pub async fn fetch_bodies_batch(
-    session: &mut ImapSession,
-    imap_folder: &str,
-    uids: &[u32],
-) -> Result<Vec<(u32, String)>> {
-    if uids.is_empty() { return Ok(Vec::new()); }
-
-    session.select(imap_folder).await?;
-
-    let mut results = Vec::with_capacity(uids.len());
-
-    // Fetch in chunks to avoid overwhelming the server
-    for chunk in uids.chunks(50) {
-        let uid_range: Vec<String> = chunk.iter().map(|u| u.to_string()).collect();
-        let range = uid_range.join(",");
-
-        let fetches: Vec<Fetch> = session.uid_fetch(&range, "UID BODY[]").await?.try_collect().await?;
-
-        for fetch in &fetches {
-            if let (Some(uid), Some(body)) = (fetch.uid, fetch.body()) {
-                let body_str = String::from_utf8_lossy(body).to_string();
-                let html = extract_html_body(&body_str);
-                results.push((uid, html));
-            }
-        }
-    }
-
-    Ok(results)
-}
-
 // ── IDLE for real-time push ─────────────────────────────
 
 /// Start IMAP IDLE on the given folder. Returns when the server sends
 /// an update (new mail, flag change, expunge). Caller should re-sync after.
 ///
 /// `timeout` is how long to IDLE before restarting (RFC recommends ≤29 min).
+///
+/// Currently unused — kept for the planned "real-time receive" feature (one
+/// long-lived IDLE session per prioritized account, falling back to periodic
+/// polling for the rest).
+#[allow(dead_code)]
 pub async fn idle_wait(
     mut session: ImapSession,
     imap_folder: &str,

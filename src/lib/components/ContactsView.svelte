@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { FullContact, ContactList, ContactListMember } from '$lib/types';
-  import { addIgnoredAddress, removeIgnoredAddress, getIgnoredAddresses, toggleContactFavorite } from '$lib/data/dataService';
+  import { toggleContactFavorite } from '$lib/data/dataService';
   import { t } from '$lib/i18n/index.svelte';
   import { isLikelyEmail } from '$lib/utils';
 
@@ -31,9 +31,13 @@
     selectedListId?: string;
     onSelectedListIdChange?: (id: string) => void;
     filteredContactsList?: FullContact[];
+    /** Global set of muted (ignored) email addresses, lowercased. Owned by the parent so all views stay in sync. */
+    mutedAddresses: Set<string>;
+    /** Toggle an address's muted state. Parent persists and updates the set. */
+    onToggleMute: (email: string) => void | Promise<void>;
   }
 
-  let { contacts, onSaveContact, onDeleteContact, onEmailContact, requestNewContact, requestNewContactList, requestEditContact, requestDeleteContact, onResetContactTriggers, onSelectedContactChange, contactLists = [], onSaveContactList, onDeleteContactList, onListModeChange, onToggleFavorite, onMeetContact, onCallContact, onFocusPaneChange, requestFocusPane = null, searchQuery = '', selectedContactId: selectedContactIdProp = '', onSelectedContactIdChange, selectedListId: selectedListIdProp = '', onSelectedListIdChange, filteredContactsList = $bindable([]) }: Props = $props();
+  let { contacts, onSaveContact, onDeleteContact, onEmailContact, requestNewContact, requestNewContactList, requestEditContact, requestDeleteContact, onResetContactTriggers, onSelectedContactChange, contactLists = [], onSaveContactList, onDeleteContactList, onListModeChange, onToggleFavorite, onMeetContact, onCallContact, onFocusPaneChange, requestFocusPane = null, searchQuery = '', selectedContactId: selectedContactIdProp = '', onSelectedContactIdChange, selectedListId: selectedListIdProp = '', onSelectedListIdChange, filteredContactsList = $bindable([]), mutedAddresses, onToggleMute }: Props = $props();
 
   let activeCategory = $state<'all' | 'lists'>('all');
   let selectedContactId = $state<string>(untrack(() => selectedContactIdProp));
@@ -42,13 +46,9 @@
   const navCategories: Array<'all' | 'lists'> = ['all', 'lists'];
   let favoritesExpanded = $state(true);
 
-  // Muted contacts
-  let mutedAddresses = $state<Set<string>>(new Set());
+  // Muted contacts — state lives in the parent and is passed in; these locals
+  // just adapt the shared set to per-contact checks and the toggle button.
   let showMuted = $state(false);
-
-  $effect(() => {
-    getIgnoredAddresses().then((addrs) => { mutedAddresses = new Set(addrs); });
-  });
 
   function isMuted(contact: FullContact): boolean {
     return mutedAddresses.has(contact.email.toLowerCase());
@@ -60,15 +60,8 @@
     onToggleFavorite?.(contact.id, newVal);
   }
 
-  async function toggleMute(contact: FullContact) {
-    const email = contact.email.toLowerCase();
-    if (mutedAddresses.has(email)) {
-      await removeIgnoredAddress(email);
-      mutedAddresses = new Set([...mutedAddresses].filter((a) => a !== email));
-    } else {
-      await addIgnoredAddress(email);
-      mutedAddresses = new Set([...mutedAddresses, email]);
-    }
+  function toggleMute(contact: FullContact) {
+    onToggleMute(contact.email.toLowerCase());
   }
 
   $effect(() => { onFocusPaneChange?.(focusedPane); });

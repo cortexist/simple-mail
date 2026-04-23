@@ -52,6 +52,9 @@
     removeFromSenderBlocklist,
     saveAttachment,
     getOfflineDownloadStatus,
+    addIgnoredAddress,
+    removeIgnoredAddress,
+    getIgnoredAddresses,
     type OutboundEmail,
   } from '$lib/data/dataService';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
@@ -117,6 +120,32 @@
   // Search-coverage indicator for the title bar. Populated per active account;
   // null when the account is fully indexed (or we haven't loaded yet).
   let offlineStatus = $state<{ enabled: boolean; totalCount: number; pendingCount: number } | null>(null);
+
+  // Ignored (muted) senders — global, app-wide. Mail list, reading pane, and
+  // Contacts view all filter by this set. Lowercased email strings.
+  let mutedAddresses = $state<Set<string>>(new Set());
+
+  async function refreshMutedAddresses() {
+    try {
+      const list = await getIgnoredAddresses();
+      mutedAddresses = new Set(list.map((a) => a.toLowerCase()));
+    } catch (err) {
+      console.error('Failed to read ignored addresses:', err);
+    }
+  }
+
+  async function toggleMuteAddress(email: string) {
+    const key = email.toLowerCase();
+    if (mutedAddresses.has(key)) {
+      await removeIgnoredAddress(key);
+      const next = new Set(mutedAddresses);
+      next.delete(key);
+      mutedAddresses = next;
+    } else {
+      await addIgnoredAddress(key);
+      mutedAddresses = new Set(mutedAddresses).add(key);
+    }
+  }
 
   async function refreshOfflineStatus() {
     if (!activeAccountId) { offlineStatus = null; return; }
@@ -345,6 +374,7 @@
 
   onMount(async () => {
     requestNotificationPermission();
+    refreshMutedAddresses();
 
     // Background offline-download worker emits batches of newly-downloaded
     // bodies. Merge them into the visible emails when they belong to the
@@ -1135,7 +1165,14 @@
     syncing = false;
   }
 
-  let folderEmails = $derived(emails.filter((e) => e.folder === activeFolder && !e.isSending));
+  // Ignored senders are hidden from the message list (drafts/sent stay
+  // visible even if you've muted yourself — the filter only applies to the
+  // sender on received mail).
+  let folderEmails = $derived(emails.filter((e) =>
+    e.folder === activeFolder &&
+    !e.isSending &&
+    !(e.folder !== 'sent' && e.folder !== 'drafts' && mutedAddresses.has(e.from.email.toLowerCase()))
+  ));
 
   let parsedSearchClauses = $derived(parseSearchQuery(searchQuery));
   let filteredEmails = $derived(
@@ -2407,6 +2444,8 @@
             <ContactsView
             bind:this={contactsViewRef}
             contacts={activeAccount.contacts}
+            {mutedAddresses}
+            onToggleMute={toggleMuteAddress}
             onSaveContact={handleSaveContact}
             onDeleteContact={handleDeleteContact}
             onEmailContact={handleEmailContact}
