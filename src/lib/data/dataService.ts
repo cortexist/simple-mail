@@ -7,6 +7,7 @@ import type { Account, Email, Theme } from '$lib/types';
 import { mockAccounts } from '$lib/data/mockData';
 import { incNetwork, decNetwork } from '$lib/networkActivity.svelte';
 import { buildSearchText } from '$lib/searchQuery';
+import { invoke as rawInvoke } from '@tauri-apps/api/core';
 
 // ── Tauri detection ─────────────────────────────────────
 
@@ -14,17 +15,11 @@ let invoke: ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) 
 
 async function getInvoke() {
   if (invoke) return invoke;
-  try {
-    const mod = await import('@tauri-apps/api/core');
-    const real = mod.invoke;
-    invoke = ((cmd: string, args?: Record<string, unknown>) => {
-      incNetwork();
-      return (real(cmd, args) as Promise<unknown>).finally(() => decNetwork());
-    }) as typeof real;
-    return invoke;
-  } catch {
-    return null;
-  }
+  invoke = ((cmd: string, args?: Record<string, unknown>) => {
+    incNetwork();
+    return (rawInvoke(cmd, args) as Promise<unknown>).finally(() => decNetwork());
+  }) as typeof rawInvoke;
+  return invoke;
 }
 
 function isTauri(): boolean {

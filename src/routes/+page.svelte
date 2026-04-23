@@ -58,6 +58,7 @@
     type OutboundEmail,
   } from '$lib/data/dataService';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { save as dialogSave } from '@tauri-apps/plugin-dialog';
   import { listen } from '@tauri-apps/api/event';
   import { onMount, onDestroy, untrack } from 'svelte';
@@ -911,7 +912,6 @@
 
   async function closeAppWindow() {
     try {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window');
       await getCurrentWindow().close();
     } catch {
       if (typeof window !== 'undefined') {

@@ -1,4 +1,5 @@
 use rusqlite::{Connection, Result, params};
+#[cfg(debug_assertions)]
 use chrono::Local;
 use crate::crypto;
 
@@ -726,6 +727,7 @@ fn migrate_encrypt_passwords(conn: &Connection) {
 }
 
 /// Returns true if there's data already seeded.
+#[cfg(debug_assertions)]
 pub fn is_seeded(conn: &Connection) -> Result<bool> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?;
     Ok(count > 0)
@@ -733,6 +735,7 @@ pub fn is_seeded(conn: &Connection) -> Result<bool> {
 
 /// Seed the database with all mock data.
 /// All dates are relative to "today" so the demo always looks fresh.
+#[cfg(debug_assertions)]
 pub fn seed(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 

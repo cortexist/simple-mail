@@ -8,6 +8,12 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [sveltekit()],
 
+  // Desktop app: bundle loads from disk, so the default 500 kB web-oriented
+  // warning threshold doesn't apply. Raise it to silence the noise.
+  build: {
+    chunkSizeWarningLimit: 1000,
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent vite from obscuring rust errors
