@@ -63,7 +63,9 @@ Highlights since late March 2026:
 - **Gmail labels as chips.** When the server advertises `X-GM-EXT-1`, `X-GM-LABELS` is fetched alongside envelopes and surfaced as read-only chips under the subject line in the reading pane. Internal markers (`\Inbox`, `\Sent`, `\Important`, `\Starred`, `CATEGORY_*`) are filtered out — they duplicate state already expressed elsewhere.
 - **Gmail categories drive Priority bucketing.** Messages labeled `CATEGORY_PERSONAL` (Gmail's "Primary") land in Priority; `CATEGORY_PROMOTIONS` / `SOCIAL` / `UPDATES` / `FORUMS` go to Regular. Uncategorized messages keep the built-in heuristic. A manual Priority/Regular override by the user is never clobbered by a sync.
 - **Viewport-triggered preview prefetch.** Older envelope-only messages fetch their bodies in batches (anchor + 20 after / 10 before) as they scroll into view, so previews fill in without a huge upfront sync. Attachment-only messages with no text body are fetched once and recorded as such so they don't re-trigger on every session.
-- **Operator-aware search.** The search box accepts `from:alice`, `to:bob`, `subject:invoice`, `label:Work` (quote names with spaces: `label:"My Project"`), `is:read|unread|starred|replied|pinned|priority|regular`, and `has:attachment`. Bare words still match subject / sender / preview. Clauses AND-combine. Clicking a label chip in the reading pane populates the search with `label:<name>`.
+- **Operator-aware search.** The search box accepts `from:alice`, `to:bob`, `subject:invoice`, `label:Work` (quote names with spaces: `label:"My Project"`), `is:read|unread|starred|replied|pinned|priority|regular`, and `has:attachment`. Bare words match subject, sender name/email, and full message body for downloaded messages. Clauses AND-combine. Clicking a label chip in the reading pane populates the search with `label:<name>`. An info icon next to the search box appears when the current account's body coverage is partial, explaining why some messages may be missed.
+- **Offline download (opt-in per account).** A low-priority background worker backfills every message body for an account until it's fully searchable, with a cancellation token that stops cleanly on toggle-off and never deletes already-downloaded content. Gated behind an app-wide storage quota (configured in Settings → General → Storage) so disk use is bounded. Per-account toggles live on each account's page.
+- **Muted senders.** Adding an address to the ignore list hides messages from that sender across the inbox and Contacts view. Toggle from the Contacts mute action; the list is app-wide.
 
 ### Calendar
 - Keyboard-driven event editing and navigation.
@@ -147,7 +149,7 @@ Gmail's `[Gmail]/All Mail` is intentionally not synced — on IMAP it contains e
 
 ## Search
 
-The search box in the command bar supports a small set of operators, AND-combined. Unknown tokens fall back to a subject / sender / preview substring match, so simple searches still work.
+The search box in the command bar supports a small set of operators, AND-combined. Unknown tokens and bare words fall back to a free-text substring match, so simple searches still work.
 
 | Operator | Example | Matches |
 |----------|---------|---------|
@@ -163,6 +165,23 @@ Values with whitespace must be double-quoted. Example:
 ```
 is:unread has:attachment from:amazon label:"Order Receipts"
 ```
+
+### Search coverage
+
+Free-text matches run against the **subject**, **sender name**, **sender email**, and the **full message body** — but the body is only checked for messages whose content has been downloaded. Envelope-only messages (older mail the client hasn't opened or prefetched) remain searchable on subject and sender only until their body arrives.
+
+Bodies are populated by three paths:
+
+- **On-demand** — opening a message in the reading pane fetches its body.
+- **Viewport prefetch** — as older envelope-only rows scroll into view, the client fetches their bodies in batches (anchor + 20 older / 10 newer) and their previews fill in.
+- **Offline download** — the background worker described above backfills every body on enabled accounts until the mailbox is fully indexed.
+
+For each downloaded body, the client builds a lowercased, HTML-stripped `searchText` (no DOM parse — regex-based for bulk indexing at account load) and caches it on the email. Free-text filtering then runs as plain `.includes()` across that cached string, so filtering tens of thousands of messages per keystroke stays cheap. Preview text is no longer matched separately — it's a strict prefix of `searchText` and would only produce redundant hits.
+
+The `i` icon next to the search box appears whenever the active account's coverage is partial:
+
+- Offline download is off → search covers subject/sender only.
+- Offline download is on but still running → `X of Y messages indexed` with the rest unlockable as they download.
 
 ## Project Structure
 
