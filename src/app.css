@@ -154,6 +154,15 @@ a {
 }
 
 /* ── Custom Tooltips (body-appended via JS) ── */
+
+/* SVGs inside tooltip triggers must be pointer-transparent. Otherwise moving
+   the cursor from empty button space onto a painted path fires pointerleave
+   on the button, hiding the bubble and restarting the 400ms show delay. */
+[data-tooltip] svg,
+[data-tooltip] svg * {
+  pointer-events: none;
+}
+
 .tooltip-bubble {
   position: fixed;
   z-index: 99999;

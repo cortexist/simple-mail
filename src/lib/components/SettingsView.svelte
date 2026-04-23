@@ -1297,6 +1297,9 @@
                 <span class="theme-label">{t('settings.system')}</span>
               </button>
             </div>
+
+            <div class="settings-section-spacer"></div>
+            
             <div class="color-grid">
               {#each ACCENT_COLORS as c (c.id)}
                 <button
@@ -2201,6 +2204,10 @@
     font-weight: 600;
     color: var(--text-primary);
     margin-bottom: 12px;
+  }
+
+  .settings-section-spacer {
+    height: 20px;
   }
 
   /* ── Theme picker ── */
