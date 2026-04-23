@@ -246,7 +246,7 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    max-width: 440px;
+    max-width: 380px;
     padding: 3px 10px;
     background: var(--bg-primary);
     border-radius: 5px;

@@ -6,6 +6,7 @@
 import type { Account, Email, Theme } from '$lib/types';
 import { mockAccounts } from '$lib/data/mockData';
 import { incNetwork, decNetwork } from '$lib/networkActivity.svelte';
+import { buildSearchText } from '$lib/searchQuery';
 
 // ── Tauri detection ─────────────────────────────────────
 
@@ -48,6 +49,7 @@ function hydrateAccountDates(account: Account): Account {
     emails: account.emails.map((e) => ({
       ...ensureFocusedFlag(e),
       date: new Date(e.date),
+      searchText: e.body ? buildSearchText(e.body) : undefined,
     })),
     calendarEvents: account.calendarEvents.map((ev) => ({
       ...ev,

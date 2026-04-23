@@ -68,7 +68,9 @@ function readValue(s: string, start: number): { value: string; next: number } {
  *   - label: case-insensitive exact match on any label
  *   - is: read | unread | starred | replied | pinned | priority | regular
  *   - has: attachment | attach
- *   - free-text: substring match across subject, from name/email, preview
+ *   - free-text: substring match across subject, from name/email, and the
+ *     body's pre-indexed `searchText`. Emails without a downloaded body are
+ *     only searchable on subject/sender until the body arrives.
  */
 export function emailMatchesQuery(email: Email, clauses: SearchClause[]): boolean {
   for (const c of clauses) {
@@ -78,17 +80,10 @@ export function emailMatchesQuery(email: Email, clauses: SearchClause[]): boolea
 }
 
 function matchesClause(email: Email, clause: SearchClause): boolean {
-  const v = clause.value.toLowerCase();
+  const v = clause.value.trim().toLowerCase();
   if (!v && clause.field !== '') return true; // empty operator value matches everything
 
   switch (clause.field) {
-    case '':
-      return (
-        email.subject.toLowerCase().includes(v) ||
-        email.from.name.toLowerCase().includes(v) ||
-        email.from.email.toLowerCase().includes(v) ||
-        email.preview.toLowerCase().includes(v)
-      );
     case 'from':
       return (
         email.from.name.toLowerCase().includes(v) ||
@@ -120,12 +115,41 @@ function matchesClause(email: Email, clause: SearchClause): boolean {
       if (v === 'label') return !!email.labels && email.labels.length > 0;
       return true;
     default:
-      // Unknown operator — fall through to free-text behavior on the value
-      // so the token isn't silently dropped.
-      return (
-        email.subject.toLowerCase().includes(v) ||
-        email.from.name.toLowerCase().includes(v) ||
-        email.preview.toLowerCase().includes(v)
-      );
+      // Free text (field === '') or unknown operator — match value across common fields.
+      return matchesFreeText(email, v);
   }
+}
+
+function matchesFreeText(email: Email, needle: string): boolean {
+  // `needle` is already lowercased by the caller.
+  // `searchText` is pre-lowercased and HTML-stripped; it's the full body text,
+  // so we don't also check `preview` (which is just a truncated slice of it).
+  return (
+    email.subject.toLowerCase().includes(needle) ||
+    email.from.name.toLowerCase().includes(needle) ||
+    email.from.email.toLowerCase().includes(needle) ||
+    (email.searchText !== undefined && email.searchText.includes(needle))
+  );
+}
+
+/**
+ * Build the lowercased, HTML-stripped body text cached on `Email.searchText`.
+ * Regex-based (no DOM) so it's cheap to run across thousands of emails at
+ * account-load time.
+ */
+export function buildSearchText(html: string): string {
+  if (!html) return '';
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(parseInt(d, 10)))
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }

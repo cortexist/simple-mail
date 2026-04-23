@@ -71,6 +71,8 @@ export interface Email {
   subject: string;
   preview: string;
   body: string;
+  /** Lowercased, HTML-stripped body text cached for free-text search. Populated when body is fetched; absent until then. */
+  searchText?: string;
   date: Date;
   isRead: boolean;
   isStarred: boolean;

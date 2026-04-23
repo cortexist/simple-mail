@@ -60,7 +60,7 @@
   import { requestNotificationPermission, rebuildAlertQueue, clearAlertQueue } from '$lib/eventAlerts';
   import { networkActivity } from '$lib/networkActivity.svelte';
   import type { Email, NavItem, CalendarViewMode, ComposeMode, Theme, Account, CalendarEvent, FullContact, ComposeDraft, ContactList } from '$lib/types';
-  import { parseSearchQuery, emailMatchesQuery } from '$lib/searchQuery';
+  import { parseSearchQuery, emailMatchesQuery, buildSearchText } from '$lib/searchQuery';
   import { setLocale, detectLocale, locale, LANGUAGE_NAMES } from '$lib/i18n/index.svelte';
 
   // ── Undo system ──────────────────────────────────────────
@@ -1118,6 +1118,7 @@
                 ? {
                     ...e,
                     body: result.body,
+                    searchText: buildSearchText(result.body),
                     preview: e.preview || result.preview,
                     authResults: result.authResults || e.authResults,
                     hasAttachment: result.hasAttachment ?? e.hasAttachment,
@@ -1148,9 +1149,11 @@
       emails = emails.map((e) => {
         const u = byId.get(e.id);
         if (!u) return e;
+        const nextBody = u.body || e.body;
         return {
           ...e,
-          body: u.body || e.body,
+          body: nextBody,
+          searchText: u.body ? buildSearchText(u.body) : e.searchText,
           preview: u.preview || e.preview,
           authResults: u.authResults ?? e.authResults,
           hasAttachment: u.hasAttachment ?? e.hasAttachment,
@@ -1493,6 +1496,7 @@
         subject: d.subject || '(No subject)',
         preview: stripHtmlPreview(d.body),
         body: d.body,
+        searchText: buildSearchText(d.body),
         hasAttachment: d.attachments.length > 0,
         date: new Date(),
         draftData: d,
