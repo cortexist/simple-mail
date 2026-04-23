@@ -3106,8 +3106,6 @@ async fn sync_contacts(
 
             // Insert new contacts — deduplicate by vCard UID across address books
             for contact in &new_contacts {
-                let contact_email = contact.emails.first().map(|e| e.email.to_lowercase()).unwrap_or_default();
-
                 // If we already synced a contact with this vCard UID from another
                 // address book, reuse the existing contact_id and skip the insert.
                 if let Some(existing_id) = synced_uids.get(&contact.uid) {
