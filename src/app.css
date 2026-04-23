@@ -12,7 +12,7 @@
   --bg-secondary: #f0f0f0;
   --bg-tertiary: #e3e3e3;
   --bg-nav: #f3f3f3;
-  --bg-hover: #d5d5d5;
+  --bg-hover: #bdbdbd;
   --bg-selected: #eff6fc;
   --bg-compose-btn: #0078d4;
 
@@ -93,7 +93,7 @@ a {
   --bg-secondary: #252525;
   --bg-tertiary: #2d2d2d;
   --bg-nav: #252525;
-  --bg-hover: #3a3a3a;
+  --bg-hover: #4f4e4e;
   --bg-selected: #1a3a4a;
   --bg-compose-btn: #4cc2ff;
 
@@ -166,12 +166,12 @@ a {
 .tooltip-bubble {
   position: fixed;
   z-index: 99999;
-  background: var(--bg-tertiary);
+  background: var(--bg-hover);
   color: var(--text-primary);
   font-size: 11px;
   font-weight: 400;
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: 8px;
   white-space: pre;
   max-width: none;
   box-shadow: 1px 1px 4px rgba(0, 0, 0, 0.2);
@@ -200,7 +200,7 @@ a {
   z-index: 99999;
   width: 0;
   height: 0;
-  border: 4px solid transparent;
+  border: solid transparent;
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.15s ease;
@@ -213,22 +213,25 @@ a {
 .tooltip-arrow[data-placement="bottom"],
 .tooltip-arrow[data-placement="bottom-start"],
 .tooltip-arrow[data-placement="bottom-end"] {
-  border-bottom-color: var(--bg-tertiary);
+  border-bottom-color: var(--bg-hover);
   filter: drop-shadow(0 -1px 1px rgba(0, 0, 0, 0.05));
+  border-width: 9px 4px;
 }
 
 .tooltip-arrow[data-placement="top"] {
-  border-top-color: var(--bg-tertiary);
+  border-top-color: var(--bg-hover);
   filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.05));
+  border-width: 9px 4px;
 }
 
 .tooltip-arrow[data-placement="right"] {
-  border-right-color: var(--bg-tertiary);
+  border-right-color: var(--bg-hover);
   filter: drop-shadow(-1px 0 1px rgba(0, 0, 0, 0.05));
+  border-width: 4px 9px;
 }
 
 .tooltip-arrow[data-placement="left"] {
-  border-left-color: var(--bg-tertiary);
+  border-left-color: var(--bg-hover);
   filter: drop-shadow(1px 0 1px rgba(0, 0, 0, 0.05));
 }
 

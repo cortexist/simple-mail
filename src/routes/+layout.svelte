@@ -52,39 +52,43 @@
 
       let bx: number, by: number, ax: number, ay: number;
       const gap = 8;
-      const arrowGap = 4;
+      // Arrow is a 0×0 div with border: 8px ⇒ 16×16 box; visible triangle is
+      // 8px deep. Offsetting by halfArrow from the element edge puts the tip
+      // on the edge and the base flush with the bubble (gap exactly fits).
+      const halfArrow = 8;
+      const arrowRatio = 0.5; // Arrow center is halfway across its base
 
       if (placement === 'top') {
         bx = rect.left + rect.width / 2 - bRect.width / 2;
         by = rect.top - gap - bRect.height;
-        ax = rect.left + rect.width / 2 - 4;
-        ay = rect.top - arrowGap - 8;
+        ax = rect.left + rect.width / 2 - halfArrow;
+        ay = rect.top - halfArrow;
       } else if (placement === 'right') {
         bx = rect.right + gap;
         by = rect.top + rect.height / 2 - bRect.height / 2;
-        ax = rect.right + arrowGap;
-        ay = rect.top + rect.height / 2 - 4;
+        ax = rect.right - halfArrow;
+        ay = rect.top + rect.height / 2 - halfArrow * arrowRatio;
       } else if (placement === 'left') {
         bx = rect.left - gap - bRect.width;
         by = rect.top + rect.height / 2 - bRect.height / 2;
-        ax = rect.left - arrowGap - 8;
-        ay = rect.top + rect.height / 2 - 4;
+        ax = rect.left;
+        ay = rect.top + rect.height / 2 - halfArrow * arrowRatio;
       } else if (placement === 'bottom-start') {
         bx = rect.left;
         by = rect.bottom + gap;
-        ax = rect.left + 10;
-        ay = rect.bottom + arrowGap;
+        ax = rect.left + 8;
+        ay = rect.bottom - halfArrow;
       } else if (placement === 'bottom-end') {
         bx = rect.right - bRect.width;
         by = rect.bottom + gap;
-        ax = rect.right - 10 - 8;
-        ay = rect.bottom + arrowGap;
+        ax = rect.right - 8 - halfArrow * 2;
+        ay = rect.bottom - halfArrow;
       } else {
         // bottom (default)
         bx = rect.left + rect.width / 2 - bRect.width / 2;
         by = rect.bottom + gap;
-        ax = rect.left + rect.width / 2 - 4;
-        ay = rect.bottom + arrowGap;
+        ax = rect.left + rect.width / 2 - halfArrow  * arrowRatio;
+        ay = rect.bottom - halfArrow;
       }
 
       // Clamp to viewport
