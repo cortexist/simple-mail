@@ -2373,7 +2373,7 @@
     {accounts}
     locale={locale()}
     languageNames={LANGUAGE_NAMES}
-    initialTab={requireAccountSetup ? 'accounts' : 'appearance'}
+    initialTab={requireAccountSetup ? 'accounts' : 'general'}
     requireAccount={requireAccountSetup}
     onChangeTheme={handleChangeTheme}
     onChangeAccentColor={handleChangeAccentColor}

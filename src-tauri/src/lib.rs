@@ -259,6 +259,9 @@ pub struct Account {
 pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
     pub dav_handle: Mutex<Option<dav_server::DavServerHandle>>,
+    /// Directory where the SQLite DB file lives. Used by the storage-quota
+    /// feature to query free disk space on the same volume.
+    pub storage_dir: std::path::PathBuf,
 }
 
 // ── Helpers ─────────────────────────────────────────────
@@ -343,6 +346,168 @@ fn set_setting(state: tauri::State<'_, AppState>, key: String, value: String) ->
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
         rusqlite::params![key, value],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ── Storage quota ───────────────────────────────────────
+//
+// App-wide: a single quota governs total body bytes stored in the one SQLite
+// DB. Per-account "offline download" toggles can only be enabled once the
+// quota is set, so this is the gate for the bulk-download feature.
+
+const STORAGE_QUOTA_MIN_BYTES: u64 = 100 * 1024 * 1024; // 100 MB
+const STORAGE_USED_OVERHEAD_NUM: u64 = 12; // pad body-byte sum by 20% to
+const STORAGE_USED_OVERHEAD_DEN: u64 = 10; // approximate SQLite page overhead
+
+fn offline_download_key(account_id: &str) -> String {
+    format!("offline_download_{}", account_id)
+}
+
+/// Returns disk-free / total / current-app-usage / configured-quota, plus the
+/// min/max bounds the UI should enforce on the quota slider. `maxQuotaBytes`
+/// is `floor(freeBytes / 2)`. `canEnable` is true iff max >= min, i.e. at
+/// least 200 MB free.
+#[tauri::command]
+fn get_storage_info(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    use fs4::available_space;
+
+    let free_bytes = available_space(&state.storage_dir)
+        .map_err(|e| format!("failed to read free disk space: {e}"))?;
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let used_raw: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(LENGTH(body)), 0) FROM emails",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let used_bytes = (used_raw.max(0) as u64)
+        .saturating_mul(STORAGE_USED_OVERHEAD_NUM)
+        / STORAGE_USED_OVERHEAD_DEN;
+
+    let quota_bytes: Option<u64> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'storage_quota_bytes'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let max_quota_bytes = free_bytes / 2;
+    let can_enable = max_quota_bytes >= STORAGE_QUOTA_MIN_BYTES;
+
+    Ok(serde_json::json!({
+        "freeBytes": free_bytes,
+        "usedBytes": used_bytes,
+        "quotaBytes": quota_bytes,
+        "minQuotaBytes": STORAGE_QUOTA_MIN_BYTES,
+        "maxQuotaBytes": max_quota_bytes,
+        "canEnable": can_enable,
+    }))
+}
+
+/// Set the app-wide storage quota in bytes. Pass 0 to clear the quota — this
+/// also disables every per-account offline-download toggle, since those
+/// require a quota to be set.
+///
+/// Validation (when `bytes > 0`):
+///   - `bytes >= STORAGE_QUOTA_MIN_BYTES` (100 MB)
+///   - `bytes <= free_space / 2` re-read at call time (don't trust the UI)
+#[tauri::command]
+fn set_storage_quota(state: tauri::State<'_, AppState>, bytes: u64) -> Result<(), String> {
+    use fs4::available_space;
+
+    if bytes == 0 {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM settings WHERE key = 'storage_quota_bytes'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        // Clearing the quota disables all per-account offline downloads so
+        // the invariant "offline download ⇒ quota set" holds at rest.
+        conn.execute(
+            "DELETE FROM settings WHERE key LIKE 'offline_download_%'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    if bytes < STORAGE_QUOTA_MIN_BYTES {
+        return Err(format!(
+            "Storage limit must be at least {} MB.",
+            STORAGE_QUOTA_MIN_BYTES / 1024 / 1024
+        ));
+    }
+    let free_bytes = available_space(&state.storage_dir)
+        .map_err(|e| format!("failed to read free disk space: {e}"))?;
+    let max_allowed = free_bytes / 2;
+    if bytes > max_allowed {
+        return Err(format!(
+            "Storage limit may not exceed 50% of free disk space ({} MB available).",
+            max_allowed / 1024 / 1024
+        ));
+    }
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_quota_bytes', ?1)",
+        rusqlite::params![bytes.to_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_account_offline_download(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+) -> Result<bool, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            rusqlite::params![offline_download_key(&account_id)],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(matches!(v.as_deref(), Some("1")))
+}
+
+/// Enable or disable offline download for one account. Enabling requires that
+/// an app-wide storage quota has been set — this mirrors the UI rule.
+#[tauri::command]
+fn set_account_offline_download(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    if enabled {
+        let has_quota: bool = conn
+            .query_row(
+                "SELECT 1 FROM settings WHERE key = 'storage_quota_bytes'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !has_quota {
+            return Err("Set a storage limit before enabling offline download.".to_string());
+        }
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        rusqlite::params![
+            offline_download_key(&account_id),
+            if enabled { "1" } else { "0" }
+        ],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -4709,13 +4874,17 @@ pub fn run() {
             }
 
             let db = Arc::new(Mutex::new(conn));
-            app.manage(AppState { db, dav_handle: Mutex::new(None) });
+            app.manage(AppState { db, dav_handle: Mutex::new(None), storage_dir });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_all_accounts,
             get_setting,
             set_setting,
+            get_storage_info,
+            set_storage_quota,
+            get_account_offline_download,
+            set_account_offline_download,
             update_account,
             add_account,
             delete_account,

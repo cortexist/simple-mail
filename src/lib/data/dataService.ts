@@ -140,6 +140,61 @@ export async function loadLocale(): Promise<string | null> {
   return loadSetting('locale');
 }
 
+// ── Storage quota ──────────────────────────────────────
+
+export interface StorageInfo {
+  /** Bytes free on the volume where the DB lives. */
+  freeBytes: number;
+  /** Body bytes stored across all emails (with a small overhead pad). */
+  usedBytes: number;
+  /** Configured app-wide quota; null when no limit is set. */
+  quotaBytes: number | null;
+  /** Floor on any quota value: 100 MB. */
+  minQuotaBytes: number;
+  /** Ceiling on any quota value: 50% of freeBytes (re-read at call time). */
+  maxQuotaBytes: number;
+  /** True iff maxQuotaBytes >= minQuotaBytes (i.e. at least 200 MB free). */
+  canEnable: boolean;
+}
+
+const WEB_FALLBACK_STORAGE: StorageInfo = {
+  freeBytes: 0,
+  usedBytes: 0,
+  quotaBytes: null,
+  minQuotaBytes: 100 * 1024 * 1024,
+  maxQuotaBytes: 0,
+  canEnable: false,
+};
+
+export async function getStorageInfo(): Promise<StorageInfo> {
+  if (!isTauri()) return WEB_FALLBACK_STORAGE;
+  const inv = await getInvoke();
+  if (!inv) return WEB_FALLBACK_STORAGE;
+  return (await inv('get_storage_info')) as StorageInfo;
+}
+
+/** Set the app-wide storage quota in bytes. Pass 0 to clear (also disables all per-account offline toggles). */
+export async function setStorageQuota(bytes: number): Promise<void> {
+  if (!isTauri()) return;
+  const inv = await getInvoke();
+  if (!inv) return;
+  await inv('set_storage_quota', { bytes });
+}
+
+export async function getAccountOfflineDownload(accountId: string): Promise<boolean> {
+  if (!isTauri()) return false;
+  const inv = await getInvoke();
+  if (!inv) return false;
+  return (await inv('get_account_offline_download', { accountId })) as boolean;
+}
+
+export async function setAccountOfflineDownload(accountId: string, enabled: boolean): Promise<void> {
+  if (!isTauri()) return;
+  const inv = await getInvoke();
+  if (!inv) return;
+  await inv('set_account_offline_download', { accountId, enabled });
+}
+
 /** Update an existing account (metadata only — name, email, initials, color, avatarUrl). */
 export async function updateAccount(account: Account): Promise<void> {
   if (!isTauri()) return;

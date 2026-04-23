@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { Account, MailServerSettings, CalDavSettings, CardDavSettings, Theme } from '$lib/types';
-  import { discoverMailSettings, startDavServer, stopDavServer, getDavServerStatus, addDavUser, removeDavUser, listDavUsers } from '$lib/data/dataService';
+  import { discoverMailSettings, startDavServer, stopDavServer, getDavServerStatus, addDavUser, removeDavUser, listDavUsers, getStorageInfo, setStorageQuota, getAccountOfflineDownload, setAccountOfflineDownload } from '$lib/data/dataService';
+  import type { StorageInfo } from '$lib/data/dataService';
   import { t } from '$lib/i18n/index.svelte';
   import { isLikelyEmail } from '$lib/utils';
   import type { DiscoveredConfig, ServerConfig } from '$lib/data/dataService';
@@ -12,7 +13,7 @@
     accounts: Account[];
     locale: string;
     languageNames: Record<string, string>;
-    initialTab?: 'appearance' | 'accounts';
+    initialTab?: 'general' | 'accounts';
     requireAccount?: boolean;
     onChangeTheme: (theme: Theme) => void;
     onChangeAccentColor: (colorId: string) => void;
@@ -31,7 +32,7 @@
     accounts,
     locale,
     languageNames,
-    initialTab = 'appearance',
+    initialTab = 'general',
     requireAccount = false,
     onChangeTheme,
     onChangeAccentColor,
@@ -54,7 +55,7 @@
     onReorderAccounts?.(reordered.map(a => a.id));
   }
 
-  let activeTab = $state<'appearance' | 'accounts' | 'sync-server'>('appearance');
+  let activeTab = $state<'general' | 'accounts' | 'sync-server'>('general');
   let didInitTab = false;
 
   // ── Account selection & form ──
@@ -233,6 +234,7 @@
     showAddForm = false;
     addFormError = '';
     accountFormError = '';
+    loadOfflineDownloadFor(account.id);
     autodiscoverState = 'idle';
     autodiscoverMessage = '';
     if (autodiscoverTimer) {
@@ -714,8 +716,8 @@
   let settingsFocus = $state<'tabs' | 'accounts'>('tabs');
   let settingsPanelEl = $state<HTMLDivElement | null>(null);
 
-  let tabOrder: ('appearance' | 'accounts' | 'sync-server')[] = $derived(
-    requireAccount ? ['accounts'] : ['appearance', 'accounts', 'sync-server']
+  let tabOrder: ('general' | 'accounts' | 'sync-server')[] = $derived(
+    requireAccount ? ['accounts'] : ['general', 'accounts', 'sync-server']
   );
 
   function handleSettingsKeydown(e: KeyboardEvent) {
@@ -727,7 +729,7 @@
     const keyS = e.key === 's' || e.key === 'S';
     const keyD = e.key === 'd' || e.key === 'D';
 
-    if (modCtrl && keyS && activeTab !== 'appearance') {
+    if (modCtrl && keyS && activeTab !== 'general') {
       e.preventDefault();
       saveFromHeader();
       return;
@@ -777,8 +779,127 @@
     }
   }
 
+  // ── Storage quota (General tab) ──
+  let storageInfo = $state<StorageInfo | null>(null);
+  let storageEditing = $state(false);
+  let storageDraftMB = $state(100);
+  let storageError = $state('');
+
+  function bytesToMB(n: number): number {
+    return Math.floor(n / (1024 * 1024));
+  }
+
+  function formatBytes(n: number): string {
+    if (n >= 1024 * 1024 * 1024) return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+    if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(0)} MB`;
+    if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+    return `${n} B`;
+  }
+
+  async function refreshStorageInfo() {
+    try {
+      storageInfo = await getStorageInfo();
+    } catch (err) {
+      console.error('Failed to read storage info:', err);
+    }
+  }
+
+  function beginEditStorage() {
+    if (!storageInfo) return;
+    storageError = '';
+    const minMB = bytesToMB(storageInfo.minQuotaBytes);
+    const maxMB = bytesToMB(storageInfo.maxQuotaBytes);
+    const curMB = storageInfo.quotaBytes ? bytesToMB(storageInfo.quotaBytes) : minMB;
+    storageDraftMB = Math.min(Math.max(curMB, minMB), maxMB);
+    storageEditing = true;
+  }
+
+  function cancelEditStorage() {
+    storageEditing = false;
+    storageError = '';
+  }
+
+  function clampStorageDraft() {
+    if (!storageInfo) return;
+    const minMB = bytesToMB(storageInfo.minQuotaBytes);
+    const maxMB = bytesToMB(storageInfo.maxQuotaBytes);
+    const n = Number(storageDraftMB);
+    if (!Number.isFinite(n)) {
+      storageDraftMB = minMB;
+    } else {
+      storageDraftMB = Math.min(Math.max(Math.round(n), minMB), maxMB);
+    }
+  }
+
+  async function saveStorageQuota() {
+    if (!storageInfo) return;
+    const minMB = bytesToMB(storageInfo.minQuotaBytes);
+    const maxMB = bytesToMB(storageInfo.maxQuotaBytes);
+    if (!Number.isFinite(storageDraftMB) || storageDraftMB < minMB || storageDraftMB > maxMB) {
+      storageError = t('settings.storageMaxHint', {
+        min: `${minMB} MB`,
+        max: `${maxMB} MB`,
+      });
+      return;
+    }
+    try {
+      await setStorageQuota(storageDraftMB * 1024 * 1024);
+      storageEditing = false;
+      storageError = '';
+      await refreshStorageInfo();
+    } catch (err) {
+      storageError = String(err);
+    }
+  }
+
+  async function clearStorageQuota() {
+    try {
+      await setStorageQuota(0);
+      storageEditing = false;
+      await refreshStorageInfo();
+      // Any in-memory offline-download checkbox bound to the current account
+      // is stale after a clear — re-sync it.
+      if (selectedAccountId) {
+        offlineDownloadEnabled = await getAccountOfflineDownload(selectedAccountId);
+      }
+    } catch (err) {
+      console.error('Failed to clear storage quota:', err);
+    }
+  }
+
+  // ── Per-account offline-download toggle ──
+  let offlineDownloadEnabled = $state(false);
+  let offlineDownloadBusy = $state(false);
+  let offlineDownloadDisabled = $derived(
+    offlineDownloadBusy || !storageInfo || storageInfo.quotaBytes == null
+  );
+
+  async function loadOfflineDownloadFor(accountId: string) {
+    try {
+      offlineDownloadEnabled = await getAccountOfflineDownload(accountId);
+    } catch (err) {
+      console.error('Failed to read offline-download setting:', err);
+      offlineDownloadEnabled = false;
+    }
+  }
+
+  async function toggleOfflineDownload(accountId: string, next: boolean) {
+    offlineDownloadBusy = true;
+    try {
+      await setAccountOfflineDownload(accountId, next);
+      offlineDownloadEnabled = next;
+    } catch (err) {
+      console.error('Failed to update offline-download setting:', err);
+      // Revert local flag if backend refused (e.g., no quota set).
+      offlineDownloadEnabled = !next;
+    } finally {
+      offlineDownloadBusy = false;
+    }
+  }
+
   onMount(() => {
-    // Focus first nav item (Appearance, or Accounts in requireAccount mode)
+    refreshStorageInfo();
+    // Focus first nav item (General, or Accounts in requireAccount mode)
     setTimeout(() => {
       settingsPanelEl?.querySelector<HTMLButtonElement>('.settings-nav-item')?.focus();
     }, 0);
@@ -811,15 +932,15 @@
       {#if !requireAccount}
         <button
           class="settings-nav-item"
-          class:selected={activeTab === 'appearance'}
-          class:active={settingsFocus === 'tabs' && activeTab === 'appearance'}
+          class:selected={activeTab === 'general'}
+          class:active={settingsFocus === 'tabs' && activeTab === 'general'}
           tabindex="-1"
-          onclick={() => { settingsFocus = 'tabs'; activeTab = 'appearance'; }}
+          onclick={() => { settingsFocus = 'tabs'; activeTab = 'general'; }}
         >
           <svg width="16" height="16" viewBox="0 0 24 24">
             <path fill="currentColor" d="M12.012 2.25c.734.008 1.465.093 2.182.253a.75.75 0 0 1 .582.649l.17 1.527a1.384 1.384 0 0 0 1.927 1.116l1.4-.615a.75.75 0 0 1 .85.174a9.8 9.8 0 0 1 2.205 3.792a.75.75 0 0 1-.272.825l-1.241.916a1.38 1.38 0 0 0 0 2.226l1.243.915a.75.75 0 0 1 .272.826a9.8 9.8 0 0 1-2.204 3.792a.75.75 0 0 1-.849.175l-1.406-.617a1.38 1.38 0 0 0-1.926 1.114l-.17 1.526a.75.75 0 0 1-.571.647a9.5 9.5 0 0 1-4.406 0a.75.75 0 0 1-.572-.647l-.169-1.524a1.382 1.382 0 0 0-1.925-1.11l-1.406.616a.75.75 0 0 1-.85-.175a9.8 9.8 0 0 1-2.203-3.796a.75.75 0 0 1 .272-.826l1.243-.916a1.38 1.38 0 0 0 0-2.226l-1.243-.914a.75.75 0 0 1-.272-.826a9.8 9.8 0 0 1 2.205-3.792a.75.75 0 0 1 .85-.174l1.4.615a1.387 1.387 0 0 0 1.93-1.118l.17-1.526a.75.75 0 0 1 .583-.65q1.074-.238 2.201-.252m0 1.5a9 9 0 0 0-1.354.117l-.11.977A2.886 2.886 0 0 1 6.526 7.17l-.899-.394A8.3 8.3 0 0 0 4.28 9.092l.797.587a2.88 2.88 0 0 1 .001 4.643l-.799.588c.32.842.776 1.626 1.348 2.322l.905-.397a2.882 2.882 0 0 1 4.017 2.318l.109.984c.89.15 1.799.15 2.688 0l.11-.984a2.88 2.88 0 0 1 4.018-2.322l.904.396a8.3 8.3 0 0 0 1.348-2.318l-.798-.588a2.88 2.88 0 0 1-.001-4.643l.797-.587a8.3 8.3 0 0 0-1.348-2.317l-.897.393a2.884 2.884 0 0 1-4.023-2.324l-.109-.976a9 9 0 0 0-1.334-.117M12 8.25a3.75 3.75 0 1 1 0 7.5a3.75 3.75 0 0 1 0-7.5m0 1.5a2.25 2.25 0 1 0 0 4.5a2.25 2.25 0 0 0 0-4.5"/>
           </svg>
-          {t('settings.appearance')}
+          {t('settings.general')}
         </button>
       {/if}
       <button
@@ -927,8 +1048,8 @@
     <div class="settings-content">
       <div class="settings-content-header">
         <h3 class="settings-content-title">
-          {#if activeTab === 'appearance'}
-            {t('settings.appearance')}
+          {#if activeTab === 'general'}
+            {t('settings.general')}
           {:else if activeTab === 'sync-server'}
             {t('settings.localSyncServer')}
           {:else if showAddForm}
@@ -1012,10 +1133,118 @@
       </div>
 
       <div class="settings-content-body">
-        {#if activeTab === 'appearance'}
-          <!-- ── Mode Section ── -->
+        {#if activeTab === 'general'}
+          <!-- ── Storage (top section) ── -->
           <section class="settings-section">
-            <h4 class="section-title">{t('settings.theme')}</h4>
+            <h4 class="section-title">{t('settings.storage')}</h4>
+            <p class="dav-description">{t('settings.storageDescription')}</p>
+
+            {#if storageInfo}
+              {@const info = storageInfo}
+              {@const effectiveQuota = storageEditing
+                ? storageDraftMB * 1024 * 1024
+                : (info.quotaBytes ?? 0)}
+              {@const total = Math.max(1, info.freeBytes + info.usedBytes)}
+              {@const usedPct = (info.usedBytes / total) * 100}
+              {@const reservedBytes = Math.max(0, effectiveQuota - info.usedBytes)}
+              {@const reservedPct = (reservedBytes / total) * 100}
+              {@const reservedEndPct = usedPct + reservedPct}
+              {@const freeUnreservedBytes = Math.max(0, info.freeBytes - reservedBytes)}
+
+              <div class="storage-layout">
+                <div
+                  class="storage-donut"
+                  style="--used-pct: {usedPct}%; --reserved-end: {reservedEndPct}%;"
+                  role="img"
+                  aria-label="Storage breakdown"
+                >
+                  <div class="storage-donut-hole">
+                    {#if info.quotaBytes != null || storageEditing}
+                      <div class="storage-donut-value">{formatBytes(effectiveQuota)}</div>
+                      <div class="storage-donut-label">{t('settings.storageLimit')}</div>
+                    {:else}
+                      <div class="storage-donut-label">{t('settings.storageNotSet')}</div>
+                    {/if}
+                  </div>
+                </div>
+
+                <div class="storage-legend">
+                  <div class="legend-row">
+                    <span class="legend-sw sw-used"></span>
+                    <span>{t('settings.storageLegendUsed', { size: formatBytes(info.usedBytes) })}</span>
+                  </div>
+                  {#if reservedBytes > 0}
+                    <div class="legend-row">
+                      <span class="legend-sw sw-reserved"></span>
+                      <span>{t('settings.storageLegendReserved', { size: formatBytes(reservedBytes) })}</span>
+                    </div>
+                  {/if}
+                  <div class="legend-row">
+                    <span class="legend-sw sw-free"></span>
+                    <span>{t('settings.storageLegendFree', { size: formatBytes(freeUnreservedBytes) })}</span>
+                  </div>
+                </div>
+              </div>
+
+              {#if !storageEditing}
+                <div class="storage-actions">
+                  {#if info.canEnable}
+                    <button class="btn" onclick={beginEditStorage}>
+                      {info.quotaBytes != null ? t('settings.storageChange') : t('settings.storageSet')}
+                    </button>
+                  {:else}
+                    <div class="autodiscover-note error">{t('settings.storageNotEnoughFree')}</div>
+                  {/if}
+                  {#if info.quotaBytes != null}
+                    <button class="btn btn-danger" onclick={clearStorageQuota}>{t('settings.storageClear')}</button>
+                  {/if}
+                </div>
+              {:else}
+                <div class="detail-form">
+                  <div class="storage-slider-row">
+                    <input
+                      class="storage-slider"
+                      type="range"
+                      min={bytesToMB(info.minQuotaBytes)}
+                      max={bytesToMB(info.maxQuotaBytes)}
+                      step="1"
+                      bind:value={storageDraftMB}
+                    />
+                    <span class="storage-slider-readout">
+                      <input
+                        class="storage-readout-input"
+                        type="number"
+                        min={bytesToMB(info.minQuotaBytes)}
+                        max={bytesToMB(info.maxQuotaBytes)}
+                        step="1"
+                        bind:value={storageDraftMB}
+                        onblur={clampStorageDraft}
+                        onkeydown={(e) => { if (e.key === 'Enter') { clampStorageDraft(); (e.currentTarget as HTMLInputElement).blur(); } }}
+                      />
+                      <span class="storage-readout-unit">MB</span>
+                    </span>
+                  </div>
+                  <div class="storage-hint">
+                    {t('settings.storageMaxHint', {
+                      min: formatBytes(info.minQuotaBytes),
+                      max: formatBytes(info.maxQuotaBytes),
+                    })}
+                  </div>
+                  {#if storageError}
+                    <div class="autodiscover-note error">{storageError}</div>
+                  {/if}
+                  <div class="storage-actions">
+                    <button class="btn btn-primary" onclick={saveStorageQuota}>{t('settings.storageSave')}</button>
+                    <button class="btn" onclick={cancelEditStorage}>{t('settings.storageCancel')}</button>
+                  </div>
+                </div>
+              {/if}
+            {/if}
+          </section>
+
+          <!-- ── Appearance (theme + accent color) ── -->
+          <section class="settings-section">
+            <h4 class="section-title">{t('settings.appearance')}</h4>
             <div class="theme-picker">
               <button
                 class="theme-option"
@@ -1068,11 +1297,6 @@
                 <span class="theme-label">{t('settings.system')}</span>
               </button>
             </div>
-          </section>
-
-          <!-- ── Color Theme Section ── -->
-          <section class="settings-section">
-            <h4 class="section-title">{t('settings.colorTheme')}</h4>
             <div class="color-grid">
               {#each ACCENT_COLORS as c (c.id)}
                 <button
@@ -1452,6 +1676,31 @@
                   <option value={60}>{t('settings.everyNMinutes', { n: 60 })}</option>
                 </select>
               </label>
+            </div>
+          </section>
+
+          <!-- Offline download toggle (per-account; requires app-wide storage quota) -->
+          <section class="settings-section">
+            <h4 class="section-title">{t('settings.offlineDownload')}</h4>
+            <p class="dav-description">{t('settings.offlineDownloadDesc')}</p>
+            <div class="detail-form">
+              <div class="form-row toggle-row">
+                <button
+                  type="button"
+                  class="toggle-switch"
+                  class:on={offlineDownloadEnabled}
+                  disabled={offlineDownloadDisabled}
+                  aria-pressed={offlineDownloadEnabled}
+                  aria-label={t('settings.offlineDownload')}
+                  onclick={() => selectedAccountId && toggleOfflineDownload(selectedAccountId, !offlineDownloadEnabled)}
+                >
+                  <span class="toggle-knob"></span>
+                </button>
+                <span class="form-label toggle-label">{t('settings.offlineDownload')}</span>
+              </div>
+              {#if !storageInfo || storageInfo.quotaBytes == null}
+                <div class="autodiscover-note">{t('settings.offlineDownloadRequiresQuota')}</div>
+              {/if}
             </div>
           </section>
 
@@ -2137,13 +2386,16 @@
     border-color: var(--accent);
   }
 
-  .port-input {
+  .form-input[type="number"],
+  .storage-readout-input[type="number"] {
     appearance: textfield;
     -moz-appearance: textfield;
   }
 
-  .port-input::-webkit-outer-spin-button,
-  .port-input::-webkit-inner-spin-button {
+  .form-input[type="number"]::-webkit-outer-spin-button,
+  .form-input[type="number"]::-webkit-inner-spin-button,
+  .storage-readout-input[type="number"]::-webkit-outer-spin-button,
+  .storage-readout-input[type="number"]::-webkit-inner-spin-button {
     -webkit-appearance: none;
     margin: 0;
   }
@@ -2369,6 +2621,185 @@
 
   .acct-photo-avatar:hover .acct-photo-overlay {
     opacity: 1;
+  }
+
+  /* Storage quota section */
+  .storage-layout {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    margin: 8px 0 12px 0;
+  }
+  .storage-donut {
+    --used-pct: 0%;
+    --reserved-end: 0%;
+    position: relative;
+    width: 120px;
+    height: 120px;
+    border-radius: 50%;
+    background: conic-gradient(
+      var(--accent) 0 var(--used-pct),
+      var(--accent-light) var(--used-pct) var(--reserved-end),
+      var(--border-light) var(--reserved-end) 100%
+    );
+    flex-shrink: 0;
+  }
+  .storage-donut-hole {
+    position: absolute;
+    inset: 18%;
+    border-radius: 50%;
+    background: var(--bg-primary);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 4px;
+  }
+  .storage-donut-value {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .storage-donut-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+  }
+  .storage-legend {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-primary);
+  }
+  .legend-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .legend-sw {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .sw-used { background: var(--accent); }
+  .sw-reserved { background: var(--accent-light); }
+  .sw-free { background: var(--border-light); }
+
+  .storage-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .storage-slider {
+    flex: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border-light);
+    outline: none;
+    cursor: pointer;
+  }
+  .storage-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: none;
+  }
+  .storage-slider::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: none;
+  }
+  .storage-slider-readout {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    min-width: 90px;
+    justify-content: flex-end;
+  }
+  .storage-readout-input {
+    width: 70px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border-light);
+    padding: 2px 0;
+    text-align: right;
+    outline: none;
+    font-family: inherit;
+  }
+  .storage-readout-input:focus {
+    border-bottom-color: var(--accent);
+  }
+  .storage-readout-unit {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .storage-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .storage-hint {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+  }
+  .toggle-row {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+  }
+  .toggle-label {
+    cursor: default;
+  }
+  .toggle-switch {
+    position: relative;
+    width: 32px;
+    height: 18px;
+    border-radius: 9px;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    background: var(--border);
+    flex-shrink: 0;
+    transition: background 0.15s;
+    outline: none;
+  }
+  .toggle-switch.on {
+    background: var(--accent);
+  }
+  .toggle-switch:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .toggle-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: white;
+    transition: transform 0.15s;
+    pointer-events: none;
+  }
+  .toggle-switch.on .toggle-knob {
+    transform: translateX(14px);
   }
 
   /* DAV server section */

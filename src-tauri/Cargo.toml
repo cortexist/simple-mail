@@ -69,3 +69,6 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 aes-gcm = "0.10.3"
 rand = "0.10.0"
 
+# Cross-platform disk free-space reader (for the storage-quota feature)
+fs4 = "0.8"
+
