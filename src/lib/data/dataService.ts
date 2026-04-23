@@ -195,6 +195,19 @@ export async function setAccountOfflineDownload(accountId: string, enabled: bool
   await inv('set_account_offline_download', { accountId, enabled });
 }
 
+export interface OfflineDownloadStatus {
+  enabled: boolean;
+  totalCount: number;
+  pendingCount: number;
+}
+
+export async function getOfflineDownloadStatus(accountId: string): Promise<OfflineDownloadStatus> {
+  if (!isTauri()) return { enabled: false, totalCount: 0, pendingCount: 0 };
+  const inv = await getInvoke();
+  if (!inv) return { enabled: false, totalCount: 0, pendingCount: 0 };
+  return (await inv('get_offline_download_status', { accountId })) as OfflineDownloadStatus;
+}
+
 /** Update an existing account (metadata only — name, email, initials, color, avatarUrl). */
 export async function updateAccount(account: Account): Promise<void> {
   if (!isTauri()) return;

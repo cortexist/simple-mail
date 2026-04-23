@@ -37,7 +37,9 @@
       if (!text) { hide(); return; }
 
       const placement = target.getAttribute('data-tooltip-position') || 'bottom';
+      const wide = target.hasAttribute('data-tooltip-wide');
       bubble.textContent = text;
+      bubble.classList.toggle('wide', wide);
       arrow.setAttribute('data-placement', placement);
 
       // Measure after setting text

@@ -8,6 +8,7 @@ mod caldav_client;
 mod carddav_client;
 mod autodiscover;
 pub mod dav_server;
+mod offline_download;
 
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
@@ -262,6 +263,9 @@ pub struct AppState {
     /// Directory where the SQLite DB file lives. Used by the storage-quota
     /// feature to query free disk space on the same volume.
     pub storage_dir: std::path::PathBuf,
+    /// Cancellation tokens for the per-account offline-download workers.
+    /// Presence of a key ⇒ a worker is running.
+    pub offline_workers: Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>,
 }
 
 // ── Helpers ─────────────────────────────────────────────
@@ -412,29 +416,36 @@ fn get_storage_info(state: tauri::State<'_, AppState>) -> Result<serde_json::Val
 
 /// Set the app-wide storage quota in bytes. Pass 0 to clear the quota — this
 /// also disables every per-account offline-download toggle, since those
-/// require a quota to be set.
+/// require a quota to be set, and cancels any running workers.
 ///
 /// Validation (when `bytes > 0`):
 ///   - `bytes >= STORAGE_QUOTA_MIN_BYTES` (100 MB)
 ///   - `bytes <= free_space / 2` re-read at call time (don't trust the UI)
 #[tauri::command]
-fn set_storage_quota(state: tauri::State<'_, AppState>, bytes: u64) -> Result<(), String> {
+fn set_storage_quota(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    bytes: u64,
+) -> Result<(), String> {
     use fs4::available_space;
 
     if bytes == 0 {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "DELETE FROM settings WHERE key = 'storage_quota_bytes'",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
-        // Clearing the quota disables all per-account offline downloads so
-        // the invariant "offline download ⇒ quota set" holds at rest.
-        conn.execute(
-            "DELETE FROM settings WHERE key LIKE 'offline_download_%'",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
+        {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            conn.execute(
+                "DELETE FROM settings WHERE key = 'storage_quota_bytes'",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+            // Clearing the quota disables all per-account offline downloads so
+            // the invariant "offline download ⇒ quota set" holds at rest.
+            conn.execute(
+                "DELETE FROM settings WHERE key LIKE 'offline_download_%'",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        stop_all_offline_workers(&state);
         return Ok(());
     }
 
@@ -454,13 +465,64 @@ fn set_storage_quota(state: tauri::State<'_, AppState>, bytes: u64) -> Result<()
         ));
     }
 
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_quota_bytes', ?1)",
-        rusqlite::params![bytes.to_string()],
-    )
-    .map_err(|e| e.to_string())?;
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('storage_quota_bytes', ?1)",
+            rusqlite::params![bytes.to_string()],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // A quota increase may revive workers that had previously paused or
+    // exited because the old cap was hit. Respawn any enabled-but-inactive
+    // accounts.
+    restart_enabled_offline_workers(app, &state);
     Ok(())
+}
+
+/// Quick status snapshot for the per-account offline-download feature. Used
+/// by the Mail view to decide whether free-text search is complete or only
+/// covers subject/sender. Rows whose body is still `''` are pending; rows
+/// marked `' '` (our missing-sentinel) and any non-empty body count as done.
+#[tauri::command]
+fn get_offline_download_status(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+) -> Result<serde_json::Value, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    let enabled: bool = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            rusqlite::params![offline_download_key(&account_id)],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM emails WHERE account_id = ?1",
+            rusqlite::params![account_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    let pending: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM emails WHERE account_id = ?1 AND body = ''",
+            rusqlite::params![account_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    Ok(serde_json::json!({
+        "enabled": enabled,
+        "totalCount": total,
+        "pendingCount": pending,
+    }))
 }
 
 #[tauri::command]
@@ -480,37 +542,172 @@ fn get_account_offline_download(
 }
 
 /// Enable or disable offline download for one account. Enabling requires that
-/// an app-wide storage quota has been set — this mirrors the UI rule.
+/// an app-wide storage quota has been set — this mirrors the UI rule. The
+/// worker is spawned/cancelled synchronously with the setting change so the
+/// UI can trust the state at rest.
 #[tauri::command]
 fn set_account_offline_download(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
 
-    if enabled {
-        let has_quota: bool = conn
-            .query_row(
-                "SELECT 1 FROM settings WHERE key = 'storage_quota_bytes'",
-                [],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
-        if !has_quota {
-            return Err("Set a storage limit before enabling offline download.".to_string());
+        if enabled {
+            let has_quota: bool = conn
+                .query_row(
+                    "SELECT 1 FROM settings WHERE key = 'storage_quota_bytes'",
+                    [],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if !has_quota {
+                return Err("Set a storage limit before enabling offline download.".to_string());
+            }
         }
+
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                offline_download_key(&account_id),
+                if enabled { "1" } else { "0" }
+            ],
+        )
+        .map_err(|e| e.to_string())?;
     }
 
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-        rusqlite::params![
-            offline_download_key(&account_id),
-            if enabled { "1" } else { "0" }
-        ],
-    )
-    .map_err(|e| e.to_string())?;
+    if enabled {
+        start_offline_worker(app, &state, &account_id);
+    } else {
+        stop_offline_worker(&state, &account_id);
+    }
     Ok(())
+}
+
+// ── Offline-download worker lifecycle ───────────────────
+
+/// Spawn (or respawn) the worker for `account_id`. If one is already running,
+/// cancel it first so a stale token doesn't outlive the new worker.
+fn start_offline_worker(
+    app: tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+    account_id: &str,
+) {
+    let token = tokio_util::sync::CancellationToken::new();
+    {
+        let mut workers = match state.offline_workers.lock() {
+            Ok(w) => w,
+            Err(_) => return,
+        };
+        if let Some(old) = workers.remove(account_id) {
+            old.cancel();
+        }
+        workers.insert(account_id.to_string(), token.clone());
+    }
+    offline_download::spawn_worker(
+        app,
+        state.db.clone(),
+        state.storage_dir.clone(),
+        account_id.to_string(),
+        token,
+    );
+}
+
+fn stop_offline_worker(state: &tauri::State<'_, AppState>, account_id: &str) {
+    let Ok(mut workers) = state.offline_workers.lock() else { return };
+    if let Some(tok) = workers.remove(account_id) {
+        tok.cancel();
+    }
+}
+
+fn stop_all_offline_workers(state: &tauri::State<'_, AppState>) {
+    let Ok(mut workers) = state.offline_workers.lock() else { return };
+    for (_, tok) in workers.drain() {
+        tok.cancel();
+    }
+}
+
+/// Respawn workers for every account whose `offline_download_*` setting is
+/// "1". Called after a quota change, since quota increases may revive a
+/// worker that previously paused at the old cap.
+fn restart_enabled_offline_workers(app: tauri::AppHandle, state: &tauri::State<'_, AppState>) {
+    let ids = {
+        let Ok(conn) = state.db.lock() else { return };
+        let mut stmt = match conn.prepare(
+            "SELECT SUBSTR(key, LENGTH('offline_download_') + 1) FROM settings
+               WHERE key LIKE 'offline_download_%' AND value = '1'",
+        ) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0));
+        match rows {
+            Ok(r) => r.flatten().collect::<Vec<_>>(),
+            Err(_) => return,
+        }
+    };
+    for id in ids {
+        start_offline_worker(app.clone(), state, &id);
+    }
+}
+
+/// Startup-time resume: read enabled accounts from the DB and spawn workers
+/// for them. Unlike `restart_enabled_offline_workers` this doesn't use
+/// `AppState` (it hasn't been managed yet by the time setup hooks run — we
+/// take the same ingredients directly).
+fn resume_offline_workers(
+    app: tauri::AppHandle,
+    db: Arc<Mutex<Connection>>,
+    storage_dir: std::path::PathBuf,
+) {
+    let Ok(conn) = db.lock() else { return };
+
+    let has_quota: bool = conn
+        .query_row(
+            "SELECT 1 FROM settings WHERE key = 'storage_quota_bytes'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if !has_quota { return; }
+
+    let ids: Vec<String> = {
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT SUBSTR(key, LENGTH('offline_download_') + 1) FROM settings
+               WHERE key LIKE 'offline_download_%' AND value = '1'",
+        ) else { return };
+        let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else { return };
+        rows.flatten().collect()
+    };
+    drop(conn);
+
+    // The workers we spawn here need a cancellation token that we should
+    // also register in AppState once it's available. Since setup runs before
+    // `app.manage(...)`, the simplest ordering is: manage AppState first,
+    // then call this function with access to AppState. To keep the call site
+    // simple we look it up via State<'_, AppState>.
+    let state = match app.try_state::<AppState>() {
+        Some(s) => s,
+        None => {
+            log::warn!("resume_offline_workers: AppState not yet managed");
+            return;
+        }
+    };
+    for id in ids {
+        let token = tokio_util::sync::CancellationToken::new();
+        if let Ok(mut workers) = state.offline_workers.lock() {
+            workers.insert(id.clone(), token.clone());
+        }
+        offline_download::spawn_worker(
+            app.clone(),
+            db.clone(),
+            storage_dir.clone(),
+            id,
+            token,
+        );
+    }
 }
 
 #[tauri::command]
@@ -4874,7 +5071,17 @@ pub fn run() {
             }
 
             let db = Arc::new(Mutex::new(conn));
-            app.manage(AppState { db, dav_handle: Mutex::new(None), storage_dir });
+            app.manage(AppState {
+                db: db.clone(),
+                dav_handle: Mutex::new(None),
+                storage_dir: storage_dir.clone(),
+                offline_workers: Mutex::new(std::collections::HashMap::new()),
+            });
+
+            // Resume offline-download workers for any accounts that had the
+            // toggle enabled in a previous session — provided the app-wide
+            // quota is still set.
+            resume_offline_workers(app.handle().clone(), db.clone(), storage_dir.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -4885,6 +5092,7 @@ pub fn run() {
             set_storage_quota,
             get_account_offline_download,
             set_account_offline_download,
+            get_offline_download_status,
             update_account,
             add_account,
             delete_account,

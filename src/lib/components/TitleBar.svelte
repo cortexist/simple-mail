@@ -16,9 +16,12 @@
     onSelectAccount: (accountId: string) => void;
     onSearchTab?: () => void;
     onSearchEsc?: () => void;
+    /** When non-null, a clickable "i" icon appears next to the search box that
+     *  opens a callout explaining why search results are partial. */
+    searchInfoText?: string | null;
   }
 
-  let { activeNav, folderPaneVisible, onToggleFolderPane, searchQuery, onSearch, accounts, activeAccountId, onSelectAccount, onSearchTab, onSearchEsc }: Props = $props();
+  let { activeNav, folderPaneVisible, onToggleFolderPane, searchQuery, onSearch, accounts, activeAccountId, onSelectAccount, onSearchTab, onSearchEsc, searchInfoText = null }: Props = $props();
 
   let searchInputEl = $state<HTMLInputElement | undefined>();
 
@@ -113,6 +116,22 @@
             <line x1="6" y1="6" x2="18" y2="18" />
           </svg>
         </button>
+      {/if}
+      {#if searchInfoText}
+        <span
+          class="search-info"
+          role="img"
+          aria-label={searchInfoText}
+          data-tooltip={searchInfoText}
+          data-tooltip-position="bottom-end"
+          data-tooltip-wide
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="16" x2="12" y2="12" />
+            <line x1="12" y1="8" x2="12.01" y2="8" />
+          </svg>
+        </span>
       {/if}
     </div>
   </div>
@@ -292,6 +311,17 @@
   .search-clear:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  .search-info {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 2px;
+    color: var(--text-tertiary);
+  }
+  .search-info:hover {
+    color: var(--accent);
   }
 
   /* ── Right zone ── */

@@ -165,11 +165,21 @@ a {
   border-radius: 4px;
   white-space: pre;
   max-width: none;
-  box-shadow: var(--shadow-md);
+  box-shadow: 1px 1px 4px rgba(0, 0, 0, 0.2);
   border: 1px solid var(--border);
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.15s ease;
+}
+
+/* Wide/wrapping variant for long help text (targets set
+   `data-tooltip-wide` on the trigger; the layout copies it onto the bubble). */
+.tooltip-bubble.wide {
+  white-space: normal;
+  max-width: 280px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  text-align: left;
 }
 
 .tooltip-bubble.visible {

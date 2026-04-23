@@ -25,7 +25,9 @@
     "maximize": "Maximize",
     "restore": "Restore",
     "close": "Close",
-    "unread": "{count} unread"
+    "unread": "{count} unread",
+    "searchInfoDisabled": "Search only covers subjects and senders for this account. Enable \"Download all messages\" in account settings to search full message content.",
+    "searchInfoPending": "Search covers subjects, senders, and downloaded message bodies. {indexed} of {total} messages indexed so far — the rest will become searchable as they're downloaded."
   },
   "nav": {
     "mail": "Mail (Ctrl+F1)",
@@ -228,7 +230,6 @@
     "localSyncServer": "Local Sync Server",
     "localSync": "Local Sync",
     "newAccount": "New Account",
-    "general": "General",
     "firstName": "First Name",
     "lastName": "Last Name",
     "email": "Email",

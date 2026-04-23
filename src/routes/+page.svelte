@@ -51,6 +51,7 @@
     addToSenderBlocklist,
     removeFromSenderBlocklist,
     saveAttachment,
+    getOfflineDownloadStatus,
     type OutboundEmail,
   } from '$lib/data/dataService';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
@@ -61,7 +62,7 @@
   import { networkActivity } from '$lib/networkActivity.svelte';
   import type { Email, NavItem, CalendarViewMode, ComposeMode, Theme, Account, CalendarEvent, FullContact, ComposeDraft, ContactList } from '$lib/types';
   import { parseSearchQuery, emailMatchesQuery, buildSearchText } from '$lib/searchQuery';
-  import { setLocale, detectLocale, locale, LANGUAGE_NAMES } from '$lib/i18n/index.svelte';
+  import { setLocale, detectLocale, locale, LANGUAGE_NAMES, t } from '$lib/i18n/index.svelte';
 
   // ── Undo system ──────────────────────────────────────────
   type MailSingleUndo =
@@ -111,6 +112,57 @@
   let syncErrors = $state<string[]>([]);
   let syncTimerId: ReturnType<typeof setInterval> | null = null;
   let unlistenMailSent: (() => void) | null = null;
+  let unlistenOffline: (() => void) | null = null;
+
+  // Search-coverage indicator for the title bar. Populated per active account;
+  // null when the account is fully indexed (or we haven't loaded yet).
+  let offlineStatus = $state<{ enabled: boolean; totalCount: number; pendingCount: number } | null>(null);
+
+  async function refreshOfflineStatus() {
+    if (!activeAccountId) { offlineStatus = null; return; }
+    try {
+      offlineStatus = await getOfflineDownloadStatus(activeAccountId);
+    } catch (err) {
+      console.error('Failed to read offline-download status:', err);
+      offlineStatus = null;
+    }
+  }
+
+  // Throttle re-query from the event stream — batches can fire every few
+  // hundred ms during active download, we only need ~1 refresh/sec for the UI.
+  let offlineStatusTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleOfflineStatusRefresh() {
+    if (offlineStatusTimer) return;
+    offlineStatusTimer = setTimeout(() => {
+      offlineStatusTimer = null;
+      refreshOfflineStatus();
+    }, 1000);
+  }
+
+  // Refresh the offline status whenever the active account changes.
+  $effect(() => {
+    // Read the id so the effect depends on it.
+    activeAccountId;
+    refreshOfflineStatus();
+  });
+
+  /** Message for the title-bar info callout, or null to hide the icon. */
+  let searchInfoText = $derived.by<string | null>(() => {
+    if (activeNav !== 'mail') return null;
+    if (!offlineStatus) return null;
+    if (offlineStatus.totalCount === 0) return null;
+    if (!offlineStatus.enabled) {
+      return t('titleBar.searchInfoDisabled');
+    }
+    if (offlineStatus.pendingCount > 0) {
+      const indexed = offlineStatus.totalCount - offlineStatus.pendingCount;
+      return t('titleBar.searchInfoPending', {
+        indexed: String(indexed),
+        total: String(offlineStatus.totalCount),
+      });
+    }
+    return null;
+  });
   let lastSyncTime = new Map<string, number>(); // account id → last sync timestamp
 
   // Undo state (single-level per view)
@@ -293,6 +345,35 @@
 
   onMount(async () => {
     requestNotificationPermission();
+
+    // Background offline-download worker emits batches of newly-downloaded
+    // bodies. Merge them into the visible emails when they belong to the
+    // active account (bodies for other accounts live in SQLite and re-hydrate
+    // with searchText when the user switches to them).
+    unlistenOffline = await listen<{
+      accountId: string;
+      updates: Array<{ id: string; body: string; preview: string; hasAttachment: boolean; authResults: string }>;
+    }>('offline-bodies-updated', (event) => {
+      const { accountId, updates } = event.payload;
+      // Always refresh the search-coverage indicator — even for inactive
+      // accounts, in case the user switches back while downloads continue.
+      if (accountId === activeAccountId) scheduleOfflineStatusRefresh();
+
+      if (accountId !== activeAccountId) return;
+      const byId = new Map(updates.map((u) => [u.id, u]));
+      emails = emails.map((e) => {
+        const u = byId.get(e.id);
+        if (!u) return e;
+        return {
+          ...e,
+          body: u.body,
+          searchText: buildSearchText(u.body),
+          preview: u.preview || e.preview,
+          authResults: u.authResults || e.authResults,
+          hasAttachment: u.hasAttachment,
+        };
+      });
+    });
 
     globalKeyHandler = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
@@ -706,6 +787,7 @@
   onDestroy(() => {
     if (syncTimerId) clearInterval(syncTimerId);
     if (unlistenMailSent) unlistenMailSent();
+    if (unlistenOffline) unlistenOffline();
     if (globalKeyHandler) document.removeEventListener('keydown', globalKeyHandler, true);
     clearAlertQueue();
   });
@@ -2166,6 +2248,7 @@
     onSelectAccount={handleSelectAccount}
     onSearchTab={handleSearchTab}
     onSearchEsc={handleSearchEsc}
+    searchInfoText={searchInfoText}
   />
 
   <div class="app-body">
