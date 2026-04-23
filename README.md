@@ -159,12 +159,26 @@ The search box in the command bar supports a small set of operators, AND-combine
 | `label:` | `label:Receipts` / `label:"My Project"` | Message has the given label (exact, case-insensitive) |
 | `is:` | `is:unread`, `is:starred`, `is:replied`, `is:pinned`, `is:priority`, `is:regular`, `is:read` | State flag check |
 | `has:` | `has:attachment` | Message has at least one attachment |
+| `re:` | `re:^Re:`, `re:"\[ticket-\d+\]"` | JavaScript regex matched against subject, sender name/email, and body |
 
 Values with whitespace must be double-quoted. Example:
 
 ```
 is:unread has:attachment from:amazon label:"Order Receipts"
 ```
+
+### Regex search
+
+The `re:` operator takes a JavaScript regular expression (PCRE-ish syntax — the full [`RegExp`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp) grammar) and runs it over the same scope as free-text matching: subject, sender name, sender email, and the downloaded body. It's always case-insensitive. Invalid patterns and patterns longer than 200 characters match nothing (rather than polluting the result list).
+
+Combine it with other operators freely:
+
+```
+from:alice re:\bbudget\b
+is:unread re:"invoice|receipt"
+```
+
+Quote the pattern whenever it contains spaces or a `:`.
 
 ### Search coverage
 

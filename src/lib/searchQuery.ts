@@ -4,7 +4,13 @@ export interface SearchClause {
   /** Field name (lowercased) or empty string for free-text. */
   field: string;
   value: string;
+  /** Pre-compiled regex for `re:` clauses. null if the pattern was invalid
+      or exceeded the length cap; such clauses match nothing. */
+  regex?: RegExp | null;
 }
+
+/** Reject pathological patterns outright to bound worst-case ReDoS cost. */
+const MAX_REGEX_LENGTH = 200;
 
 /**
  * Tokenize a search query into clauses. Supports:
@@ -32,7 +38,9 @@ export function parseSearchQuery(input: string): SearchClause[] {
       const field = trimmed.slice(tokenStart, i).toLowerCase();
       i++; // consume ':'
       const value = readValue(trimmed, i);
-      clauses.push({ field, value: value.value });
+      const clause: SearchClause = { field, value: value.value };
+      if (field === 're') clause.regex = compileRegex(value.value);
+      clauses.push(clause);
       i = value.next;
     } else {
       const word = trimmed.slice(tokenStart, i);
@@ -41,6 +49,17 @@ export function parseSearchQuery(input: string): SearchClause[] {
   }
 
   return clauses;
+}
+
+/** Compile a user-supplied regex. Case-insensitive by default. Returns null
+    for invalid patterns or patterns over the length cap (clause matches nothing). */
+function compileRegex(pattern: string): RegExp | null {
+  if (!pattern || pattern.length > MAX_REGEX_LENGTH) return null;
+  try {
+    return new RegExp(pattern, 'i');
+  } catch {
+    return null;
+  }
 }
 
 /** Read a possibly-quoted value starting at `start`; return value and next index. */
@@ -114,10 +133,22 @@ function matchesClause(email: Email, clause: SearchClause): boolean {
       if (v === 'attachment' || v === 'attach') return email.hasAttachment === true;
       if (v === 'label') return !!email.labels && email.labels.length > 0;
       return true;
+    case 're':
+      return matchesRegex(email, clause.regex);
     default:
       // Free text (field === '') or unknown operator — match value across common fields.
       return matchesFreeText(email, v);
   }
+}
+
+function matchesRegex(email: Email, re: RegExp | null | undefined): boolean {
+  if (!re) return false; // Invalid or overlong pattern — match nothing.
+  return (
+    re.test(email.subject) ||
+    re.test(email.from.name) ||
+    re.test(email.from.email) ||
+    (email.searchText !== undefined && re.test(email.searchText))
+  );
 }
 
 function matchesFreeText(email: Email, needle: string): boolean {
