@@ -668,13 +668,6 @@
       <span class="contact-item-detail">{contact.jobTitle ?? contact.email}</span>
     </div>
     <div class="contact-hover-actions">
-      <button class="contact-hover-btn" class:selected={contact.isFavorite} tabindex="-1" aria-label="Favorite" data-tooltip={contact.isFavorite ? t('contacts.unfavorite') : t('contacts.favorite')} data-tooltip-position="bottom-end" onclick={(e) => { e.stopPropagation(); toggleFavorite(contact); }}>
-        {#if contact.isFavorite}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-        {:else}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-        {/if}
-      </button>
       <button class="contact-hover-btn" class:selected={isMuted(contact)} tabindex="-1" aria-label="Mute" data-tooltip={isMuted(contact) ? t('contacts.unmute') : t('contacts.mute')} data-tooltip-position="bottom-end" onclick={(e) => { e.stopPropagation(); toggleMute(contact); }}>
         {#if isMuted(contact)}
           <svg width="16" height="16" viewBox="0 0 16 16">
@@ -686,6 +679,13 @@
           </svg>
         {/if}
       </button>
+      <button class="contact-hover-btn" class:selected={contact.isFavorite} tabindex="-1" aria-label="Favorite" data-tooltip={contact.isFavorite ? t('contacts.unfavorite') : t('contacts.favorite')} data-tooltip-position="bottom-end" onclick={(e) => { e.stopPropagation(); toggleFavorite(contact); }}>
+        {#if contact.isFavorite}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        {:else}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        {/if}
+      </button>      
     </div>
   </div>
 {/snippet}
@@ -915,24 +915,6 @@
             {#if selectedContact.organization}
               <p class="contact-hero-company">{selectedContact.organization}</p>
             {/if}
-          </div>
-          <div class="contact-hero-actions">
-            <button class="hero-action-btn" class:favorited={selectedContact.isFavorite} aria-label="Favorite" data-tooltip={selectedContact.isFavorite ? t('contacts.removeFromFavorites') : t('contacts.addToFavorites')} onclick={() => toggleFavorite(selectedContact!)}>
-              {#if selectedContact.isFavorite}
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1">
-                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
-                </svg>
-              {:else}
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
-                </svg>
-              {/if}
-            </button>
-            <button class="hero-action-btn" aria-label={selectedContact.isReadOnly ? t('contacts.readOnly') : t('contacts.editContact')} data-tooltip={selectedContact.isReadOnly ? t('contacts.readOnly') : t('contacts.editContact')} onclick={() => openEditContact(selectedContact!)} disabled={selectedContact.isReadOnly}>
-              <svg width="18" height="18" viewBox="0 0 24 24">
-                <path fill="currentColor" d="M13.25 4a.75.75 0 0 1 0 1.5h-7A1.75 1.75 0 0 0 4.5 7.25v10.5c0 .966.784 1.75 1.75 1.75h10.5a1.75 1.75 0 0 0 1.75-1.75v-7a.75.75 0 0 1 1.5 0v7A3.25 3.25 0 0 1 16.75 21H6.25A3.25 3.25 0 0 1 3 17.75V7.25A3.25 3.25 0 0 1 6.25 4zm6.47-.78a.75.75 0 1 1 1.06 1.06L10.59 14.47L9 15l.53-1.59z"/>
-              </svg>
-            </button>
           </div>
         </div>
 
@@ -1709,7 +1691,7 @@
   }
 
   .contact-detail-card {
-    max-width: 560px;
+    max-width: 800px;
     padding: 24px;
   }
 
@@ -1789,15 +1771,6 @@
   .hero-action-btn:focus {
     background: var(--bg-hover);
     color: var(--text-primary);
-  }
-
-  .hero-action-btn.favorited {
-    color: var(--accent);
-  }
-
-  .hero-action-btn.favorited:hover,
-  .hero-action-btn.favorited:focus {
-    background: var(--bg-hover);
   }
 
   .hero-action-btn:disabled {

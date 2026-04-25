@@ -98,7 +98,7 @@
   }
 
   .nav-item.selected {
-    color: var(--accent-active);
+    color: var(--accent);
     background: var(--bg-selected);
   }
 

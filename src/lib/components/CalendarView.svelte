@@ -3052,8 +3052,9 @@
   }
 
   .search-list {
-    width: 320px;
-    min-width: 260px;
+    width: 25%;
+    min-width: 300px;
+    max-width: 500px;
     display: flex;
     flex-direction: column;
     background: var(--bg-secondary);
@@ -3160,10 +3161,9 @@
   .search-event-badges {
     display: flex;
     flex-direction: column;
-    align-items: flex-end;
-    align-content: flex-start;
     gap: 4px;
-    padding-right: 12px;
+    height: 100%;
+    padding: 5px;
   }
 
   .search-event-recur {
@@ -3228,7 +3228,6 @@
     overflow-y: auto;
     display: flex;
     align-items: flex-start;
-    justify-content: center;
   }
 
   .search-detail-color {
@@ -3240,6 +3239,7 @@
 
   .search-detail-card {
     width: 100%;
+    max-width: 800px;
     overflow: hidden;
   }
 

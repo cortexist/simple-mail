@@ -461,14 +461,15 @@
     padding: 0 4px;
     border-radius: 8px;
     background: var(--accent);
-    color: #bbb;
+    color: var(--text-on-accent);
     font-size: 10px;
     font-weight: 700;
     margin-left: -14px;
+    opacity: 0.6;
   }
 
   .tab-badge.active {
-    color: #fff;
+    opacity: 1;
   }
 
   .folder-title {

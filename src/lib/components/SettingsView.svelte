@@ -713,12 +713,42 @@
     }
   });
 
-  let activePanel = $state<'tabs' | 'accounts'>('tabs');
   let settingsPanelEl = $state<HTMLDivElement | null>(null);
 
-  let tabOrder: ('general' | 'accounts' | 'sync-server')[] = $derived(
-    requireAccount ? ['accounts'] : ['general', 'accounts', 'sync-server']
-  );
+  type NavItem =
+    | { kind: 'tab'; tab: 'general' | 'sync-server' }
+    | { kind: 'account'; accountId: string }
+    | { kind: 'add-account' };
+
+  let navOrder = $derived.by<NavItem[]>(() => {
+    const items: NavItem[] = [];
+    if (!requireAccount) items.push({ kind: 'tab', tab: 'general' });
+    for (const a of accounts) items.push({ kind: 'account', accountId: a.id });
+    items.push({ kind: 'add-account' });
+    if (!requireAccount) items.push({ kind: 'tab', tab: 'sync-server' });
+    return items;
+  });
+
+  function navIndexOfCurrent(): number {
+    if (selectedTab === 'general') return navOrder.findIndex(i => i.kind === 'tab' && i.tab === 'general');
+    if (selectedTab === 'sync-server') return navOrder.findIndex(i => i.kind === 'tab' && i.tab === 'sync-server');
+    if (showAddForm) return navOrder.findIndex(i => i.kind === 'add-account');
+    if (selectedAccountId) return navOrder.findIndex(i => i.kind === 'account' && i.accountId === selectedAccountId);
+    return -1;
+  }
+
+  function activateNavItem(item: NavItem) {
+    if (item.kind === 'tab') {
+      selectedTab = item.tab;
+    } else if (item.kind === 'account') {
+      selectedTab = 'accounts';
+      const acc = accounts.find(a => a.id === item.accountId);
+      if (acc) selectAccount(acc);
+    } else {
+      selectedTab = 'accounts';
+      openAddForm();
+    }
+  }
 
   function handleSettingsKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') { onClose(); return; }
@@ -755,27 +785,16 @@
 
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       e.preventDefault();
+      if (navOrder.length === 0) return;
+      const cur = navIndexOfCurrent();
       const down = e.key === 'ArrowDown';
-      if (activePanel === 'tabs') {
-        const curIdx = tabOrder.indexOf(selectedTab);
-        const nextIdx = down ? Math.min(curIdx + 1, tabOrder.length - 1) : Math.max(curIdx - 1, 0);
-        if (curIdx !== nextIdx) selectedTab = tabOrder[nextIdx];
-      } else if (activePanel === 'accounts' && selectedTab === 'accounts') {
-        if (accounts.length === 0) return;
-        const curIdx = accounts.findIndex(a => a.id === selectedAccountId);
-        const nextIdx = down ? Math.min(curIdx + 1, accounts.length - 1) : Math.max(curIdx - 1, 0);
-        if (curIdx !== nextIdx) selectAccount(accounts[nextIdx]);
+      let next: number;
+      if (cur < 0) {
+        next = down ? 0 : navOrder.length - 1;
+      } else {
+        next = down ? Math.min(cur + 1, navOrder.length - 1) : Math.max(cur - 1, 0);
       }
-    }
-
-    if (e.key === 'ArrowRight' && activePanel === 'tabs' && selectedTab === 'accounts' && accounts.length > 0) {
-      e.preventDefault();
-      activePanel = 'accounts';
-      if (!selectedAccountId) selectAccount(accounts[0]);
-    }
-    if (e.key === 'ArrowLeft' && activePanel === 'accounts') {
-      e.preventDefault();
-      activePanel = 'tabs';
+      if (next !== cur) activateNavItem(navOrder[next]);
     }
   }
 
@@ -933,9 +952,8 @@
         <button
           class="settings-nav-item"
           class:selected={selectedTab === 'general'}
-          class:active={activePanel === 'tabs' && selectedTab === 'general'}
           tabindex="-1"
-          onclick={() => { activePanel = 'tabs'; selectedTab = 'general'; }}
+          onclick={() => { selectedTab = 'general'; }}
         >
           <svg width="16" height="16" viewBox="0 0 24 24">
             <path fill="currentColor" d="M12.012 2.25c.734.008 1.465.093 2.182.253a.75.75 0 0 1 .582.649l.17 1.527a1.384 1.384 0 0 0 1.927 1.116l1.4-.615a.75.75 0 0 1 .85.174a9.8 9.8 0 0 1 2.205 3.792a.75.75 0 0 1-.272.825l-1.241.916a1.38 1.38 0 0 0 0 2.226l1.243.915a.75.75 0 0 1 .272.826a9.8 9.8 0 0 1-2.204 3.792a.75.75 0 0 1-.849.175l-1.406-.617a1.38 1.38 0 0 0-1.926 1.114l-.17 1.526a.75.75 0 0 1-.571.647a9.5 9.5 0 0 1-4.406 0a.75.75 0 0 1-.572-.647l-.169-1.524a1.382 1.382 0 0 0-1.925-1.11l-1.406.616a.75.75 0 0 1-.85-.175a9.8 9.8 0 0 1-2.203-3.796a.75.75 0 0 1 .272-.826l1.243-.916a1.38 1.38 0 0 0 0-2.226l-1.243-.914a.75.75 0 0 1-.272-.826a9.8 9.8 0 0 1 2.205-3.792a.75.75 0 0 1 .85-.174l1.4.615a1.387 1.387 0 0 0 1.93-1.118l.17-1.526a.75.75 0 0 1 .583-.65q1.074-.238 2.201-.252m0 1.5a9 9 0 0 0-1.354.117l-.11.977A2.886 2.886 0 0 1 6.526 7.17l-.899-.394A8.3 8.3 0 0 0 4.28 9.092l.797.587a2.88 2.88 0 0 1 .001 4.643l-.799.588c.32.842.776 1.626 1.348 2.322l.905-.397a2.882 2.882 0 0 1 4.017 2.318l.109.984c.89.15 1.799.15 2.688 0l.11-.984a2.88 2.88 0 0 1 4.018-2.322l.904.396a8.3 8.3 0 0 0 1.348-2.318l-.798-.588a2.88 2.88 0 0 1-.001-4.643l.797-.587a8.3 8.3 0 0 0-1.348-2.317l-.897.393a2.884 2.884 0 0 1-4.023-2.324l-.109-.976a9 9 0 0 0-1.334-.117M12 8.25a3.75 3.75 0 1 1 0 7.5a3.75 3.75 0 0 1 0-7.5m0 1.5a2.25 2.25 0 1 0 0 4.5a2.25 2.25 0 0 0 0-4.5"/>
@@ -945,23 +963,87 @@
       {/if}
       <button
         class="settings-nav-item"
-        class:selected={selectedTab === 'accounts'}
-        class:active={activePanel === 'tabs' && selectedTab === 'accounts'}
+        class:selected={selectedTab === 'accounts' && !selectedAccountId && !showAddForm}
         tabindex="-1"
-        onclick={() => { activePanel = 'tabs'; selectedTab = 'accounts'; }}
+        onclick={() => { selectedTab = 'accounts'; }}
       >
         <svg width="16" height="16" viewBox="0 0 24 24">
           <path fill="currentColor" d="M17.755 14a2.25 2.25 0 0 1 2.248 2.25v.575c0 .894-.32 1.759-.9 2.438c-1.57 1.833-3.957 2.738-7.103 2.738s-5.532-.905-7.098-2.74a3.75 3.75 0 0 1-.898-2.434v-.578A2.25 2.25 0 0 1 6.253 14zm0 1.5H6.252a.75.75 0 0 0-.75.75v.577c0 .535.192 1.053.54 1.46c1.253 1.469 3.22 2.214 5.957 2.214c2.739 0 4.706-.745 5.963-2.213a2.25 2.25 0 0 0 .54-1.463v-.576a.75.75 0 0 0-.748-.749M12 2.005a5 5 0 1 1 0 10a5 5 0 0 1 0-10m0 1.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 0 0 0-7"/>
         </svg>
         {t('settings.accounts')}
       </button>
+      {#each accounts as account, idx (account.id)}
+        <div
+          class="settings-nav-account-row"
+          class:selected={selectedTab === 'accounts' && selectedAccountId === account.id && !showAddForm}
+        >
+          <button
+            class="settings-nav-account-item"
+            tabindex="-1"
+            onclick={() => { selectedTab = 'accounts'; selectAccount(account); }}
+          >
+            <span class="account-avatar-sm" style="background: {account.color}">
+              {#if account.avatarUrl}
+                <img class="account-avatar-sm-img" src={account.avatarUrl} alt={account.name} />
+              {:else}
+                {account.initials}
+              {/if}
+            </span>
+            <div class="settings-nav-account-info">
+              <span class="settings-nav-account-name">{account.name}</span>
+              <span class="settings-nav-account-email">{account.email}</span>
+            </div>
+          </button>
+          {#if accounts.length > 1}
+            <div class="account-reorder">
+              <button
+                class="account-reorder-btn"
+                tabindex="-1"
+                disabled={idx === 0}
+                onclick={() => moveAccount(account.id, -1)}
+                data-tooltip={t('settings.moveUp')}
+                data-tooltip-position="bottom-end"
+                aria-label={t('settings.moveUp')}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="18 15 12 9 6 15" />
+                </svg>
+              </button>
+              <button
+                class="account-reorder-btn"
+                tabindex="-1"
+                disabled={idx === accounts.length - 1}
+                onclick={() => moveAccount(account.id, 1)}
+                data-tooltip={t('settings.moveDown')}
+                data-tooltip-position="bottom-end"
+                aria-label={t('settings.moveDown')}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+            </div>
+          {/if}
+        </div>
+      {/each}
+      <button
+        class="settings-nav-sub-item"
+        class:selected={selectedTab === 'accounts' && showAddForm}
+        tabindex="-1"
+        onclick={openAddForm}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+        {t('settings.addAccount')}
+      </button>
       {#if !requireAccount}
         <button
           class="settings-nav-item"
           class:selected={selectedTab === 'sync-server'}
-          class:active={activePanel === 'tabs' && selectedTab === 'sync-server'}
           tabindex="-1"
-          onclick={() => { activePanel = 'tabs'; selectedTab = 'sync-server'; }}
+          onclick={() => { selectedTab = 'sync-server'; }}
         >
           <svg width="16" height="16" viewBox="0 0 24 24">
             <path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2m-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39"/>
@@ -970,79 +1052,6 @@
         </button>
       {/if}
     </nav>
-
-    <!-- Accounts secondary sidebar (only when accounts tab active) -->
-    {#if selectedTab === 'accounts'}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="accounts-sidebar" onmousedown={() => (activePanel = 'accounts')}>
-        <div class="accounts-sidebar-header">
-          <span class="accounts-sidebar-title">{t('settings.accounts')}</span>
-          <button class="icon-action-btn" tabindex="-1" onclick={openAddForm} aria-label={t('settings.addAccount')} data-tooltip={t('settings.addAccount')}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-          </button>
-        </div>
-        <div class="accounts-sidebar-list">
-          {#each accounts as account, idx (account.id)}
-            <div
-              class="account-sidebar-row"
-              class:selected={selectedAccountId === account.id && !showAddForm}
-              class:active={activePanel === 'accounts' && selectedAccountId === account.id && !showAddForm}
-            >
-              <button
-                class="account-sidebar-item"
-                tabindex="-1"
-                onclick={() => selectAccount(account)}
-              >
-                <span class="account-avatar-sm" style="background: {account.color}">
-                  {#if account.avatarUrl}
-                    <img class="account-avatar-sm-img" src={account.avatarUrl} alt={account.name} />
-                  {:else}
-                    {account.initials}
-                  {/if}
-                </span>
-                <div class="account-sidebar-info">
-                  <span class="account-sidebar-name">{account.name}</span>
-                  <span class="account-sidebar-email">{account.email}</span>
-                </div>
-              </button>
-              {#if accounts.length > 1}
-                <div class="account-reorder">
-                  <button
-                    class="account-reorder-btn"
-                    tabindex="-1"
-                    disabled={idx === 0}
-                    onclick={() => moveAccount(account.id, -1)}
-                    data-tooltip={t('settings.moveUp')}
-                    data-tooltip-position="bottom-end"
-                    aria-label={t('settings.moveUp')}
-                  >
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                      <polyline points="18 15 12 9 6 15" />
-                    </svg>
-                  </button>
-                  <button
-                    class="account-reorder-btn"
-                    tabindex="-1"
-                    disabled={idx === accounts.length - 1}
-                    onclick={() => moveAccount(account.id, 1)}
-                    data-tooltip={t('settings.moveDown')}
-                    data-tooltip-position="bottom-end"
-                    aria-label={t('settings.moveDown')}
-                  >
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                      <polyline points="6 9 12 15 18 9" />
-                    </svg>
-                  </button>
-                </div>
-              {/if}
-            </div>
-          {/each}
-        </div>
-      </div>
-    {/if}
 
     <!-- Right content -->
     <div class="settings-content">
@@ -1881,13 +1890,14 @@
 
   /* ── Left Nav ── */
   .settings-nav {
-    width: 180px;
+    width: 270px;
     flex-shrink: 0;
     background: var(--bg-tertiary);
     border-right: 1px solid var(--border-light);
     display: flex;
     flex-direction: column;
     gap: 2px;
+    overflow-y: auto;
   }
 
   .settings-nav-title {
@@ -1923,6 +1933,7 @@
   .settings-nav-item.selected {
     color: var(--text-primary);
     background: var(--bg-selected);
+    border-left-color: var(--accent-active);
     font-weight: 600;
   }
 
@@ -1930,98 +1941,33 @@
     border-left-color: var(--accent);
   }
 
-  .settings-nav-item.active:not(:hover) {
-    border-left-color: var(--accent-active);
-  }
-
-  /* ── Accounts Sidebar (secondary bar) ── */
-  .accounts-sidebar {
-    width: 200px;
-    flex-shrink: 0;
-    background: var(--bg-secondary);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-
-  .accounts-sidebar-header {
-    display: flex;
-    align-items: center;
-    padding: 20px;
-    border-bottom: 1px solid var(--bg-secondary);
-    flex-shrink: 0;
-    gap: 8px;
-    background: var(--bg-tertiary);
-  }
-
-  .accounts-sidebar-title {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-secondary);
-    letter-spacing: 0.5px;
-  }
-
-  .icon-action-btn {
-    width: 24px;
-    height: 24px;
-    border-radius: 4px;
-    border: 1px solid var(--border-light);
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-    cursor: pointer;
-    font-size: 14px;
-    line-height: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background 0.1s, border-color 0.1s;
-  }
-
-  .icon-action-btn:hover {
-    background: var(--bg-hover);
-    border-color: var(--accent-hover);
-  }
-
-  .accounts-sidebar-list {
-    flex: 1;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    background-color: var(--bg-tertiary);
-  }
-
-  .account-sidebar-row {
+  /* ── Accounts sub-items (nested under Accounts) ── */
+  .settings-nav-account-row {
     display: flex;
     align-items: stretch;
     border-left: 4px solid transparent;
-    background-color: var(--bg-tertiary);
-    border-bottom: 1px solid var(--bg-secondary);
-    transition: background 0.1s;
+    transition: background 0.1s, border-color 0.1s;
   }
 
-  .account-sidebar-row:hover {
+  .settings-nav-account-row:hover {
     background: var(--bg-hover);
     border-left-color: var(--border-hover);
   }
 
-  .account-sidebar-row.selected {
+  .settings-nav-account-row.selected {
     background: var(--bg-selected);
-  }
-
-  .account-sidebar-row.selected:hover {
-    border-left-color: var(--accent);
-  }
-
-  .account-sidebar-row.active {
     border-left-color: var(--accent-active);
   }
 
-  .account-sidebar-item {
+  .settings-nav-account-row.selected:hover {
+    border-left-color: var(--accent);
+  }
+
+  .settings-nav-account-item {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px;
+    padding: 6px 8px 6px 32px;
     cursor: pointer;
     text-align: left;
     outline: none;
@@ -2036,13 +1982,12 @@
     justify-content: center;
     gap: 2px;
     padding-right: 4px;
-    opacity: 0;
+    opacity: 0.2;
     transition: opacity 0.1s;
   }
 
-  .account-sidebar-row:hover .account-reorder,
-  .account-sidebar-row.selected .account-reorder,
-  .account-sidebar-row.active .account-reorder {
+  .settings-nav-account-row:hover .account-reorder,
+  .settings-nav-account-row.selected .account-reorder {
     opacity: 1;
   }
 
@@ -2065,13 +2010,13 @@
   }
 
   .account-reorder-btn:disabled {
-    opacity: 0.3;
+    opacity: 0.4;
     cursor: default;
   }
 
   .account-avatar-sm {
-    width: 28px;
-    height: 28px;
+    width: 24px;
+    height: 24px;
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -2089,14 +2034,14 @@
     object-fit: cover;
   }
 
-  .account-sidebar-info {
+  .settings-nav-account-info {
     display: flex;
     flex-direction: column;
     gap: 1px;
     overflow: hidden;
   }
 
-  .account-sidebar-name {
+  .settings-nav-account-name {
     font-size: 12px;
     font-weight: 600;
     color: var(--text-primary);
@@ -2105,12 +2050,44 @@
     text-overflow: ellipsis;
   }
 
-  .account-sidebar-email {
+  .settings-nav-account-email {
     font-size: 11px;
     color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .settings-nav-sub-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 16px 7px 32px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    border-left: 4px solid transparent;
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+    cursor: pointer;
+    text-align: left;
+    outline: none;
+  }
+
+  .settings-nav-sub-item:hover {
+    background: var(--bg-hover);
+    border-left-color: var(--border-hover);
+    color: var(--text-primary);
+  }
+
+  .settings-nav-sub-item.selected {
+    color: var(--text-primary);
+    background: var(--bg-selected);
+    border-left-color: var(--accent-active);
+    font-weight: 600;
+  }
+
+  .settings-nav-sub-item.selected:hover {
+    border-left-color: var(--accent);
   }
 
   /* ── Right Content ── */

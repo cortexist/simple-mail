@@ -482,6 +482,7 @@
 
   /* ── Header ── */
   .email-header {
+    max-width: 1000px;
     display: flex;
     flex-direction: column;
     gap: 15px;
@@ -756,7 +757,9 @@
   .divider {
     border: none;
     border-top: 1px solid var(--border-light);
-    margin: 0 32px 12px 32px;
+    margin-left: 32px;
+    margin-bottom: 12px;
+    max-width: 940px;
   }
 
   /* ── Body ── */
@@ -767,6 +770,7 @@
     flex: 1;
     padding: 0 24px;
     min-height: 0;
+    max-width: 1080px;
   }
 
   .body-iframe {

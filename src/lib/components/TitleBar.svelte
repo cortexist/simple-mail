@@ -242,13 +242,13 @@
 
   .app-icon {
     flex-shrink: 0;
-    color: var(--accent-active);
+    color: var(--accent);
   }
 
   .app-name {
     font-size: 14px;
     font-weight: 600;
-    color: var(--accent-active);
+    color: var(--accent);
   }
 
   /* ── Center zone: search ── */
@@ -380,6 +380,10 @@
     box-shadow: var(--shadow-md, 0 4px 16px rgba(0, 0, 0, 0.18));
   }
 
+   .account-btn.active .unread-badge {
+     opacity: 1;
+   }
+
   .account-btn > .account-avatar {
     opacity: 0.2;
     transition: opacity 0.15s;
@@ -417,7 +421,7 @@
     min-width: 14px;
     height: 14px;
     padding: 0 3px;
-    background: var(--accent-active);
+    background: var(--accent);
     color: var(--text-on-accent);
     font-size: 9px;
     font-weight: 700;
@@ -426,6 +430,7 @@
     text-align: center;
     pointer-events: none;
     box-sizing: border-box;
+    opacity: 0.6;
   }
 
   /* ── Window controls ── */

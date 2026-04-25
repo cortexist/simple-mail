@@ -10,7 +10,7 @@
   /* Backgrounds */
   --bg-primary: #fafafa;
   --bg-secondary: #f0f0f0;
-  --bg-tertiary: #d8d8d8;
+  --bg-tertiary: #e8e7e7;
   --bg-nav: #f3f3f3;
   --bg-hover: #bdbdbd;
   --bg-selected: #eff6fc;
@@ -20,7 +20,7 @@
   --text-primary: #242424;
   --text-secondary: #616161;
   --text-tertiary: #909090;
-  --text-on-accent: #ffffff;
+  --text-on-accent: #000000;
   --text-tooltip: #000000;
 
   /* Borders */
