@@ -1094,7 +1094,7 @@
     padding: 2px 4px 2px 8px;
     background: var(--bg-tertiary);
     border: 1px solid var(--border-light);
-    border-radius: 12px;
+    border-radius: 6px;
     font-size: 12px;
     color: var(--text-primary);
     max-width: 200px;

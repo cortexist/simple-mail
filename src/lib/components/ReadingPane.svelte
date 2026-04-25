@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Email } from '$lib/types';
   import { formatFullDate } from '$lib/utils';
+  import { shouldForceSaveAs } from '$lib/utils/attachments';
   import { open } from '@tauri-apps/plugin-shell';
   import { locale, t } from '$lib/i18n/index.svelte';
 
@@ -23,17 +24,25 @@
   let { email, loadingBody = false, darkMode = false, isJunk = false, focused = false, onFocus, onOpenAttachment, onSaveAttachment, showAllHeaders = $bindable(false), multiSelectCount = 0, onLabelClick }: Props = $props();
 
   // ── Attachment context menu ──
-  let attachMenu: { x: number; y: number; index: number; filename: string } | null = $state(null);
+  let attachMenu: { x: number; y: number; index: number; filename: string; unsafe: boolean } | null = $state(null);
 
-  function openAttachMenu(e: MouseEvent, index: number, filename: string) {
+  function openAttachMenu(e: MouseEvent, index: number, filename: string, mimeType: string) {
     e.preventDefault();
-    attachMenu = { x: e.clientX, y: e.clientY, index, filename };
+    attachMenu = { x: e.clientX, y: e.clientY, index, filename, unsafe: shouldForceSaveAs(filename, mimeType) };
   }
 
   function closeAttachMenu() { attachMenu = null; }
 
+  function activateAttachment(index: number, filename: string, mimeType: string) {
+    if (shouldForceSaveAs(filename, mimeType)) {
+      onSaveAttachment?.(index, filename);
+    } else {
+      onOpenAttachment?.(index);
+    }
+  }
+
   function doOpenAttach() {
-    if (attachMenu) onOpenAttachment?.(attachMenu.index);
+    if (attachMenu && !attachMenu.unsafe) onOpenAttachment?.(attachMenu.index);
     closeAttachMenu();
   }
 
@@ -356,8 +365,8 @@
             {#each email.attachments as attachment (attachment.index)}
               <button
                 class="attachment-chip"
-                onclick={() => onOpenAttachment?.(attachment.index)}
-                oncontextmenu={(e) => openAttachMenu(e, attachment.index, attachment.filename)}
+                onclick={() => activateAttachment(attachment.index, attachment.filename, attachment.mimeType)}
+                oncontextmenu={(e) => openAttachMenu(e, attachment.index, attachment.filename, attachment.mimeType)}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
@@ -373,7 +382,7 @@
 
         {#if attachMenu}
           <div class="attach-context-menu" style="left: {attachMenu.x}px; top: {attachMenu.y}px;">
-            <button class="attach-menu-item" onclick={doOpenAttach}>{t('readingPane.attachOpen')}</button>
+            <button class="attach-menu-item" onclick={doOpenAttach} disabled={attachMenu.unsafe}>{t('readingPane.attachOpen')}</button>
             <button class="attach-menu-item" onclick={doSaveAttach}>{t('readingPane.attachSaveAs')}</button>
           </div>
         {/if}
@@ -510,7 +519,7 @@
     align-items: center;
     height: 20px;
     padding: 0 8px;
-    border-radius: 10px;
+    border-radius: 8px;
     font-size: 11px;
     font-weight: 500;
     color: var(--text-secondary);
@@ -734,8 +743,13 @@
     font-family: inherit;
   }
 
-  .attach-menu-item:hover {
+  .attach-menu-item:hover:not(:disabled) {
     background: var(--bg-hover);
+  }
+
+  .attach-menu-item:disabled {
+    color: color-mix(in srgb, var(--text-primary) 40%, transparent);
+    cursor: default;
   }
 
   /* ── Divider ── */
