@@ -377,7 +377,7 @@
   }
 
   .account-btn.active {
-    box-shadow: 3px 3px 6px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--shadow-md, 0 4px 16px rgba(0, 0, 0, 0.18));
   }
 
   .account-btn > .account-avatar {

@@ -549,8 +549,7 @@
     background: var(--bg-primary);
     border: 1px solid var(--border-light);
     border-radius: 6px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.12);
-    padding: 4px;
+    box-shadow: var(--shadow-md, 0 8px 32px rgba(0, 0, 0, 0.18));
     z-index: 100;
     min-width: 160px;
     max-height: 300px;

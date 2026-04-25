@@ -55,7 +55,7 @@
     onReorderAccounts?.(reordered.map(a => a.id));
   }
 
-  let activeTab = $state<'general' | 'accounts' | 'sync-server'>('general');
+  let selectedTab = $state<'general' | 'accounts' | 'sync-server'>('general');
   let didInitTab = false;
 
   // ── Account selection & form ──
@@ -211,10 +211,10 @@
   }
 
   function saveFromHeader() {
-    if (activeTab === 'accounts') {
+    if (selectedTab === 'accounts') {
       if (showAddForm) saveAdd();
       else if (selectedAccount) saveAccount();
-    } else if (activeTab === 'sync-server') {
+    } else if (selectedTab === 'sync-server') {
       saveLocalSync();
     }
   }
@@ -398,7 +398,7 @@
     const createdAccount = await onAddAccount({ name: addName, email: addForm.email, initials, color: addForm.color, avatarUrl: addForm.avatarUrl || undefined });
     showAddForm = false;
     selectAccount(createdAccount);
-    activeTab = 'accounts';
+    selectedTab = 'accounts';
     flashSaveSuccess(t('settings.accountAdded'));
   }
 
@@ -696,13 +696,13 @@
   // Auto-select first account when switching to accounts tab
   $effect(() => {
     if (!didInitTab) {
-      activeTab = requireAccount ? 'accounts' : initialTab;
+      selectedTab = requireAccount ? 'accounts' : initialTab;
       didInitTab = true;
       loadDavStatus();
-    } else if (requireAccount && activeTab !== 'accounts') {
-      activeTab = 'accounts';
+    } else if (requireAccount && selectedTab !== 'accounts') {
+      selectedTab = 'accounts';
     }
-    if (activeTab === 'accounts' && !selectedAccountId && !showAddForm && accounts.length > 0) {
+    if (selectedTab === 'accounts' && !selectedAccountId && !showAddForm && accounts.length > 0) {
       selectAccount(accounts[0]);
     }
   });
@@ -713,7 +713,7 @@
     }
   });
 
-  let settingsFocus = $state<'tabs' | 'accounts'>('tabs');
+  let activePanel = $state<'tabs' | 'accounts'>('tabs');
   let settingsPanelEl = $state<HTMLDivElement | null>(null);
 
   let tabOrder: ('general' | 'accounts' | 'sync-server')[] = $derived(
@@ -729,22 +729,22 @@
     const keyS = e.key === 's' || e.key === 'S';
     const keyD = e.key === 'd' || e.key === 'D';
 
-    if (modCtrl && keyS && activeTab !== 'general') {
+    if (modCtrl && keyS && selectedTab !== 'general') {
       e.preventDefault();
       saveFromHeader();
       return;
     }
-    if (modCtrl && keyD && activeTab === 'accounts' && selectedAccount && accounts.length > 1 && !showAddForm) {
+    if (modCtrl && keyD && selectedTab === 'accounts' && selectedAccount && accounts.length > 1 && !showAddForm) {
       e.preventDefault();
       confirmDelete(selectedAccount);
       return;
     }
-    if (!isEditing && e.key === 'Delete' && activeTab === 'accounts' && selectedAccount && accounts.length > 1 && !showAddForm) {
+    if (!isEditing && e.key === 'Delete' && selectedTab === 'accounts' && selectedAccount && accounts.length > 1 && !showAddForm) {
       e.preventDefault();
       confirmDelete(selectedAccount);
       return;
     }
-    if (e.altKey && !e.ctrlKey && !e.metaKey && keyS && activeTab === 'sync-server') {
+    if (e.altKey && !e.ctrlKey && !e.metaKey && keyS && selectedTab === 'sync-server') {
       e.preventDefault();
       if (e.shiftKey && davServerAddr) toggleDavServer();
       else if (!e.shiftKey && !davServerAddr) toggleDavServer();
@@ -756,11 +756,11 @@
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       e.preventDefault();
       const down = e.key === 'ArrowDown';
-      if (settingsFocus === 'tabs') {
-        const curIdx = tabOrder.indexOf(activeTab);
+      if (activePanel === 'tabs') {
+        const curIdx = tabOrder.indexOf(selectedTab);
         const nextIdx = down ? Math.min(curIdx + 1, tabOrder.length - 1) : Math.max(curIdx - 1, 0);
-        if (curIdx !== nextIdx) activeTab = tabOrder[nextIdx];
-      } else if (settingsFocus === 'accounts' && activeTab === 'accounts') {
+        if (curIdx !== nextIdx) selectedTab = tabOrder[nextIdx];
+      } else if (activePanel === 'accounts' && selectedTab === 'accounts') {
         if (accounts.length === 0) return;
         const curIdx = accounts.findIndex(a => a.id === selectedAccountId);
         const nextIdx = down ? Math.min(curIdx + 1, accounts.length - 1) : Math.max(curIdx - 1, 0);
@@ -768,14 +768,14 @@
       }
     }
 
-    if (e.key === 'ArrowRight' && settingsFocus === 'tabs' && activeTab === 'accounts' && accounts.length > 0) {
+    if (e.key === 'ArrowRight' && activePanel === 'tabs' && selectedTab === 'accounts' && accounts.length > 0) {
       e.preventDefault();
-      settingsFocus = 'accounts';
+      activePanel = 'accounts';
       if (!selectedAccountId) selectAccount(accounts[0]);
     }
-    if (e.key === 'ArrowLeft' && settingsFocus === 'accounts') {
+    if (e.key === 'ArrowLeft' && activePanel === 'accounts') {
       e.preventDefault();
-      settingsFocus = 'tabs';
+      activePanel = 'tabs';
     }
   }
 
@@ -932,10 +932,10 @@
       {#if !requireAccount}
         <button
           class="settings-nav-item"
-          class:selected={activeTab === 'general'}
-          class:active={settingsFocus === 'tabs' && activeTab === 'general'}
+          class:selected={selectedTab === 'general'}
+          class:active={activePanel === 'tabs' && selectedTab === 'general'}
           tabindex="-1"
-          onclick={() => { settingsFocus = 'tabs'; activeTab = 'general'; }}
+          onclick={() => { activePanel = 'tabs'; selectedTab = 'general'; }}
         >
           <svg width="16" height="16" viewBox="0 0 24 24">
             <path fill="currentColor" d="M12.012 2.25c.734.008 1.465.093 2.182.253a.75.75 0 0 1 .582.649l.17 1.527a1.384 1.384 0 0 0 1.927 1.116l1.4-.615a.75.75 0 0 1 .85.174a9.8 9.8 0 0 1 2.205 3.792a.75.75 0 0 1-.272.825l-1.241.916a1.38 1.38 0 0 0 0 2.226l1.243.915a.75.75 0 0 1 .272.826a9.8 9.8 0 0 1-2.204 3.792a.75.75 0 0 1-.849.175l-1.406-.617a1.38 1.38 0 0 0-1.926 1.114l-.17 1.526a.75.75 0 0 1-.571.647a9.5 9.5 0 0 1-4.406 0a.75.75 0 0 1-.572-.647l-.169-1.524a1.382 1.382 0 0 0-1.925-1.11l-1.406.616a.75.75 0 0 1-.85-.175a9.8 9.8 0 0 1-2.203-3.796a.75.75 0 0 1 .272-.826l1.243-.916a1.38 1.38 0 0 0 0-2.226l-1.243-.914a.75.75 0 0 1-.272-.826a9.8 9.8 0 0 1 2.205-3.792a.75.75 0 0 1 .85-.174l1.4.615a1.387 1.387 0 0 0 1.93-1.118l.17-1.526a.75.75 0 0 1 .583-.65q1.074-.238 2.201-.252m0 1.5a9 9 0 0 0-1.354.117l-.11.977A2.886 2.886 0 0 1 6.526 7.17l-.899-.394A8.3 8.3 0 0 0 4.28 9.092l.797.587a2.88 2.88 0 0 1 .001 4.643l-.799.588c.32.842.776 1.626 1.348 2.322l.905-.397a2.882 2.882 0 0 1 4.017 2.318l.109.984c.89.15 1.799.15 2.688 0l.11-.984a2.88 2.88 0 0 1 4.018-2.322l.904.396a8.3 8.3 0 0 0 1.348-2.318l-.798-.588a2.88 2.88 0 0 1-.001-4.643l.797-.587a8.3 8.3 0 0 0-1.348-2.317l-.897.393a2.884 2.884 0 0 1-4.023-2.324l-.109-.976a9 9 0 0 0-1.334-.117M12 8.25a3.75 3.75 0 1 1 0 7.5a3.75 3.75 0 0 1 0-7.5m0 1.5a2.25 2.25 0 1 0 0 4.5a2.25 2.25 0 0 0 0-4.5"/>
@@ -945,10 +945,10 @@
       {/if}
       <button
         class="settings-nav-item"
-        class:selected={activeTab === 'accounts'}
-        class:active={settingsFocus === 'tabs' && activeTab === 'accounts'}
+        class:selected={selectedTab === 'accounts'}
+        class:active={activePanel === 'tabs' && selectedTab === 'accounts'}
         tabindex="-1"
-        onclick={() => { settingsFocus = 'tabs'; activeTab = 'accounts'; }}
+        onclick={() => { activePanel = 'tabs'; selectedTab = 'accounts'; }}
       >
         <svg width="16" height="16" viewBox="0 0 24 24">
           <path fill="currentColor" d="M17.755 14a2.25 2.25 0 0 1 2.248 2.25v.575c0 .894-.32 1.759-.9 2.438c-1.57 1.833-3.957 2.738-7.103 2.738s-5.532-.905-7.098-2.74a3.75 3.75 0 0 1-.898-2.434v-.578A2.25 2.25 0 0 1 6.253 14zm0 1.5H6.252a.75.75 0 0 0-.75.75v.577c0 .535.192 1.053.54 1.46c1.253 1.469 3.22 2.214 5.957 2.214c2.739 0 4.706-.745 5.963-2.213a2.25 2.25 0 0 0 .54-1.463v-.576a.75.75 0 0 0-.748-.749M12 2.005a5 5 0 1 1 0 10a5 5 0 0 1 0-10m0 1.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 0 0 0-7"/>
@@ -958,10 +958,10 @@
       {#if !requireAccount}
         <button
           class="settings-nav-item"
-          class:selected={activeTab === 'sync-server'}
-          class:active={settingsFocus === 'tabs' && activeTab === 'sync-server'}
+          class:selected={selectedTab === 'sync-server'}
+          class:active={activePanel === 'tabs' && selectedTab === 'sync-server'}
           tabindex="-1"
-          onclick={() => { settingsFocus = 'tabs'; activeTab = 'sync-server'; }}
+          onclick={() => { activePanel = 'tabs'; selectedTab = 'sync-server'; }}
         >
           <svg width="16" height="16" viewBox="0 0 24 24">
             <path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2m-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39"/>
@@ -972,9 +972,9 @@
     </nav>
 
     <!-- Accounts secondary sidebar (only when accounts tab active) -->
-    {#if activeTab === 'accounts'}
+    {#if selectedTab === 'accounts'}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="accounts-sidebar" onmousedown={() => (settingsFocus = 'accounts')}>
+      <div class="accounts-sidebar" onmousedown={() => (activePanel = 'accounts')}>
         <div class="accounts-sidebar-header">
           <span class="accounts-sidebar-title">{t('settings.accounts')}</span>
           <button class="icon-action-btn" tabindex="-1" onclick={openAddForm} aria-label={t('settings.addAccount')} data-tooltip={t('settings.addAccount')}>
@@ -989,7 +989,7 @@
             <div
               class="account-sidebar-row"
               class:selected={selectedAccountId === account.id && !showAddForm}
-              class:active={settingsFocus === 'accounts' && selectedAccountId === account.id && !showAddForm}
+              class:active={activePanel === 'accounts' && selectedAccountId === account.id && !showAddForm}
             >
               <button
                 class="account-sidebar-item"
@@ -1048,9 +1048,9 @@
     <div class="settings-content">
       <div class="settings-content-header">
         <h3 class="settings-content-title">
-          {#if activeTab === 'general'}
+          {#if selectedTab === 'general'}
             {t('settings.general')}
-          {:else if activeTab === 'sync-server'}
+          {:else if selectedTab === 'sync-server'}
             {t('settings.localSyncServer')}
           {:else if showAddForm}
             {t('settings.addAccount')}
@@ -1061,7 +1061,7 @@
           {/if}
         </h3>
         <div class="settings-header-right">
-          {#if activeTab === 'accounts' && (showAddForm || selectedAccount)}
+          {#if selectedTab === 'accounts' && (showAddForm || selectedAccount)}
             <button class="header-action-btn" class:header-action-success={saveSuccessLabel}
               data-tooltip="{saveSuccessLabel ?? (requireAccount ? t('settings.saveAndContinue') : t('settings.saveChanges'))} (Ctrl+S)"
               aria-label="{requireAccount ? t('settings.saveAndContinue') : t('settings.saveChanges')}"
@@ -1088,7 +1088,7 @@
                 </svg>
               </button>
             {/if}
-          {:else if activeTab === 'sync-server'}
+          {:else if selectedTab === 'sync-server'}
             <button class="header-action-btn" class:header-action-success={saveSuccessLabel}
               data-tooltip="{saveSuccessLabel ?? t('settings.saveChanges')} (Ctrl+S)"
               aria-label={t('settings.saveChanges')}
@@ -1133,7 +1133,7 @@
       </div>
 
       <div class="settings-content-body">
-        {#if activeTab === 'general'}
+        {#if selectedTab === 'general'}
           <!-- ── Storage (top section) ── -->
           <section class="settings-section">
             <h4 class="section-title">{t('settings.storage')}</h4>
@@ -1331,7 +1331,7 @@
             </div>
           </section>
 
-        {:else if activeTab === 'sync-server'}
+        {:else if selectedTab === 'sync-server'}
           <!-- ── Local Sync Server ── -->
           <section class="settings-section">
             <h4 class="section-title">{t('settings.server')}</h4>
@@ -1395,10 +1395,8 @@
                     {/if}
                     <button class="password-toggle" type="button" onclick={() => showDavPassword = !showDavPassword} aria-label={showDavPassword ? t('settings.hidePassword') : t('settings.showPassword')}>
                       {#if showDavPassword}
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
-                          <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
-                          <line x1="1" y1="1" x2="23" y2="23" />
+                        <svg width="16" height="16" viewBox="0 0 24 24">
+                          <path fill="currentColor" d="m9.343 18.782l-1.932-.518l.787-2.939a11 11 0 0 1-3.237-1.872l-2.153 2.154l-1.414-1.414l2.153-2.154a10.96 10.96 0 0 1-2.371-5.07l1.968-.359a9.002 9.002 0 0 0 17.713 0l1.968.358a10.96 10.96 0 0 1-2.372 5.071l2.154 2.154l-1.414 1.414l-2.154-2.154a11 11 0 0 1-3.237 1.872l.788 2.94l-1.932.517l-.788-2.94a11 11 0 0 1-3.74 0z"/>
                         </svg>
                       {:else}
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1653,10 +1651,8 @@
                     onclick={() => showIncomingPassword = !showIncomingPassword} 
                     data-tooltip={showIncomingPassword ? t('settings.hidePassword') : t('settings.showPassword')}>
                     {#if showIncomingPassword}
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
-                        <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
-                        <line x1="1" y1="1" x2="23" y2="23" />
+                      <svg width="16" height="16" viewBox="0 0 24 24">
+                        <path fill="currentColor" d="m9.343 18.782l-1.932-.518l.787-2.939a11 11 0 0 1-3.237-1.872l-2.153 2.154l-1.414-1.414l2.153-2.154a10.96 10.96 0 0 1-2.371-5.07l1.968-.359a9.002 9.002 0 0 0 17.713 0l1.968.358a10.96 10.96 0 0 1-2.372 5.071l2.154 2.154l-1.414 1.414l-2.154-2.154a11 11 0 0 1-3.237 1.872l.788 2.94l-1.932.517l-.788-2.94a11 11 0 0 1-3.74 0z"/>
                       </svg>
                     {:else}
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1743,10 +1739,8 @@
                   {/if}
                   <button class="password-toggle" type="button" onclick={() => showSmtpPassword = !showSmtpPassword} data-tooltip={showSmtpPassword ? t('settings.hidePassword') : t('settings.showPassword')}>
                     {#if showSmtpPassword}
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
-                        <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
-                        <line x1="1" y1="1" x2="23" y2="23" />
+                      <svg width="16" height="16" viewBox="0 0 24 24">
+                        <path fill="currentColor" d="m9.343 18.782l-1.932-.518l.787-2.939a11 11 0 0 1-3.237-1.872l-2.153 2.154l-1.414-1.414l2.153-2.154a10.96 10.96 0 0 1-2.371-5.07l1.968-.359a9.002 9.002 0 0 0 17.713 0l1.968.358a10.96 10.96 0 0 1-2.372 5.071l2.154 2.154l-1.414 1.414l-2.154-2.154a11 11 0 0 1-3.237 1.872l.788 2.94l-1.932.517l-.788-2.94a11 11 0 0 1-3.74 0z"/>
                       </svg>
                     {:else}
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1782,10 +1776,8 @@
                   {/if}
                   <button class="password-toggle" type="button" onclick={() => showCalDavPassword = !showCalDavPassword} aria-label={showCalDavPassword ? t('settings.hidePassword') : t('settings.showPassword')} data-tooltip={showCalDavPassword ? t('settings.hidePassword') : t('settings.showPassword')} data-tooltip-position="bottom">
                     {#if showCalDavPassword}
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
-                        <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
-                        <line x1="1" y1="1" x2="23" y2="23" />
+                      <svg width="16" height="16" viewBox="0 0 24 24">
+                        <path fill="currentColor" d="m9.343 18.782l-1.932-.518l.787-2.939a11 11 0 0 1-3.237-1.872l-2.153 2.154l-1.414-1.414l2.153-2.154a10.96 10.96 0 0 1-2.371-5.07l1.968-.359a9.002 9.002 0 0 0 17.713 0l1.968.358a10.96 10.96 0 0 1-2.372 5.071l2.154 2.154l-1.414 1.414l-2.154-2.154a11 11 0 0 1-3.237 1.872l.788 2.94l-1.932.517l-.788-2.94a11 11 0 0 1-3.74 0z"/>
                       </svg>
                     {:else}
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1821,10 +1813,8 @@
                   {/if}
                   <button class="password-toggle" type="button" onclick={() => showCardDavPassword = !showCardDavPassword} aria-label={showCardDavPassword ? t('settings.hidePassword') : t('settings.showPassword')} data-tooltip={showCardDavPassword ? t('settings.hidePassword') : t('settings.showPassword')} data-tooltip-position="bottom">
                     {#if showCardDavPassword}
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
-                        <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
-                        <line x1="1" y1="1" x2="23" y2="23" />
+                      <svg width="16" height="16" viewBox="0 0 24 24">
+                        <path fill="currentColor" d="m9.343 18.782l-1.932-.518l.787-2.939a11 11 0 0 1-3.237-1.872l-2.153 2.154l-1.414-1.414l2.153-2.154a10.96 10.96 0 0 1-2.371-5.07l1.968-.359a9.002 9.002 0 0 0 17.713 0l1.968.358a10.96 10.96 0 0 1-2.372 5.071l2.154 2.154l-1.414 1.414l-2.154-2.154a11 11 0 0 1-3.237 1.872l.788 2.94l-1.932.517l-.788-2.94a11 11 0 0 1-3.74 0z"/>
                       </svg>
                     {:else}
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1873,12 +1863,13 @@
     width: 92%;
     max-width: 960px;
     height: 80vh;
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
     border-radius: 8px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+    box-shadow: var(--shadow-lg, 0 8px 32px rgba(0, 0, 0, 0.18));
     display: flex;
     overflow: hidden;
     outline: none;
+    gap: 4px;
   }
 
   .setup-note {
@@ -1892,9 +1883,8 @@
   .settings-nav {
     width: 180px;
     flex-shrink: 0;
-    background: var(--bg-secondary);
+    background: var(--bg-tertiary);
     border-right: 1px solid var(--border-light);
-    padding: 20px 4px 0 0;
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -1904,7 +1894,9 @@
     font-size: 16px;
     font-weight: 600;
     color: var(--text-primary);
-    padding: 0 16px 16px;
+    border-bottom: 1px solid var(--border-light);
+    margin: 0 24px;
+    padding: 24px 0 16px 0;
   }
 
   .settings-nav-item {
@@ -1924,17 +1916,21 @@
 
   .settings-nav-item:hover {
     background: var(--bg-hover);
+    border-left-color: var(--border-hover);
     color: var(--text-primary);
   }
 
   .settings-nav-item.selected {
-    color: var(--accent-active);
-    border-left-color: var(--accent);
-    background: var(--bg-hover);
+    color: var(--text-primary);
+    background: var(--bg-selected);
     font-weight: 600;
   }
 
-  .settings-nav-item.selected.active {
+  .settings-nav-item.selected:hover {
+    border-left-color: var(--accent);
+  }
+
+  .settings-nav-item.active:not(:hover) {
     border-left-color: var(--accent-active);
   }
 
@@ -1943,7 +1939,6 @@
     width: 200px;
     flex-shrink: 0;
     background: var(--bg-secondary);
-    border-right: 1px solid var(--border-light);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -1952,9 +1947,11 @@
   .accounts-sidebar-header {
     display: flex;
     align-items: center;
-    padding: 20px 12px 12px;
+    padding: 20px;
+    border-bottom: 1px solid var(--bg-secondary);
     flex-shrink: 0;
     gap: 8px;
+    background: var(--bg-tertiary);
   }
 
   .accounts-sidebar-title {
@@ -1968,8 +1965,8 @@
     width: 24px;
     height: 24px;
     border-radius: 4px;
-    border: 1px solid var(--border);
-    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    background: var(--bg-tertiary);
     color: var(--text-secondary);
     cursor: pointer;
     font-size: 14px;
@@ -1991,27 +1988,33 @@
     display: flex;
     flex-direction: column;
     gap: 1px;
-    padding-right: 2px;
+    background-color: var(--bg-tertiary);
   }
 
   .account-sidebar-row {
     display: flex;
     align-items: stretch;
     border-left: 4px solid transparent;
+    background-color: var(--bg-tertiary);
+    border-bottom: 1px solid var(--bg-secondary);
     transition: background 0.1s;
   }
 
   .account-sidebar-row:hover {
     background: var(--bg-hover);
+    border-left-color: var(--border-hover);
   }
 
   .account-sidebar-row.selected {
     background: var(--bg-selected);
   }
 
+  .account-sidebar-row.selected:hover {
+    border-left-color: var(--accent);
+  }
+
   .account-sidebar-row.active {
     border-left-color: var(--accent-active);
-    background: var(--bg-hover);
   }
 
   .account-sidebar-item {
@@ -2123,7 +2126,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 20px 24px 16px;
+    margin: 0 24px;
+    padding: 16px 0;
     border-bottom: 1px solid var(--border-light);
     flex-shrink: 0;
   }
@@ -2379,7 +2383,7 @@
     font-size: 13px;
     border: 1px solid var(--border);
     border-radius: 4px;
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
     color: var(--text-primary);
     outline: none;
     transition: border-color 0.15s;
@@ -2655,7 +2659,7 @@
     position: absolute;
     inset: 18%;
     border-radius: 50%;
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
     display: flex;
     flex-direction: column;
     align-items: center;

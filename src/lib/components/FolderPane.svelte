@@ -13,12 +13,12 @@
     onToggleFolderFavorite?: (id: string) => void;
     onEmptyFolder?: (id: string) => void;
     folderEmailCounts?: Record<string, number>;
-    focused?: boolean;
+    active?: boolean;
   }
 
   let {
     folders,
-    activeFolder,
+    activeFolder: selectedFolder,
     onSelectFolder,
     unreadCounts,
     onCreateFolder,
@@ -27,7 +27,7 @@
     onToggleFolderFavorite,
     onEmptyFolder,
     folderEmailCounts = {},
-    focused = false,
+    active = false,
   }: Props = $props();
 
   let sortedFolders = $derived([
@@ -152,7 +152,7 @@
 {#snippet folderRow(folder: Folder)}
   <button
     class="folder-item"
-    class:active={activeFolder === folder.id}
+    class:selected={selectedFolder === folder.id}
     onclick={() => onSelectFolder(folder.id)}
   >
     <span class="folder-icon">
@@ -189,7 +189,7 @@
   </button>
 {/snippet}
 
-<aside class="folder-pane" class:focused>
+<aside class="folder-pane" class:active>
   <!-- Folders -->
   <div class="folder-section">
     <div class="section-header section-header-with-actions">
@@ -261,7 +261,7 @@
     padding: 8px 12px 8px 20px;
     font-size: 13px;
     font-weight: 600;
-    background-color: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-light);
     color: var(--text-primary);
     letter-spacing: 0.03em;
   }
@@ -296,15 +296,19 @@
 
   .folder-item:hover {
     background: var(--bg-hover);
+    border-left-color: var(--border-hover);
   }
 
-  .folder-item.active {
+  .folder-item.selected {
     background: var(--bg-selected);
     font-weight: 600;
   }
 
-  .folder-pane.focused .folder-item.active {
-    background: var(--bg-hover);
+  .folder-item.selected:hover {
+    border-left-color: var(--accent);
+  }
+
+  .folder-pane.active .folder-item.selected:not(:hover) {
     border-left-color: var(--accent-active);
   }
 
@@ -322,7 +326,7 @@
     opacity: 0.75;
   }
 
-  .folder-item.active .folder-icon {
+  .folder-item.selected .folder-icon {
     opacity: 1;
   }
 
@@ -350,7 +354,7 @@
     flex-shrink: 0;
   }
 
-  .folder-item.active .folder-pin {
+  .folder-item.selected .folder-pin {
     opacity: 1;
   }
 
@@ -400,10 +404,9 @@
     position: fixed;
     min-width: 180px;
     background: var(--bg-primary);
-    border: 1px solid var(--border-light);
+    border: 2px solid var(--border-primary);
     border-radius: 6px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-    padding: 4px;
+    box-shadow: var(--shadow-md, 0 8px 32px rgba(0, 0, 0, 0.18));
     z-index: 1000;
   }
 

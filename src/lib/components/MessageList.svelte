@@ -19,11 +19,11 @@
      *  Parent uses this to fetch previews for the anchor plus nearby rows. */
     onPreviewMissing?: (email: Email) => void;
     visibleList?: Email[];
-    focused?: boolean;
+    active?: boolean;
     checkedIds?: Set<string>;
   }
 
-  let { emails, selectedEmail, currentFolder, folderName, onSelectEmail, onOpenDraft, onToggleStar, onTogglePin, onToggleFocused, onDeleteEmail, onClearSelection, onPreviewMissing, visibleList = $bindable([]), focused = false, checkedIds = $bindable(new Set<string>()) }: Props = $props();
+  let { emails, selectedEmail, currentFolder, folderName, onSelectEmail, onOpenDraft, onToggleStar, onTogglePin, onToggleFocused, onDeleteEmail, onClearSelection, onPreviewMissing, visibleList = $bindable([]), active = false, checkedIds = $bindable(new Set<string>()) }: Props = $props();
 
   let activeTab = $state<'focused' | 'other'>('focused');
   let filterSort = $state<'date' | 'starred' | 'unread'>('date');
@@ -269,7 +269,7 @@
   </div>
 
   <!-- Email Items -->
-  <div class="email-items" class:focused bind:this={emailItemsEl}>
+  <div class="email-items" class:active bind:this={emailItemsEl}>
     {#each visibleEmails as email (email.id)}
       <div
         use:observePreview={email}
@@ -335,19 +335,19 @@
               <span class="sender-name">{email.from.name || email.from.email}</span>
             {/if}
             <div class="hover-actions">
-                <button class="hover-btn" tabindex="-1" class:active={email.isStarred} aria-label="Star" data-tooltip={email.isStarred ? t('messageList.unstar') : t('messageList.star')} data-tooltip-position="bottom-end" onclick={(e) => handleAction(e, () => onToggleStar?.(email))}>
+                <button class="hover-btn" tabindex="-1" class:active={email.isStarred} aria-label="Star" data-tooltip={email.isStarred ? t('messageList.unstar') : t('messageList.star')} data-tooltip-position="bottom" onclick={(e) => handleAction(e, () => onToggleStar?.(email))}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill={email.isStarred ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.5">
                     <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
                   </svg>
                 </button>
-                <button class="hover-btn" tabindex="-1" class:active={email.isPinned} aria-label="Pin" data-tooltip={email.isPinned ? t('messageList.unpin') : t('messageList.pin')} data-tooltip-position="bottom-end" onclick={(e) => handleAction(e, () => onTogglePin?.(email))}>
+                <button class="hover-btn" tabindex="-1" class:active={email.isPinned} aria-label="Pin" data-tooltip={email.isPinned ? t('messageList.unpin') : t('messageList.pin')} data-tooltip-position="bottom" onclick={(e) => handleAction(e, () => onTogglePin?.(email))}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill='none' stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                     <path d="m16.243 2.932l4.825 4.826a2.75 2.75 0 0 1-.715 4.404l-4.87 2.435a.75.75 0 0 0-.374.426l-1.44 4.166a1.25 1.25 0 0 1-2.065.476L8.5 16.561L4.06 21H3v-1.062L7.44 15.5l-3.105-3.104a1.25 1.25 0 0 1 .476-2.066l4.166-1.439a.75.75 0 0 0 .426-.374l2.435-4.87a2.75 2.75 0 0 1 4.405-.715m3.765 5.886l-4.826-4.825a1.25 1.25 0 0 0-2.002.324l-2.435 4.871a2.25 2.25 0 0 1-1.278 1.12l-3.789 1.31l6.705 6.704l1.308-3.788a2.25 2.25 0 0 1 1.12-1.278l4.872-2.436a1.25 1.25 0 0 0 .325-2.002"/>
                   </svg>
                 </button>
                 {#if hoveredEmailId === email.id}
                   {#if isInbox}
-                    <button class="hover-btn" tabindex="-1" aria-label="Focus" data-tooltip={(email.isFocused ?? true) ? t('messageList.moveToRegular') : t('messageList.moveToPriority')} data-tooltip-position="bottom-end" onclick={(e) => handleAction(e, () => onToggleFocused?.(email))}>
+                    <button class="hover-btn" tabindex="-1" aria-label="Focus" data-tooltip={(email.isFocused ?? true) ? t('messageList.moveToRegular') : t('messageList.moveToPriority')} data-tooltip-position="bottom" onclick={(e) => handleAction(e, () => onToggleFocused?.(email))}>
                       {#if email.isFocused ?? true}
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                           <circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/>
@@ -359,7 +359,7 @@
                       {/if}
                     </button>
                   {/if}
-                  <button class="hover-btn delete-btn" tabindex="-1" aria-label="Delete" data-tooltip={t('common.delete')} data-tooltip-position="bottom-end" onclick={(e) => handleAction(e, () => onDeleteEmail?.(email))}>
+                  <button class="hover-btn delete-btn" tabindex="-1" aria-label="Delete" data-tooltip={t('common.delete')} data-tooltip-position="bottom" onclick={(e) => handleAction(e, () => onDeleteEmail?.(email))}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                       <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2" />
                     </svg>
@@ -418,7 +418,7 @@
     align-items: center;
     padding: 0 12px;
     margin-top: 0;
-    background-color: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-light);
     gap: 0;
   }
 
@@ -515,8 +515,7 @@
     background: var(--bg-primary);
     border: 1px solid var(--border-light);
     border-radius: 6px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.12);
-    padding: 4px;
+    box-shadow: var(--shadow-md, 0 8px 32px rgba(0, 0, 0, 0.18));
     z-index: 100;
     min-width: 160px;
   }
@@ -576,18 +575,22 @@
 
   .email-item:hover {
     background: var(--bg-hover);
+    border-left-color: var(--border-hover);
   }
 
   .email-item.selected {
     background: var(--bg-selected);
   }
 
-  .email-items.focused .email-item.selected {
-    background: var(--bg-hover);
+  .email-item.selected:hover {
+    border-left-color: var(--accent);
+  }
+
+  .email-items.active .email-item.selected:not(:hover) {
     border-left-color: var(--accent-active);
   }
 
-  .email-item.unread {
+  .email-item.unread:not(:hover) {
     border-left-color: var(--accent);
   }
 
@@ -799,7 +802,6 @@
   }
 
   .hover-btn:hover {
-    background: var(--bg-hover);
     color: var(--text-primary);
   }
 

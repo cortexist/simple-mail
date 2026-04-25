@@ -912,7 +912,7 @@
           <svg class="attachment-chip-icon" width="14" height="14" viewBox="0 0 16 16">
             <path fill="currentColor" d="M2.283 7.975a.5.5 0 0 0 .854.354l4.595-4.597a2.5 2.5 0 1 1 3.536 3.536l-5.303 5.303a1 1 0 0 1-1.414-1.414l5.303-5.303a.5.5 0 0 0-.708-.708L3.843 10.45a2 2 0 1 0 2.828 2.828l5.303-5.303a3.5 3.5 0 1 0-4.95-4.95L2.43 7.621a.5.5 0 0 0-.146.354"/>
           </svg>
-          <span class="attachment-chip-name" title={att.path}>{att.name}</span>
+          <span class="attachment-chip-name" data-tooltip={att.path}>{att.name}</span>
           <button class="attachment-chip-remove" onclick={() => removeAttachment(att.path)} aria-label={t('compose.removeAttachment', { name: att.name })}>
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>

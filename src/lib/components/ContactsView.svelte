@@ -39,9 +39,9 @@
 
   let { contacts, onSaveContact, onDeleteContact, onEmailContact, requestNewContact, requestNewContactList, requestEditContact, requestDeleteContact, onResetContactTriggers, onSelectedContactChange, contactLists = [], onSaveContactList, onDeleteContactList, onListModeChange, onToggleFavorite, onMeetContact, onCallContact, onFocusPaneChange, requestFocusPane = null, searchQuery = '', selectedContactId: selectedContactIdProp = '', onSelectedContactIdChange, selectedListId: selectedListIdProp = '', onSelectedListIdChange, filteredContactsList = $bindable([]), mutedAddresses, onToggleMute }: Props = $props();
 
-  let activeCategory = $state<'all' | 'lists'>('all');
+  let selectedCategory = $state<'all' | 'lists'>('all');
   let selectedContactId = $state<string>(untrack(() => selectedContactIdProp));
-  let focusedPane = $state<'nav' | 'list' | 'detail' | null>(null);
+  let activePane = $state<'nav' | 'list' | 'detail' | null>(null);
   let detailPaneEl = $state<HTMLDivElement | undefined>();
   const navCategories: Array<'all' | 'lists'> = ['all', 'lists'];
   let favoritesExpanded = $state(true);
@@ -64,15 +64,15 @@
     onToggleMute(contact.email.toLowerCase());
   }
 
-  $effect(() => { onFocusPaneChange?.(focusedPane); });
+  $effect(() => { onFocusPaneChange?.(activePane); });
   $effect(() => { onSelectedContactIdChange?.(selectedContactId); });
   $effect(() => { selectedContactId = selectedContactIdProp; });
   $effect(() => { filteredContactsList = filteredContacts; });
   $effect(() => { onSelectedListIdChange?.(selectedListId); });
 
   $effect(() => {
-    if (requestFocusPane === 'none') focusedPane = null;
-    else if (requestFocusPane) focusedPane = requestFocusPane;
+    if (requestFocusPane === 'none') activePane = null;
+    else if (requestFocusPane) activePane = requestFocusPane;
   });
 
   let categoryContacts = $derived(contacts);
@@ -112,11 +112,11 @@
 
   function selectContact(contact: FullContact) {
     selectedContactId = contact.id;
-    focusedPane = 'list';
+    activePane = 'list';
   }
 
   function switchCategory(cat: 'all' | 'lists') {
-    activeCategory = cat;
+    selectedCategory = cat;
     onListModeChange?.(cat === 'lists');
   }
 
@@ -131,7 +131,7 @@
 
   // Notify parent when selected contact changes (lists are never read-only, but disable when none selected)
   $effect(() => {
-    if (activeCategory === 'lists') {
+    if (selectedCategory === 'lists') {
       onSelectedContactChange?.(selectedList ? { isReadOnly: false } as any : { isReadOnly: true } as any);
     } else {
       onSelectedContactChange?.(selectedContact);
@@ -553,7 +553,7 @@
 
   $effect(() => {
     if (requestEditContact && requestEditContact > 0) {
-      if (activeCategory === 'lists' && selectedList) {
+      if (selectedCategory === 'lists' && selectedList) {
         openEditList(selectedList);
       } else if (selectedContact && !selectedContact.isReadOnly) {
         openEditContact(selectedContact);
@@ -564,7 +564,7 @@
 
   $effect(() => {
     if (requestDeleteContact && requestDeleteContact > 0) {
-      if (activeCategory === 'lists' && selectedList) {
+      if (selectedCategory === 'lists' && selectedList) {
         onDeleteContactList?.(selectedList.id);
         selectedListId = '';
       } else if (selectedContact && !selectedContact.isReadOnly) {
@@ -604,27 +604,27 @@
 
   /** Navigate contacts via arrow keys — called from global keydown handler */
   export function navigateArrow(key: string) {
-    if (key === 'ArrowRight' && focusedPane === 'nav') {
-      const hasItems = activeCategory === 'lists' ? filteredLists.length > 0 : filteredContacts.length > 0;
+    if (key === 'ArrowRight' && activePane === 'nav') {
+      const hasItems = selectedCategory === 'lists' ? filteredLists.length > 0 : filteredContacts.length > 0;
       if (!hasItems) return;
-      focusedPane = 'list';
+      activePane = 'list';
       return;
     }
-    if (key === 'ArrowLeft' && focusedPane === 'list') {
-      focusedPane = 'nav';
+    if (key === 'ArrowLeft' && activePane === 'list') {
+      activePane = 'nav';
       return;
     }
 
     const down = key === 'ArrowDown';
     if (key !== 'ArrowUp' && key !== 'ArrowDown') return;
 
-    if (focusedPane === 'nav') {
-      const curIdx = navCategories.indexOf(activeCategory);
+    if (activePane === 'nav') {
+      const curIdx = navCategories.indexOf(selectedCategory);
       const nextIdx = down ? Math.min(curIdx + 1, navCategories.length - 1) : Math.max(curIdx - 1, 0);
       if (curIdx !== nextIdx) switchCategory(navCategories[nextIdx]);
     } else {
       // Navigate items in the list pane
-      if (activeCategory === 'lists') {
+      if (selectedCategory === 'lists') {
         const lists = filteredLists;
         if (lists.length === 0) return;
         const curIdx = lists.findIndex(l => l.id === selectedListId);
@@ -650,7 +650,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="contact-item"
-    class:active={contact.id === selectedContactId}
+    class:selected={contact.id === selectedContactId}
     class:muted={isMuted(contact)}
     onclick={() => selectContact(contact)}
     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectContact(contact); } }}
@@ -668,14 +668,14 @@
       <span class="contact-item-detail">{contact.jobTitle ?? contact.email}</span>
     </div>
     <div class="contact-hover-actions">
-      <button class="contact-hover-btn" class:active={contact.isFavorite} tabindex="-1" aria-label="Favorite" data-tooltip={contact.isFavorite ? t('contacts.unfavorite') : t('contacts.favorite')} data-tooltip-position="bottom-end" onclick={(e) => { e.stopPropagation(); toggleFavorite(contact); }}>
+      <button class="contact-hover-btn" class:selected={contact.isFavorite} tabindex="-1" aria-label="Favorite" data-tooltip={contact.isFavorite ? t('contacts.unfavorite') : t('contacts.favorite')} data-tooltip-position="bottom-end" onclick={(e) => { e.stopPropagation(); toggleFavorite(contact); }}>
         {#if contact.isFavorite}
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
         {:else}
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
         {/if}
       </button>
-      <button class="contact-hover-btn" class:active={isMuted(contact)} tabindex="-1" aria-label="Mute" data-tooltip={isMuted(contact) ? t('contacts.unmute') : t('contacts.mute')} data-tooltip-position="bottom-end" onclick={(e) => { e.stopPropagation(); toggleMute(contact); }}>
+      <button class="contact-hover-btn" class:selected={isMuted(contact)} tabindex="-1" aria-label="Mute" data-tooltip={isMuted(contact) ? t('contacts.unmute') : t('contacts.mute')} data-tooltip-position="bottom-end" onclick={(e) => { e.stopPropagation(); toggleMute(contact); }}>
         {#if isMuted(contact)}
           <svg width="16" height="16" viewBox="0 0 16 16">
             <path fill="currentColor" d="M8 2.75v10.5a.751.751 0 0 1-1.238.57L3.473 11H1.75A1.75 1.75 0 0 1 0 9.25v-2.5C0 5.784.784 5 1.75 5h1.722l3.29-2.82A.75.75 0 0 1 8 2.75m3.28 2.47L13 6.94l1.72-1.72a.75.75 0 0 1 1.042.018a.75.75 0 0 1 .018 1.042L14.06 8l1.72 1.72a.749.749 0 0 1-.326 1.275a.75.75 0 0 1-.734-.215L13 9.06l-1.72 1.72a.749.749 0 0 1-1.275-.326a.75.75 0 0 1 .215-.734L11.94 8l-1.72-1.72a.749.749 0 0 1 .326-1.275a.75.75 0 0 1 .734.215m-7.042 1.1a.75.75 0 0 1-.488.18h-2a.25.25 0 0 0-.25.25v2.5c0 .138.112.25.25.25h2c.179 0 .352.064.488.18L6.5 11.62V4.38Z"/>
@@ -693,13 +693,13 @@
 <div class="contacts-view">
   <!-- 1st Level Nav -->
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <nav class="contacts-nav" class:focused={focusedPane === 'nav'} onmousedown={() => (focusedPane = 'nav')}>
+  <nav class="contacts-nav" class:active={activePane === 'nav'} onmousedown={() => (activePane = 'nav')}>
     <h2 class="contacts-nav-title">{t('contacts.contacts')}</h2>
     <button
       class="contacts-nav-item"
-      class:active={activeCategory === 'all'}
+      class:selected={selectedCategory === 'all'}
       tabindex="-1"
-      onclick={() => { switchCategory('all'); focusedPane = 'nav'; }}
+      onclick={() => { switchCategory('all'); activePane = 'nav'; }}
     >
       <svg width="16" height="16" viewBox="0 0 24 24">
         <path fill="currentColor" d="M7.48 10.385c1.136 0 2.068.475 2.853.983c.387.25.774.534 1.12.777c.359.252.695.474 1.031.65c.166.083.363.23.556.22c.048-.002.242-.026.569-.42l.94-1.302c1.126-1.237 3.204-1.218 4.295.105l3.419 4.186c.271.463.3 1.02.097 1.507l-.12.237c-.44.718-1.132 1.867-2.045 2.83c-.906.957-2.139 1.845-3.674 1.846c-1.137 0-2.07-.475-2.854-.983c-.387-.25-.775-.535-1.121-.778a12 12 0 0 0-.777-.51l-.254-.141c-.322-.169-.43-.226-.555-.22c-.05.004-.248.03-.58.433l-.717 1.024v.002c-.99 1.405-3.062 1.555-4.275.405l-3.494-4.208a1.69 1.69 0 0 1-.133-1.968l.376-.609c.422-.67.982-1.498 1.667-2.22c.906-.957 2.14-1.846 3.676-1.846m0 1.485c-.935 0-1.801.544-2.596 1.383c-.734.774-1.299 1.68-1.857 2.583a.21.21 0 0 0 .012.247l3.264 3.96l.108.118c.574.54 1.58.459 2.035-.186l3.924-5.594a4 4 0 0 1-.575-.27c-.425-.223-.825-.49-1.194-.75c-.382-.268-.72-.516-1.076-.747c-.701-.454-1.338-.744-2.045-.744m10.216.474c-.546-.663-1.66-.62-2.144.067l.002.001l-.56.797l.009.006l-3.364 4.796c.264.093.466.213.566.265l.315.176c.308.181.602.381.879.575c.381.268.719.516 1.075.746c.702.455 1.34.744 2.047.744c.934 0 1.8-.543 2.595-1.381c.789-.832 1.404-1.846 1.856-2.584c.04-.093.04-.159-.012-.247zM7 3a3 3 0 1 1 0 6a3 3 0 0 1 0-6m10 0a3 3 0 1 1 0 6a3 3 0 0 1 0-6M7 4.5a1.5 1.5 0 1 0 0 3a1.5 1.5 0 0 0 0-3m10 0a1.5 1.5 0 1 0 0 3a1.5 1.5 0 0 0 0-3"/>
@@ -709,9 +709,9 @@
     </button>
     <button
       class="contacts-nav-item"
-      class:active={activeCategory === 'lists'}
+      class:selected={selectedCategory === 'lists'}
       tabindex="-1"
-      onclick={() => { switchCategory('lists'); focusedPane = 'nav'; }}
+      onclick={() => { switchCategory('lists'); activePane = 'nav'; }}
     >
     <svg height="16" width="16" viewBox="0 0 24 24">
       <g fill="currentColor">
@@ -734,16 +734,16 @@
 
   <!-- 2nd Level Nav — Contact/List List -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="contacts-list-pane" onmousedown={() => (focusedPane = 'list')}>
-    {#if activeCategory === 'lists'}
+  <div class="contacts-list-pane" onmousedown={() => (activePane = 'list')}>
+    {#if selectedCategory === 'lists'}
       <!-- Contact Lists -->
-      <div class="contacts-scroll" class:focused={focusedPane === 'list'}>
+      <div class="contacts-scroll" class:active={activePane === 'list'}>
         {#each filteredLists as list}
           <button
             class="contact-item"
-            class:active={list.id === selectedListId}
+            class:selected={list.id === selectedListId}
             tabindex="-1"
-            onclick={() => { selectedListId = list.id; focusedPane = 'list'; }}
+            onclick={() => { selectedListId = list.id; activePane = 'list'; }}
           >
             <span class="contact-avatar-sm" style="background: var(--accent, #0078d4)">{getInitials(list.name)}</span>
             <div class="contact-item-info">
@@ -782,7 +782,7 @@
           <span class="muted-toggle-text">{t('contacts.showMuted')}</span>
         </label>
       </div>
-      <div class="contacts-scroll" class:focused={focusedPane === 'list'}>
+      <div class="contacts-scroll" class:active={activePane === 'list'}>
         {#if favoriteContacts.length > 0}
           <div class="contact-letter-group">
             <button type="button" class="contact-letter contact-section-toggle" onclick={() => favoritesExpanded = !favoritesExpanded}>
@@ -820,8 +820,8 @@
 
   <!-- Detail Pane -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="contact-detail-pane" bind:this={detailPaneEl} onmousedown={() => { if (focusedPane !== 'nav') focusedPane = 'list'; }}>
-    {#if activeCategory === 'lists' && selectedList}
+  <div class="contact-detail-pane" bind:this={detailPaneEl} onmousedown={() => { if (activePane !== 'nav') activePane = 'list'; }}>
+    {#if selectedCategory === 'lists' && selectedList}
       <div class="contact-detail-card">
         <div class="contact-hero">
           <div class="contact-hero-avatar" style="background: var(--accent, #0078d4)">
@@ -877,7 +877,7 @@
           {/if}
         </div>
       </div>
-    {:else if activeCategory === 'lists'}
+    {:else if selectedCategory === 'lists'}
       <div class="contact-empty-state">
         <svg height="48" width="48" viewBox="0 0 24 24">
           <g fill="currentColor">
@@ -1420,17 +1420,21 @@
 
   .contacts-nav-item:hover {
     background: var(--bg-hover);
+    border-left-color: var(--border-hover); 
     color: var(--text-primary);
   }
 
-  .contacts-nav-item.active {
+  .contacts-nav-item.selected {
     color: var(--text-primary);
     background: var(--bg-selected);
     font-weight: 600;
   }
 
-  .contacts-nav.focused .contacts-nav-item.active {
-    background: var(--bg-hover);
+  .contacts-nav-item.selected:hover {
+    border-left-color: var(--accent);
+  }
+
+  .contacts-nav.active .contacts-nav-item.selected:not(:hover) {
     border-left-color: var(--accent-active);
   }
 
@@ -1465,16 +1469,15 @@
     display: flex;
     flex-direction: column;
     background-color: var(--bg-secondary);
-    gap: 2px;
   }
 
   .contact-letter {
     font-size: 12px;
     font-weight: 600;
     color: var(--accent);
-    padding: 6px 8px;
+    padding: 6px 16px;
     position: sticky;
-    background-color: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-light);
     border-radius: 4px;
     top: 0;
     z-index: 1;
@@ -1487,7 +1490,7 @@
     width: 100%;
     text-align: left;
     border: none;
-    background-color: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-light);
     color: var(--text-primary);
     cursor: pointer;
     font-size: 14px;
@@ -1512,21 +1515,25 @@
     cursor: pointer;
     text-align: left;
     transition: background 0.1s;
-    background-color: var(--bg-tertiary);
     border-left: 4px solid transparent;
+    border-bottom: 1px solid var(--border-light);
     outline: none;
   }
 
   .contact-item:hover {
     background: var(--bg-hover);
+    border-left-color: var(--border-hover);
   }
 
-  .contact-item.active {
+  .contact-item.selected {
     background: var(--bg-selected);
   }
 
-  .contacts-scroll.focused .contact-item.active {
-    background: var(--bg-hover);
+  .contact-item.selected:hover {
+    border-left-color: var(--accent);
+  }
+
+  .contacts-scroll.active .contact-item.selected:not(:hover) {
     border-left-color: var(--accent-active);
   }
 
@@ -1583,9 +1590,10 @@
 
   /* ── Show Muted Toggle ── */
   .contacts-muted-toggle {
-    padding: 6px 12px;
+    padding: 8px 12px;
     border-radius: 4px;
     flex-shrink: 0;
+    border-bottom: 1px solid var(--border-light);
   }
 
   .muted-toggle-label {
@@ -1596,7 +1604,7 @@
   }
 
   .muted-toggle-text {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--text-secondary);
   }
 
@@ -1658,7 +1666,7 @@
     padding: 0;
   }
 
-  .contact-hover-btn.active {
+  .contact-hover-btn.selected {
     opacity: 1;
     pointer-events: auto;
     color: var(--accent-active);
@@ -1671,6 +1679,7 @@
 
   .contact-hover-btn:hover,
   .contact-hover-btn:focus {
+    border-left-color: var(--border-hover);
     background: var(--bg-hover);
     color: var(--text-primary);
   }
@@ -1701,17 +1710,17 @@
 
   .contact-detail-card {
     max-width: 560px;
+    padding: 24px;
   }
 
   /* Hero */
   .contact-hero {
     display: flex;
     align-items: flex-start;
+    padding-bottom: 16px;
     gap: 16px;
-    padding: 10px 24px;
     border-bottom: 1px solid var(--border-light);
     border-left: 4px solid transparent;
-    margin-bottom: 16px;
   }
 
   .contact-hero-avatar {
@@ -1807,7 +1816,7 @@
     display: flex;
     justify-content: flex-start;
     gap: 8px;
-    padding: 0 10px 10px 10px;
+    padding: 8px 0;
     border-bottom: 1px solid var(--border-light);
     flex-wrap: wrap;
   }
@@ -1842,7 +1851,7 @@
 
   /* Info section */
   .contact-info-section {
-    padding: 24px;
+    padding: 16px 0;
   }
 
   .contact-info-heading {
@@ -1941,7 +1950,7 @@
   }
 
   .ct-modal {
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
     border-radius: 8px;
     box-shadow: var(--shadow-lg, 0 8px 32px rgba(0, 0, 0, 0.18));
     width: 480px;
@@ -2018,7 +2027,7 @@
     font-size: 13px;
     border: 1px solid var(--border);
     border-radius: 4px;
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
     color: var(--text-primary);
     transition: border-color 0.15s;
     outline: none;

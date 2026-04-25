@@ -3,13 +3,13 @@
   import { t } from '$lib/i18n/index.svelte';
 
   interface Props {
-    activeItem: NavItem;
-    focused?: boolean;
+    selectedItem: NavItem;
+    active?: boolean;
     onSelectItem: (item: NavItem) => void;
     onOpenSettings: () => void;
   }
 
-  let { activeItem, focused = false, onSelectItem, onOpenSettings }: Props = $props();
+  let { selectedItem, active = false, onSelectItem, onOpenSettings }: Props = $props();
 
   const navItemIds: { id: NavItem; key: string }[] = [
     { id: 'mail',     key: 'nav.mail'     },
@@ -23,16 +23,13 @@
     {#each navItemIds as item}
       <button
         class="nav-item"
-        class:active={activeItem === item.id}
-        class:focused={focused && activeItem === item.id}
+        class:selected={selectedItem === item.id}
+        class:active={active && selectedItem === item.id}
         tabindex="-1"
         onclick={() => onSelectItem(item.id)}
         data-tooltip={t(item.key)}
         data-tooltip-position="right"
-      >
-        {#if activeItem === item.id}
-          <span class="active-indicator"></span>
-        {/if}
+      >    
         <span class="nav-icon">
           {#if item.id === 'mail'}
             <svg width="24" height="24" viewBox="0 0 24 24">
@@ -86,37 +83,32 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 40px;
+    width: 48px;
     height: 40px;
     color: var(--text-secondary);
     transition: background 0.12s ease, color 0.12s ease;
     outline: none;
+    border-left: 4px solid transparent;
   }
 
   .nav-item:hover {
     background: var(--bg-hover);
+    border-left: 4px solid var(--border-hover);
     color: var(--text-primary);
   }
 
-  .nav-item.active {
+  .nav-item.selected {
     color: var(--accent-active);
+    background: var(--bg-selected);
   }
 
-  .nav-item.focused {
-    background: var(--bg-hover);
+  .nav-item.selected:hover {
+    border-left: 4px solid var(--accent);
   }
 
-  .active-indicator {
-    position: absolute;
-    left: -4px;
-    width: 4px;
-    height: 40px;
-    background: var(--accent);
-    pointer-events: none;
-  }
-
-  .nav-item.focused .active-indicator {
-    background: var(--accent-active);
+  .nav-item.active {
+    border-left: 4px solid var(--accent-active);
+    background: var(--bg-selected);
   }
 
   .nav-icon {

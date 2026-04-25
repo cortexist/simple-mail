@@ -1123,10 +1123,10 @@
                 </div>
                 <div class="search-event-badges">
                     <div class="search-hover-actions">
-                        <button class="search-hover-btn" tabindex="-1" title={t('calendar.editEvent')} onclick={(e) => { e.stopPropagation(); searchSelectedEvent = event; openEditEvent(event); }}>
+                        <button class="search-hover-btn" tabindex="-1" aria-label="Edit event" data-tooltip={t('calendar.editEvent')} onclick={(e) => { e.stopPropagation(); searchSelectedEvent = event; openEditEvent(event); }}>
                             <svg width="14" height="14" viewBox="0 0 24 24"><path fill="currentColor" d="M13.25 4a.75.75 0 0 1 0 1.5h-7A1.75 1.75 0 0 0 4.5 7.25v10.5c0 .966.784 1.75 1.75 1.75h10.5a1.75 1.75 0 0 0 1.75-1.75v-7a.75.75 0 0 1 1.5 0v7A3.25 3.25 0 0 1 16.75 21H6.25A3.25 3.25 0 0 1 3 17.75V7.25A3.25 3.25 0 0 1 6.25 4zm6.47-.78a.75.75 0 1 1 1.06 1.06L10.59 14.47L9 15l.53-1.59z"/></svg>
                         </button>
-                        <button class="search-hover-btn search-hover-delete" tabindex="-1" title={t('calendar.deleteEvent')} onclick={(e) => { e.stopPropagation(); searchSelectedEvent = event; confirmDeleteEvent(event); if (!event.recurrence) searchSelectedEvent = null; }}>
+                        <button class="search-hover-btn search-hover-delete" tabindex="-1" aria-label="Delete event" data-tooltip={t('calendar.deleteEvent')} onclick={(e) => { e.stopPropagation(); searchSelectedEvent = event; confirmDeleteEvent(event); if (!event.recurrence) searchSelectedEvent = null; }}>
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
                         </button>
                     </div>
@@ -1167,10 +1167,10 @@
                 </div>
                 <div class="search-event-badges">
                     <div class="search-hover-actions">
-                        <button class="search-hover-btn" tabindex="-1" title={t('calendar.editEvent')} onclick={(e) => { e.stopPropagation(); searchSelectedEvent = event; openEditEvent(event); }}>
+                        <button class="search-hover-btn" tabindex="-1" aria-label="Edit event" data-tooltip={t('calendar.editEvent')} onclick={(e) => { e.stopPropagation(); searchSelectedEvent = event; openEditEvent(event); }}>
                             <svg width="14" height="14" viewBox="0 0 24 24"><path fill="currentColor" d="M13.25 4a.75.75 0 0 1 0 1.5h-7A1.75 1.75 0 0 0 4.5 7.25v10.5c0 .966.784 1.75 1.75 1.75h10.5a1.75 1.75 0 0 0 1.75-1.75v-7a.75.75 0 0 1 1.5 0v7A3.25 3.25 0 0 1 16.75 21H6.25A3.25 3.25 0 0 1 3 17.75V7.25A3.25 3.25 0 0 1 6.25 4zm6.47-.78a.75.75 0 1 1 1.06 1.06L10.59 14.47L9 15l.53-1.59z"/></svg>
                         </button>
-                        <button class="search-hover-btn search-hover-delete" tabindex="-1" title={t('calendar.deleteEvent')} onclick={(e) => { e.stopPropagation(); searchSelectedEvent = event; confirmDeleteEvent(event); if (!event.recurrence) searchSelectedEvent = null; }}>
+                        <button class="search-hover-btn search-hover-delete" tabindex="-1" aria-label="Delete event" data-tooltip={t('calendar.deleteEvent')} onclick={(e) => { e.stopPropagation(); searchSelectedEvent = event; confirmDeleteEvent(event); if (!event.recurrence) searchSelectedEvent = null; }}>
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
                         </button>
                         </div>
@@ -1228,7 +1228,7 @@
                 <div class="event-detail-row event-detail-link" class:disabled={ended || !searchSelectedEvent.meetingUrl}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10l5-3v10l-5-3z"/><rect x="1" y="6" width="14" height="12" rx="2"/></svg>
                   {#if searchSelectedEvent.meetingUrl && !ended}
-                    <a href={searchSelectedEvent.meetingUrl} title={searchSelectedEvent.meetingUrl} onclick={(e) => { e.preventDefault(); shellOpen(searchSelectedEvent!.meetingUrl!); }}>{t('calendar.joinMeetingShortcutJ')}</a>
+                    <a href={searchSelectedEvent.meetingUrl} data-tooltip={searchSelectedEvent.meetingUrl} onclick={(e) => { e.preventDefault(); shellOpen(searchSelectedEvent!.meetingUrl!); }}>{t('calendar.joinMeetingShortcutJ')}</a>
                   {:else if ended}
                     <span>{t('calendar.meetingEnded')}</span>
                   {:else}
@@ -1484,7 +1484,7 @@
             <div class="event-detail-row event-detail-link" class:disabled={ended || !selectedEvent.meetingUrl}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10l5-3v10l-5-3z"/><rect x="1" y="6" width="14" height="12" rx="2"/></svg>
               {#if selectedEvent.meetingUrl && !ended}
-                <a href={selectedEvent.meetingUrl} title={selectedEvent.meetingUrl} onclick={(e) => { e.preventDefault(); shellOpen(selectedEvent!.meetingUrl!); selectedEvent = null; }}>{t('calendar.joinMeetingShortcut')}</a>
+                <a href={selectedEvent.meetingUrl} data-tooltip={selectedEvent.meetingUrl} onclick={(e) => { e.preventDefault(); shellOpen(selectedEvent!.meetingUrl!); selectedEvent = null; }}>{t('calendar.joinMeetingShortcut')}</a>
               {:else if ended}
                 <span>{t('calendar.meetingEnded')}</span>
               {:else}
@@ -2443,7 +2443,7 @@
   .event-detail-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.2);
+    background: rgba(0, 0, 0, 0.3);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2451,7 +2451,7 @@
   }
 
   .event-detail-card {
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
     border-radius: 8px;
     box-shadow: var(--shadow-lg);
     width: 360px;
@@ -2640,7 +2640,7 @@
   }
 
   .ev-modal {
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
     border-radius: 8px;
     box-shadow: var(--shadow-lg, 0 8px 32px rgba(0, 0, 0, 0.18));
     width: 440px;
@@ -2708,7 +2708,7 @@
     font-size: 13px;
     border: 1px solid var(--border);
     border-radius: 4px;
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
     color: var(--text-primary);
     transition: border-color 0.15s;
   }
@@ -3047,8 +3047,8 @@
     display: flex;
     flex: 1;
     overflow: hidden;
-    gap: 2px;
-    background-color: var(--border-light);
+    gap: 6px;
+    background-color: var(--bg-primary);
   }
 
   .search-list {
@@ -3056,7 +3056,8 @@
     min-width: 260px;
     display: flex;
     flex-direction: column;
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
+    gap: 4px;
   }
 
   .search-list-header {
@@ -3066,7 +3067,7 @@
     font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--border-light);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3074,21 +3075,25 @@
 
   .search-list-header svg {
     flex-shrink: 0;
-    color: var(--text-tertiary);
   }
 
   .search-list-scroll {
+    display: flex;
+    flex-direction: column;
     flex: 1;
     overflow-y: auto;
+    gap: 2px;
   }
 
   .search-group-label {
-    padding: 10px 16px 4px;
+    padding: 6px 16px;
     font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    color: var(--text-tertiary);
+    color: var(--accent);
+    border-bottom: 1px solid var(--border-light);    
+    gap: 2px;
   }
 
   .search-event-item {
@@ -3097,16 +3102,14 @@
     gap: 10px;
     width: 100%;
     text-align: left;
-    border: none;
-    background: none;
+    border-bottom: 1px solid var(--border-light);
     cursor: pointer;
-    border-bottom: 1px solid var(--border-light, var(--border));
     transition: background 0.1s;
     outline: none;
   }
 
   .search-event-item.active {
-    background: var(--accent-bg, color-mix(in srgb, var(--accent) 25%, transparent));
+    background: var(--bg-selected);
   }
 
   .search-event-color {
@@ -3223,7 +3226,6 @@
   .search-detail {
     flex: 1;
     overflow-y: auto;
-    background: var(--bg-primary);
     display: flex;
     align-items: flex-start;
     justify-content: center;
@@ -3238,26 +3240,26 @@
 
   .search-detail-card {
     width: 100%;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border);
     overflow: hidden;
   }
 
   .search-detail-header {
     display: flex;
     align-items: center;
-    border-bottom: 1px solid var(--border);
   }
 
   .search-detail-title {
     font-size: 18px;
     font-weight: 600;
     color: var(--text-primary);
-    margin-left: 20px;
+    margin: 0 24px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--border-light);
+    flex-grow: 1;
   }
 
   .search-detail-body {
-    padding: 16px 20px;
+    padding: 24px;
     display: flex;
     flex-direction: column;
     gap: 12px;

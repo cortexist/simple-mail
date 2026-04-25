@@ -115,7 +115,6 @@
     justify-content: space-between;
     gap: 8px;
     padding: 6px 10px;
-    background: var(--bg-primary);
     border: 1px solid var(--border);
     border-radius: 4px;
     color: var(--text-primary);
@@ -142,7 +141,7 @@
     background: var(--bg-primary);
     border: 1px solid var(--border);
     border-radius: 8px;
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--shadow-md, 0 4px 16px rgba(0, 0, 0, 0.18));
     padding: 12px;
     min-width: 228px;
   }

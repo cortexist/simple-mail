@@ -339,7 +339,7 @@
           {#if email.authResults}
             {@const hasFailure = email.authResults.includes('=fail') || email.authResults.includes('=softfail') || email.authResults.includes('=none')}
             {#if hasFailure}
-              <div class="auth-warning" title={email.authResults}>
+              <div class="auth-warning" data-tooltip={email.authResults}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
                   <line x1="12" y1="9" x2="12" y2="13" />
@@ -717,8 +717,7 @@
     background: var(--bg-primary);
     border: 1px solid var(--border-light);
     border-radius: 6px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-    padding: 4px;
+    box-shadow: var(--shadow-md, 0 8px 32px rgba(0, 0, 0, 0.18));
     z-index: 1000;
   }
 

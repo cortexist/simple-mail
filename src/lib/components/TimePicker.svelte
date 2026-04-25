@@ -97,7 +97,6 @@
     align-items: center;
     gap: 7px;
     padding: 6px 10px;
-    background: var(--bg-primary);
     border: 1px solid var(--border);
     border-radius: 4px;
     color: var(--text-primary);
@@ -123,7 +122,7 @@
     background: var(--bg-primary);
     border: 1px solid var(--border);
     border-radius: 6px;
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--shadow-md, 0 4px 16px rgba(0, 0, 0, 0.18));
     overflow-y: auto;
     max-height: 208px;
     padding: 4px;
