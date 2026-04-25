@@ -1202,7 +1202,7 @@
               {:else}
                 <div class="detail-form">
                   <div class="storage-slider-row">
-                    <input
+                    <input autocomplete="off"
                       class="storage-slider"
                       type="range"
                       min={bytesToMB(info.minQuotaBytes)}
@@ -1211,7 +1211,7 @@
                       bind:value={storageDraftMB}
                     />
                     <span class="storage-slider-readout">
-                      <input
+                      <input autocomplete="off"
                         class="storage-readout-input"
                         type="number"
                         min={bytesToMB(info.minQuotaBytes)}
@@ -1347,7 +1347,7 @@
               {#if !davServerAddr}
                 <label class="form-row">
                   <span class="form-label">{t('settings.bindAddress')}</span>
-                  <input class="form-input" type="text" bind:value={davBindAddr} placeholder="0.0.0.0:5232" />
+                  <input autocomplete="off" class="form-input" type="text" bind:value={davBindAddr} placeholder="0.0.0.0:5232" />
                 </label>
               {/if}
 
@@ -1386,12 +1386,12 @@
               <div class="dav-add-user">
                 <span class="form-label">{t('settings.addUser')}</span>
                 <div class="dav-add-user-form">
-                  <input class="form-input" type="email" bind:value={davNewEmail} placeholder="user@example.com" />
+                  <input autocomplete="off" class="form-input" type="email" bind:value={davNewEmail} placeholder="user@example.com" />
                   <div class="password-wrapper">
                     {#if showDavPassword}
-                      <input class="form-input password-input" type="text" bind:value={davNewPassword} placeholder={t('settings.password')} />
+                      <input autocomplete="off" class="form-input password-input" type="text" bind:value={davNewPassword} placeholder={t('settings.password')} />
                     {:else}
-                      <input class="form-input password-input" type="password" bind:value={davNewPassword} placeholder={t('settings.password')} />
+                      <input autocomplete="off" class="form-input password-input" type="password" bind:value={davNewPassword} placeholder={t('settings.password')} />
                     {/if}
                     <button class="password-toggle" type="button" onclick={() => showDavPassword = !showDavPassword} aria-label={showDavPassword ? t('settings.hidePassword') : t('settings.showPassword')}>
                       {#if showDavPassword}
@@ -1427,7 +1427,7 @@
             {/if}
             <div class="detail-form">
               <!-- Avatar picker -->
-              <input type="file" accept="image/*" class="acct-photo-file-input" bind:this={addPhotoInput} onchange={handleAddPhotoChange} />
+              <input autocomplete="off" type="file" accept="image/*" class="acct-photo-file-input" bind:this={addPhotoInput} onchange={handleAddPhotoChange} />
               <div class="acct-photo-picker">
                 <button type="button" class="acct-photo-avatar"
                   onclick={() => addForm.avatarUrl ? addForm.avatarUrl = '' : addPhotoInput?.click()}
@@ -1456,21 +1456,21 @@
               <div class="form-row-inline">
                 <label class="form-row" style="flex:1">
                   <span class="form-label">{t('settings.firstName')}</span>
-                  <input class="form-input" type="text" bind:value={addForm.firstName} placeholder="John" oninput={() => addForm.initials = autoInitials(buildAccountName(addForm))} />
+                  <input autocomplete="off" class="form-input" type="text" bind:value={addForm.firstName} placeholder="John" oninput={() => addForm.initials = autoInitials(buildAccountName(addForm))} />
                 </label>
                 <label class="form-row" style="flex:1">
                   <span class="form-label">{t('settings.lastName')}</span>
-                  <input class="form-input" type="text" bind:value={addForm.lastName} placeholder="Doe" oninput={() => addForm.initials = autoInitials(buildAccountName(addForm))} />
+                  <input autocomplete="off" class="form-input" type="text" bind:value={addForm.lastName} placeholder="Doe" oninput={() => addForm.initials = autoInitials(buildAccountName(addForm))} />
                 </label>
               </div>
               <label class="form-row">
                 <span class="form-label">{t('settings.email')}</span>
-                <input class="form-input" type="email" bind:value={addForm.email} placeholder="john@example.com" />
+                <input autocomplete="off" class="form-input" type="email" bind:value={addForm.email} placeholder="john@example.com" />
               </label>
               <div class="form-row-inline">
                 <label class="form-row" style="flex:1">
                   <span class="form-label">{t('settings.initials')}</span>
-                  <input class="form-input" type="text" bind:value={addForm.initials} maxlength="2" placeholder="JD" />
+                  <input autocomplete="off" class="form-input" type="text" bind:value={addForm.initials} maxlength="2" placeholder="JD" />
                 </label>
                 <div class="form-row" style="position:relative;">
                   <span class="form-label">{t('settings.color')}</span>
@@ -1518,7 +1518,7 @@
           <section class="settings-section">
             <div class="detail-form">
               <!-- Avatar picker -->
-              <input type="file" accept="image/*" class="acct-photo-file-input" bind:this={editPhotoInput} onchange={handleEditPhotoChange} />
+              <input autocomplete="off" type="file" accept="image/*" class="acct-photo-file-input" bind:this={editPhotoInput} onchange={handleEditPhotoChange} />
               <div class="acct-photo-picker">
                 <button type="button" class="acct-photo-avatar"
                   onclick={() => accountForm.avatarUrl ? accountForm.avatarUrl = '' : editPhotoInput?.click()}
@@ -1547,25 +1547,25 @@
               <div class="form-row-inline">
                 <label class="form-row" style="flex:1">
                   <span class="form-label">{t('settings.firstName')}</span>
-                  <input class="form-input" type="text" bind:value={accountForm.firstName} oninput={() => accountForm.initials = autoInitials(buildAccountName(accountForm))} />
+                  <input autocomplete="off" class="form-input" type="text" bind:value={accountForm.firstName} oninput={() => accountForm.initials = autoInitials(buildAccountName(accountForm))} />
                 </label>
                 <label class="form-row" style="flex:1">
                   <span class="form-label">{t('settings.lastName')}</span>
-                  <input class="form-input" type="text" bind:value={accountForm.lastName} oninput={() => accountForm.initials = autoInitials(buildAccountName(accountForm))} />
+                  <input autocomplete="off" class="form-input" type="text" bind:value={accountForm.lastName} oninput={() => accountForm.initials = autoInitials(buildAccountName(accountForm))} />
                 </label>
               </div>
               <label class="form-row">
                 <span class="form-label">{t('settings.alias')}</span>
-                <input class="form-input" type="text" bind:value={accountForm.alias} placeholder={t('settings.aliasPlaceholder')} />
+                <input autocomplete="off" class="form-input" type="text" bind:value={accountForm.alias} placeholder={t('settings.aliasPlaceholder')} />
               </label>
               <label class="form-row">
                 <span class="form-label">{t('settings.emailAddress')}</span>
-                <input class="form-input" type="email" bind:value={accountForm.email} oninput={queueAutoDiscover} />
+                <input autocomplete="off" class="form-input" type="email" bind:value={accountForm.email} oninput={queueAutoDiscover} />
               </label>
               <div class="form-row-inline">
                 <label class="form-row" style="flex:1">
                   <span class="form-label">{t('settings.initials')}</span>
-                  <input class="form-input" type="text" bind:value={accountForm.initials} maxlength="2" />
+                  <input autocomplete="off" class="form-input" type="text" bind:value={accountForm.initials} maxlength="2" />
                 </label>
                 <div class="form-row" style="position:relative;">
                   <span class="form-label">{t('settings.color')}</span>
@@ -1594,7 +1594,7 @@
               </div>
               <div class="form-row">
                 <span class="form-label">{t('settings.signature')}</span>
-                <textarea class="form-input signature-input" bind:value={accountForm.signature} placeholder={t('settings.signaturePlaceholder')}></textarea>
+                <textarea autocomplete="off" class="form-input signature-input" bind:value={accountForm.signature} placeholder={t('settings.signaturePlaceholder')}></textarea>
               </div>
             </div>
           </section>
@@ -1612,12 +1612,12 @@
               </label>
               <label class="form-row">
                 <span class="form-label">{t('settings.server')}</span>
-                <input class="form-input" type="text" bind:value={accountForm.incomingServer} oninput={queueAutoDiscover} placeholder={accountForm.protocol === 'imap' ? 'imap.example.com' : 'pop.example.com'} />
+                <input autocomplete="off" class="form-input" type="text" bind:value={accountForm.incomingServer} oninput={queueAutoDiscover} placeholder={accountForm.protocol === 'imap' ? 'imap.example.com' : 'pop.example.com'} />
               </label>
               <div class="form-row-inline">
                 <label class="form-row" style="flex:1">
                   <span class="form-label">{t('settings.port')}</span>
-                  <input class="form-input port-input" type="number" bind:value={accountForm.incomingPort} />
+                  <input autocomplete="off" class="form-input port-input" type="number" bind:value={accountForm.incomingPort} />
                 </label>
                 <label class="form-row" style="flex:1">
                   <span class="form-label">{t('settings.security')}</span>
@@ -1630,7 +1630,7 @@
               </div>
               <label class="form-row">
                 <span class="form-label">{t('settings.username')}</span>
-                <input class="form-input" type="text" bind:value={accountForm.incomingUsername} oninput={() => { queueAutoDiscover(); propagateUsername(accountForm.incomingUsername, 'imap', 'smtpUsername', 'calDavUsername', 'cardDavUsername'); }} />
+                <input autocomplete="off" class="form-input" type="text" bind:value={accountForm.incomingUsername} oninput={() => { queueAutoDiscover(); propagateUsername(accountForm.incomingUsername, 'imap', 'smtpUsername', 'calDavUsername', 'cardDavUsername'); }} />
               </label>
               {#if autodiscoverState !== 'idle'}
                 <div class="autodiscover-note" class:error={autodiscoverState === 'error'}>
@@ -1641,9 +1641,9 @@
                 <span class="form-label">{t('settings.password')}</span>
                 <div class="password-wrapper">
                   {#if showIncomingPassword}
-                    <input class="form-input password-input" type="text" bind:value={accountForm.incomingPassword} />
+                    <input autocomplete="off" class="form-input password-input" type="text" bind:value={accountForm.incomingPassword} />
                   {:else}
-                    <input class="form-input password-input" type="password" bind:value={accountForm.incomingPassword} />
+                    <input autocomplete="off" class="form-input password-input" type="password" bind:value={accountForm.incomingPassword} />
                   {/if}
                   <button 
                     class="password-toggle" 
@@ -1709,12 +1709,12 @@
             <div class="detail-form">
               <label class="form-row">
                 <span class="form-label">{t('settings.smtpServer')}</span>
-                <input class="form-input" type="text" bind:value={accountForm.smtpServer} placeholder="smtp.example.com" />
+                <input autocomplete="off" class="form-input" type="text" bind:value={accountForm.smtpServer} placeholder="smtp.example.com" />
               </label>
               <div class="form-row-inline">
                 <label class="form-row" style="flex:1">
                   <span class="form-label">{t('settings.port')}</span>
-                  <input class="form-input port-input" type="number" bind:value={accountForm.smtpPort} />
+                  <input autocomplete="off" class="form-input port-input" type="number" bind:value={accountForm.smtpPort} />
                 </label>
                 <label class="form-row" style="flex:1">
                   <span class="form-label">{t('settings.security')}</span>
@@ -1727,15 +1727,15 @@
               </div>
               <label class="form-row">
                 <span class="form-label">{t('settings.username')}</span>
-                <input class="form-input" type="text" bind:value={accountForm.smtpUsername} oninput={() => propagateUsername(accountForm.smtpUsername, 'smtp', 'calDavUsername', 'cardDavUsername')} />
+                <input autocomplete="off" class="form-input" type="text" bind:value={accountForm.smtpUsername} oninput={() => propagateUsername(accountForm.smtpUsername, 'smtp', 'calDavUsername', 'cardDavUsername')} />
               </label>
               <label class="form-row">
                 <span class="form-label">{t('settings.password')}</span>
                 <div class="password-wrapper">
                   {#if showSmtpPassword}
-                    <input class="form-input password-input" type="text" bind:value={accountForm.smtpPassword} />
+                    <input autocomplete="off" class="form-input password-input" type="text" bind:value={accountForm.smtpPassword} />
                   {:else}
-                    <input class="form-input password-input" type="password" bind:value={accountForm.smtpPassword} />
+                    <input autocomplete="off" class="form-input password-input" type="password" bind:value={accountForm.smtpPassword} />
                   {/if}
                   <button class="password-toggle" type="button" onclick={() => showSmtpPassword = !showSmtpPassword} data-tooltip={showSmtpPassword ? t('settings.hidePassword') : t('settings.showPassword')}>
                     {#if showSmtpPassword}
@@ -1760,19 +1760,19 @@
             <div class="detail-form">
               <label class="form-row">
                 <span class="form-label">{t('settings.calDavUrl')}</span>
-                <input class="form-input" type="url" bind:value={accountForm.calDavUrl} placeholder="https://calendar.example.com/dav/" />
+                <input autocomplete="off" class="form-input" type="url" bind:value={accountForm.calDavUrl} placeholder="https://calendar.example.com/dav/" />
               </label>
               <label class="form-row">
                 <span class="form-label">{t('settings.username')}</span>
-                <input class="form-input" type="text" bind:value={accountForm.calDavUsername} placeholder={accountForm.email || 'username'} oninput={() => propagateUsername(accountForm.calDavUsername, 'caldav', 'cardDavUsername')} />
+                <input autocomplete="off" class="form-input" type="text" bind:value={accountForm.calDavUsername} placeholder={accountForm.email || 'username'} oninput={() => propagateUsername(accountForm.calDavUsername, 'caldav', 'cardDavUsername')} />
               </label>
               <label class="form-row">
                 <span class="form-label">{t('settings.password')}</span>
                 <div class="password-wrapper">
                   {#if showCalDavPassword}
-                    <input class="form-input password-input" type="text" bind:value={accountForm.calDavPassword} />
+                    <input autocomplete="off" class="form-input password-input" type="text" bind:value={accountForm.calDavPassword} />
                   {:else}
-                    <input class="form-input password-input" type="password" bind:value={accountForm.calDavPassword} />
+                    <input autocomplete="off" class="form-input password-input" type="password" bind:value={accountForm.calDavPassword} />
                   {/if}
                   <button class="password-toggle" type="button" onclick={() => showCalDavPassword = !showCalDavPassword} aria-label={showCalDavPassword ? t('settings.hidePassword') : t('settings.showPassword')} data-tooltip={showCalDavPassword ? t('settings.hidePassword') : t('settings.showPassword')} data-tooltip-position="bottom">
                     {#if showCalDavPassword}
@@ -1797,19 +1797,19 @@
             <div class="detail-form">
               <label class="form-row">
                 <span class="form-label">{t('settings.cardDavUrl')}</span>
-                <input class="form-input" type="url" bind:value={accountForm.cardDavUrl} placeholder="https://contacts.example.com/dav/" />
+                <input autocomplete="off" class="form-input" type="url" bind:value={accountForm.cardDavUrl} placeholder="https://contacts.example.com/dav/" />
               </label>
               <label class="form-row">
                 <span class="form-label">{t('settings.username')}</span>
-                <input class="form-input" type="text" bind:value={accountForm.cardDavUsername} placeholder={accountForm.email || 'username'} />
+                <input autocomplete="off" class="form-input" type="text" bind:value={accountForm.cardDavUsername} placeholder={accountForm.email || 'username'} />
               </label>
               <label class="form-row">
                 <span class="form-label">{t('settings.password')}</span>
                 <div class="password-wrapper">
                   {#if showCardDavPassword}
-                    <input class="form-input password-input" type="text" bind:value={accountForm.cardDavPassword} />
+                    <input autocomplete="off" class="form-input password-input" type="text" bind:value={accountForm.cardDavPassword} />
                   {:else}
-                    <input class="form-input password-input" type="password" bind:value={accountForm.cardDavPassword} />
+                    <input autocomplete="off" class="form-input password-input" type="password" bind:value={accountForm.cardDavPassword} />
                   {/if}
                   <button class="password-toggle" type="button" onclick={() => showCardDavPassword = !showCardDavPassword} aria-label={showCardDavPassword ? t('settings.hidePassword') : t('settings.showPassword')} data-tooltip={showCardDavPassword ? t('settings.hidePassword') : t('settings.showPassword')} data-tooltip-position="bottom">
                     {#if showCardDavPassword}

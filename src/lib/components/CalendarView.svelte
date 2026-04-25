@@ -1545,7 +1545,7 @@
       <div class="ev-modal-body" bind:this={evModalBodyEl}>
         <div class="ev-field">
           <label class="ev-label" for="ev-title">{t('calendar.title')}</label>
-          <input id="ev-title" type="text" class="ev-input" bind:value={evTitle} placeholder={t('calendar.addTitle')} />
+          <input autocomplete="off" id="ev-title" type="text" class="ev-input" bind:value={evTitle} placeholder={t('calendar.addTitle')} />
         </div>
 
         <div class="ev-field">
@@ -1583,7 +1583,7 @@
         {#if evRepeats}
           <div class="ev-recur-row">
             <span class="ev-recur-label">{t('calendar.every')}</span>
-            <input type="text" inputmode="numeric" class="ev-input ev-input-small"
+            <input autocomplete="off" type="text" inputmode="numeric" class="ev-input ev-input-small"
               value={evRecurInterval}
               onkeydown={(e) => { if (!/^[0-9]$/.test(e.key) && !['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'].includes(e.key)) e.preventDefault(); }}
               oninput={(e) => { const raw = (e.target as HTMLInputElement).value.replace(/\D/g, '').slice(0, 3); (e.target as HTMLInputElement).value = raw; const v = parseInt(raw); evRecurInterval = v > 0 ? v : evRecurInterval; }}
@@ -1598,11 +1598,11 @@
           {#if (evRecurFreq === 'monthly' || evRecurFreq === 'yearly') && evDate}
             <div class="ev-recur-byday">
               <label class="ev-byday-opt">
-                <input type="radio" bind:group={evRecurByDayMode} value="date" />
+                <input autocomplete="off" type="radio" bind:group={evRecurByDayMode} value="date" />
                 {t('calendar.onDay', { day: new Date(evDate + 'T00:00:00').getDate() })}
               </label>
               <label class="ev-byday-opt">
-                <input type="radio" bind:group={evRecurByDayMode} value="weekday" />
+                <input autocomplete="off" type="radio" bind:group={evRecurByDayMode} value="weekday" />
                 On {evRecurFreq === 'yearly' ? byDayLabelYearly(evDate) : byDayLabel(evDate)}
               </label>
             </div>
@@ -1615,7 +1615,7 @@
 
         <div class="ev-field">
           <label class="ev-label" for="ev-location">{t('calendar.location')}</label>
-          <input id="ev-location" type="text" class="ev-input" bind:value={evLocation} placeholder={t('calendar.addLocation')} />
+          <input autocomplete="off" id="ev-location" type="text" class="ev-input" bind:value={evLocation} placeholder={t('calendar.addLocation')} />
         </div>
 
         <div class="ev-row">
@@ -1627,7 +1627,7 @@
         {#if evIsOnline}
           <div class="ev-field">
             <label class="ev-label" for="ev-meeting-url">{t('calendar.meetingUrl')}</label>
-            <input id="ev-meeting-url" class="ev-input" type="url" placeholder="https://..." bind:value={evMeetingUrl} />
+            <input autocomplete="off" id="ev-meeting-url" class="ev-input" type="url" placeholder="https://..." bind:value={evMeetingUrl} />
           </div>
         {/if}
 
@@ -1653,7 +1653,7 @@
 
         <div class="ev-field">
           <label class="ev-label" for="ev-desc">{t('calendar.description')}</label>
-          <textarea id="ev-desc" class="ev-input ev-textarea" bind:value={evDescription} placeholder={t('calendar.addDescription')} rows="3"></textarea>
+          <textarea autocomplete="off" id="ev-desc" class="ev-input ev-textarea" bind:value={evDescription} placeholder={t('calendar.addDescription')} rows="3"></textarea>
         </div>
 
         <!-- Attendees -->
@@ -1683,7 +1683,7 @@
           {/if}
 
           <div class="ev-att-search-wrap">
-            <input
+            <input autocomplete="off"
               bind:this={attSearchEl}
               type="text"
               class="ev-input"

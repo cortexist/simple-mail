@@ -695,7 +695,7 @@
             </button>
           </span>
         {/each}
-        <input
+        <input autocomplete="off"
           id="compose-to"
           class="chip-input"
           type="text"
@@ -732,7 +732,7 @@
               </button>
             </span>
           {/each}
-          <input
+          <input autocomplete="off"
             id="compose-cc"
             class="chip-input"
             type="text"
@@ -762,7 +762,7 @@
               </button>
             </span>
           {/each}
-          <input
+          <input autocomplete="off"
             id="compose-bcc"
             class="chip-input"
             type="text"
@@ -820,7 +820,7 @@
 
     <div class="field-row">
       <label class="field-label" for="compose-subject">{t('compose.subject')}</label>
-      <input
+      <input autocomplete="off"
         id="compose-subject"
         class="field-input"
         type="text"
@@ -962,7 +962,7 @@
           </svg>
         </button>
       </div>
-      <input
+      <input autocomplete="off"
         class="link-dialog-input"
         type="url"
         placeholder="https://example.com"

@@ -1076,7 +1076,7 @@
       </div>
       <div class="ct-modal-body" tabindex="-1">
         <!-- Photo picker -->
-        <input type="file" accept="image/*" class="ct-photo-file-input" bind:this={photoFileInput} onchange={handlePhotoFileChange} />
+        <input autocomplete="off" type="file" accept="image/*" class="ct-photo-file-input" bind:this={photoFileInput} onchange={handlePhotoFileChange} />
         <div class="ct-photo-picker">
           <button type="button" class="ct-photo-avatar" onclick={triggerPhotoPicker} aria-label="Photo" data-tooltip={t('contacts.choosePhoto')}>
             {#if ctPhotoUrl}
@@ -1119,48 +1119,48 @@
         <div class="ct-field-row">
           <div class="ct-field ct-field-half">
             <label class="ct-label" for="ct-first">{t('contacts.firstName')}</label>
-            <input id="ct-first" type="text" class="ct-input" bind:value={ctFirstName} placeholder={t('contacts.first')} />
+            <input autocomplete="off" id="ct-first" type="text" class="ct-input" bind:value={ctFirstName} placeholder={t('contacts.first')} />
           </div>
           <div class="ct-field ct-field-half">
             <label class="ct-label" for="ct-last">{t('contacts.lastName')}</label>
-            <input id="ct-last" type="text" class="ct-input" bind:value={ctLastName} placeholder={t('contacts.last')} />
+            <input autocomplete="off" id="ct-last" type="text" class="ct-input" bind:value={ctLastName} placeholder={t('contacts.last')} />
           </div>
         </div>
 
         <div class="ct-field-row">
           <div class="ct-field ct-field-third">
             <label class="ct-label" for="ct-middle">{t('contacts.middleName')}</label>
-            <input id="ct-middle" type="text" class="ct-input" bind:value={ctMiddleName} placeholder={t('contacts.middle')} />
+            <input autocomplete="off" id="ct-middle" type="text" class="ct-input" bind:value={ctMiddleName} placeholder={t('contacts.middle')} />
           </div>
           <div class="ct-field ct-field-abbr">
             <label class="ct-label" for="ct-prefix">{t('contacts.prefixLabel')}</label>
-            <input id="ct-prefix" type="text" class="ct-input" bind:value={ctPrefix} placeholder={t('contacts.prefix')} />
+            <input autocomplete="off" id="ct-prefix" type="text" class="ct-input" bind:value={ctPrefix} placeholder={t('contacts.prefix')} />
           </div>
           <div class="ct-field ct-field-abbr">
             <label class="ct-label" for="ct-suffix">{t('contacts.suffixLabel')}</label>
-            <input id="ct-suffix" type="text" class="ct-input" bind:value={ctSuffix} placeholder={t('contacts.suffix')} />
+            <input autocomplete="off" id="ct-suffix" type="text" class="ct-input" bind:value={ctSuffix} placeholder={t('contacts.suffix')} />
           </div>
         </div>
 
         <div class="ct-field">
           <label class="ct-label" for="ct-org">{t('contacts.organization')}</label>
-          <input id="ct-org" type="text" class="ct-input" bind:value={ctOrganization} placeholder={t('contacts.organization')} />
+          <input autocomplete="off" id="ct-org" type="text" class="ct-input" bind:value={ctOrganization} placeholder={t('contacts.organization')} />
         </div>
 
         <div class="ct-field-row">
           <div class="ct-field ct-field-half">
             <label class="ct-label" for="ct-job">{t('contacts.jobTitle')}</label>
-            <input id="ct-job" type="text" class="ct-input" bind:value={ctJobTitle} placeholder={t('contacts.jobTitle')} />
+            <input autocomplete="off" id="ct-job" type="text" class="ct-input" bind:value={ctJobTitle} placeholder={t('contacts.jobTitle')} />
           </div>
           <div class="ct-field ct-field-half">
             <label class="ct-label" for="ct-dept">{t('contacts.department')}</label>
-            <input id="ct-dept" type="text" class="ct-input" bind:value={ctDepartment} placeholder={t('contacts.department')} />
+            <input autocomplete="off" id="ct-dept" type="text" class="ct-input" bind:value={ctDepartment} placeholder={t('contacts.department')} />
           </div>
         </div>
 
         <div class="ct-field">
           <label class="ct-label" for="ct-birthday">{t('contacts.birthdayLabel')}</label>
-          <input id="ct-birthday" type="text" class="ct-input" bind:value={ctBirthday} placeholder={t('contacts.birthday')} />
+          <input autocomplete="off" id="ct-birthday" type="text" class="ct-input" bind:value={ctBirthday} placeholder={t('contacts.birthday')} />
         </div>
         
         <!-- Emails -->
@@ -1174,7 +1174,7 @@
               <select class="ct-input ct-label-select" bind:value={row.label}>
                 {#each EMAIL_LABELS as lbl}<option value={lbl}>{labelText(lbl)}</option>{/each}
               </select>
-              <input type="email" class="ct-input ct-multi-input" class:invalid={row.email.trim() && !isLikelyEmail(row.email)} bind:value={row.email} placeholder={t('contacts.emailPlaceholder')} />
+              <input autocomplete="off" type="email" class="ct-input ct-multi-input" class:invalid={row.email.trim() && !isLikelyEmail(row.email)} bind:value={row.email} placeholder={t('contacts.emailPlaceholder')} />
               <button type="button" class="ct-move-btn" onclick={() => moveEmailRow(i, -1)} disabled={i === 0} aria-label="Move Up" data-tooltip={t('contacts.moveUp')}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                   <polyline points="18 15 12 9 6 15" />
@@ -1205,7 +1205,7 @@
               <select class="ct-input ct-label-select" bind:value={row.label}>
                 {#each PHONE_LABELS as lbl}<option value={lbl}>{labelText(lbl)}</option>{/each}
               </select>
-              <input type="tel" class="ct-input ct-multi-input" bind:value={row.number} placeholder={t('contacts.phonePlaceholder')} onblur={() => { row.number = normalizePhone(row.number); }} />
+              <input autocomplete="off" type="tel" class="ct-input ct-multi-input" bind:value={row.number} placeholder={t('contacts.phonePlaceholder')} onblur={() => { row.number = normalizePhone(row.number); }} />
               <button type="button" class="ct-move-btn" onclick={() => movePhoneRow(i, -1)} disabled={i === 0} aria-label="Move Up" data-tooltip={t('contacts.moveUp')}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                   <polyline points="18 15 12 9 6 15" />
@@ -1225,7 +1225,7 @@
             <div class="ct-subtype-row">
               {#each PHONE_SUBTYPES as st}
                 <label class="ct-subtype-toggle">
-                  <input type="checkbox" checked={row.subtypes.includes(st)} onchange={() => togglePhoneSubtype(i, st)} />
+                  <input autocomplete="off" type="checkbox" checked={row.subtypes.includes(st)} onchange={() => togglePhoneSubtype(i, st)} />
                   <span>{labelText(st)}</span>
                 </label>
               {/each}
@@ -1261,14 +1261,14 @@
                   </svg>
                 </button>
               </div>
-              <input type="text" class="ct-input" bind:value={row.street} placeholder={t('contacts.street')} />
+              <input autocomplete="off" type="text" class="ct-input" bind:value={row.street} placeholder={t('contacts.street')} />
               <div class="ct-field-row">
-                <input type="text" class="ct-input ct-field-half" bind:value={row.city} placeholder={t('contacts.city')} />
-                <input type="text" class="ct-input ct-field-half" bind:value={row.region} placeholder={t('contacts.region')} />
+                <input autocomplete="off" type="text" class="ct-input ct-field-half" bind:value={row.city} placeholder={t('contacts.city')} />
+                <input autocomplete="off" type="text" class="ct-input ct-field-half" bind:value={row.region} placeholder={t('contacts.region')} />
               </div>
               <div class="ct-field-row">
-                <input type="text" class="ct-input ct-field-half" bind:value={row.postalCode} placeholder={t('contacts.postalCode')} />
-                <input type="text" class="ct-input ct-field-half" bind:value={row.country} placeholder={t('contacts.country')} />
+                <input autocomplete="off" type="text" class="ct-input ct-field-half" bind:value={row.postalCode} placeholder={t('contacts.postalCode')} />
+                <input autocomplete="off" type="text" class="ct-input ct-field-half" bind:value={row.country} placeholder={t('contacts.country')} />
               </div>
             </div>
           {/each}
@@ -1276,7 +1276,7 @@
 
         <div class="ct-field">
           <label class="ct-label" for="ct-notes">{t('contacts.notesLabel')}</label>
-          <textarea id="ct-notes" class="ct-input ct-textarea" bind:value={ctNotes} placeholder={t('contacts.notes')} rows="3"></textarea>
+          <textarea autocomplete="off" id="ct-notes" class="ct-input ct-textarea" bind:value={ctNotes} placeholder={t('contacts.notes')} rows="3"></textarea>
         </div>
       </div>
       <div class="ct-modal-footer">
@@ -1302,7 +1302,7 @@
       <div class="ct-modal-body">
         <div class="ct-field">
           <label class="ct-label" for="cl-name">{t('contacts.listName')}</label>
-          <input id="cl-name" type="text" class="ct-input" bind:value={clName} placeholder={t('contacts.listNamePlaceholder')} />
+          <input autocomplete="off" id="cl-name" type="text" class="ct-input" bind:value={clName} placeholder={t('contacts.listNamePlaceholder')} />
         </div>
         <div class="ct-field">
           <div class="ct-label">{t('contacts.members')} ({clMembers.length})</div>
@@ -1326,8 +1326,8 @@
         <div class="ct-field">
           <div class="ct-label">{t('contacts.addMember')}</div>
           <div class="cl-add-row">
-            <input type="text" class="ct-input cl-add-input" bind:value={clNewName} placeholder={t('contacts.nameOptional')} />
-            <input type="email" class="ct-input cl-add-input" class:invalid={clNewEmail.trim() && !isLikelyEmail(clNewEmail)} bind:value={clNewEmail} placeholder={t('contacts.emailPlaceholder')} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addListMember(); } }} />
+            <input autocomplete="off" type="text" class="ct-input cl-add-input" bind:value={clNewName} placeholder={t('contacts.nameOptional')} />
+            <input autocomplete="off" type="email" class="ct-input cl-add-input" class:invalid={clNewEmail.trim() && !isLikelyEmail(clNewEmail)} bind:value={clNewEmail} placeholder={t('contacts.emailPlaceholder')} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addListMember(); } }} />
             <button class="ct-btn ct-btn-secondary cl-add-btn" tabindex="-1" onclick={addListMember} disabled={!clNewEmail.trim() || !isLikelyEmail(clNewEmail)}>{t('common.add')}</button>
           </div>
           <button class="cl-pick-contacts-btn" tabindex="-1" onclick={() => (showContactPicker = !showContactPicker)}>
