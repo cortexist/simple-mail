@@ -1,4 +1,54 @@
-import type { Email, Folder, CalendarEvent, CalendarCategory, FullContact, Account } from '$lib/types';
+import type { Email, Folder, CalendarEvent, CalendarCategory, FullContact, Account, ContactPhoneEntry } from '$lib/types';
+
+// ── Mock-contact builder ─────────────────────────────
+// The mock data was authored before FullContact required emails/phones/addresses
+// arrays. This helper accepts the original flat shape (with `phone` / `mobile`)
+// and produces a fully-typed FullContact so we don't have to rewrite every
+// contact literal.
+
+interface LegacyContact {
+  id: string;
+  name: string;
+  email: string;
+  initials: string;
+  color: string;
+  phone?: string;
+  mobile?: string;
+  firstName?: string;
+  lastName?: string;
+  jobTitle?: string;
+  department?: string;
+  organization?: string;
+  photoUrl?: string;
+  birthday?: string;
+  notes?: string;
+  isFavorite: boolean;
+}
+
+function toFullContact(c: LegacyContact): FullContact {
+  const phones: ContactPhoneEntry[] = [];
+  if (c.phone) phones.push({ number: c.phone, label: 'Work', subtypes: [], isDefault: !c.mobile });
+  if (c.mobile) phones.push({ number: c.mobile, label: 'Mobile', subtypes: [], isDefault: true });
+  return {
+    id: c.id,
+    name: c.name,
+    email: c.email,
+    initials: c.initials,
+    color: c.color,
+    firstName: c.firstName,
+    lastName: c.lastName,
+    jobTitle: c.jobTitle,
+    department: c.department,
+    organization: c.organization,
+    photoUrl: c.photoUrl,
+    birthday: c.birthday,
+    notes: c.notes,
+    isFavorite: c.isFavorite,
+    emails: [{ email: c.email, label: 'Work', isDefault: true }],
+    phones,
+    addresses: [],
+  };
+}
 
 // ── Date helper ──────────────────────────────────────
 // All mock dates are relative to "today" so the demo always looks fresh.
@@ -540,7 +590,7 @@ const workCalendarEvents: CalendarEvent[] = [
   },
 ];
 
-const workContacts: FullContact[] = [
+const workContacts: FullContact[] = ([
   {
     id: 'c-1',
     name: 'Alex Johnson',
@@ -668,7 +718,7 @@ const workContacts: FullContact[] = [
     organization: 'Cortexist Inc.',
     isFavorite: false,
   },
-];
+] as LegacyContact[]).map(toFullContact);
 
 /* ═══════════════════════════════════════════════════════
    ACCOUNT 2 — Personal (Gmail)
@@ -865,7 +915,7 @@ const personalCalendarEvents: CalendarEvent[] = [
   },
 ];
 
-const personalContacts: FullContact[] = [
+const personalContacts: FullContact[] = ([
   {
     id: 'pc-1',
     name: 'Mom (Maria Nakamoto)',
@@ -919,7 +969,7 @@ const personalContacts: FullContact[] = [
     organization: 'Downtown Dental',
     isFavorite: false,
   },
-];
+] as LegacyContact[]).map(toFullContact);
 
 /* ═══════════════════════════════════════════════════════
    ACCOUNT 3 — Side Project (Indie Dev)
@@ -1110,7 +1160,7 @@ const sideCalendarEvents: CalendarEvent[] = [
   },
 ];
 
-const sideContacts: FullContact[] = [
+const sideContacts: FullContact[] = ([
   {
     id: 'sc-1',
     name: 'Nina Patel',
@@ -1142,7 +1192,7 @@ const sideContacts: FullContact[] = [
     organization: 'Stripe',
     isFavorite: false,
   },
-];
+] as LegacyContact[]).map(toFullContact);
 
 /* ═══════════════════════════════════════════════════════
    ACCOUNTS — Exported
