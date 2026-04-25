@@ -291,6 +291,50 @@
     {#if c.kind === 'sep'}
       <div class="cmd-separator"></div>
     {:else if c.kind === 'spacer'}
+      <div class="more-wrapper">
+        <button
+          class="cmd-btn cmd-icon-only"
+          data-cmd-id="__more"
+          tabindex="-1"
+          data-tooltip={t('commandBar.moreOptions')}
+          data-tooltip-position="bottom"
+          aria-label={t('commandBar.moreOptions')}
+          disabled={!hasOverflow}
+          onclick={(e) => { e.stopPropagation(); showMoreMenu = !showMoreMenu; }}
+        >
+          {@render icon('more')}
+        </button>
+        {#if showMoreMenu && hasOverflow}
+          <div class="more-menu" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+            {#each menuItems as c (c.id)}
+              {#if c.isMove}
+                <div class="more-section">
+                  {@render icon(c.iconKey)}
+                  <span>{t('commandBar.move')}</span>
+                </div>
+                {#each moveTargetFolders as folder (folder.id)}
+                  <button class="more-item more-subitem" tabindex="-1" onclick={() => { onMove?.(folder.id); showMoreMenu = false; }}>{folder.name}</button>
+                {/each}
+                {#if moveTargetFolders.length === 0}
+                  <div class="more-item" style="color: var(--text-tertiary); cursor: default;">{t('commandBar.noFolders')}</div>
+                {/if}
+              {:else}
+                <button
+                  class="more-item"
+                  class:cmd-danger={c.danger}
+                  class:active={c.active}
+                  tabindex="-1"
+                  disabled={c.disabled}
+                  onclick={() => { c.onClick(); showMoreMenu = false; }}
+                >
+                  {@render icon(c.iconKey)}
+                  <span>{c.label}</span>
+                </button>
+              {/if}
+            {/each}
+          </div>
+        {/if}
+      </div>
       <div class="cmd-spacer"></div>
     {:else if c.kind === 'caltoggle'}
       <div class="cal-view-toggle">
@@ -345,51 +389,6 @@
       </button>
     {/if}
   {/each}
-
-  <div class="more-wrapper">
-    <button
-      class="cmd-btn cmd-icon-only"
-      data-cmd-id="__more"
-      tabindex="-1"
-      data-tooltip={t('commandBar.moreOptions')}
-      data-tooltip-position="bottom-end"
-      aria-label={t('commandBar.moreOptions')}
-      disabled={!hasOverflow}
-      onclick={(e) => { e.stopPropagation(); showMoreMenu = !showMoreMenu; }}
-    >
-      {@render icon('more')}
-    </button>
-    {#if showMoreMenu && hasOverflow}
-      <div class="more-menu" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-        {#each menuItems as c (c.id)}
-          {#if c.isMove}
-            <div class="more-section">
-              {@render icon(c.iconKey)}
-              <span>{t('commandBar.move')}</span>
-            </div>
-            {#each moveTargetFolders as folder (folder.id)}
-              <button class="more-item more-subitem" tabindex="-1" onclick={() => { onMove?.(folder.id); showMoreMenu = false; }}>{folder.name}</button>
-            {/each}
-            {#if moveTargetFolders.length === 0}
-              <div class="more-item" style="color: var(--text-tertiary); cursor: default;">{t('commandBar.noFolders')}</div>
-            {/if}
-          {:else}
-            <button
-              class="more-item"
-              class:cmd-danger={c.danger}
-              class:active={c.active}
-              tabindex="-1"
-              disabled={c.disabled}
-              onclick={() => { c.onClick(); showMoreMenu = false; }}
-            >
-              {@render icon(c.iconKey)}
-              <span>{c.label}</span>
-            </button>
-          {/if}
-        {/each}
-      </div>
-    {/if}
-  </div>
 </div>
 
 <style>
@@ -559,7 +558,7 @@
   .more-menu {
     position: absolute;
     top: 100%;
-    right: 0;
+    left: 0;
     margin-top: 4px;
     background: var(--bg-primary);
     border: 1px solid var(--border-light);
