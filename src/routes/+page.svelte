@@ -338,7 +338,7 @@
     green:     { light: { accent: '#35a37d', hover: '#588b71', active: '#04a264', light: '#81ad81', selected: '#ccd5cc' }, dark: { accent: '#218564', hover: '#218362', active: '#5bd4a5', light: '#45966c', selected: '#0e402f' } },
     purple:    { light: { accent: '#8786d6', hover: '#5a58c4', active: '#7170d1', light: '#8c8cb9', selected: '#d7d7f0' }, dark: { accent: '#8786d6', hover: '#acabf0', active: '#9998e8', light: '#52527f', selected: '#3d3d8e' } },
     gold:      { light: { accent: '#daa705', hover: '#a98900', active: '#deaf04', light: '#cdbf89', selected: '#f9f3e0' }, dark: { accent: '#d0a405', hover: '#b6992f', active: '#ffcb13', light: '#7c6526', selected: '#5e4a07' } },
-    magenta:   { light: { accent: '#d53b80', hover: '#a20d6a', active: '#e0b313', light: '#c992b4', selected: '#eedbe6' }, dark: { accent: '#d53b80', hover: '#f25da8', active: '#e0b313', light: '#812355', selected: '#590632' } },
+    magenta:   { light: { accent: '#d53b80', hover: '#a20d6a', active: '#f47c9a', light: '#c992b4', selected: '#eedbe6' }, dark: { accent: '#d53b80', hover: '#f25da8', active: '#f47c9a', light: '#812355', selected: '#590632' } },
   };
 
   // Detect OS color-scheme preference
