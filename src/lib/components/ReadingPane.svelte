@@ -758,6 +758,7 @@
     border: none;
     border-top: 1px solid var(--border-light);
     margin-left: 32px;
+    margin-right: 32px;
     margin-bottom: 12px;
     max-width: 940px;
   }

@@ -14,8 +14,8 @@
         "title": "Mail",
         "width": 1280,
         "height": 800,
-        "minWidth": 1000,
-        "minHeight": 750,
+        "minWidth": 1080,
+        "minHeight": 800,
         "decorations": false
       }
     ],
