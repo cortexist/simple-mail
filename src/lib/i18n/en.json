@@ -212,6 +212,7 @@
     "system": "System",
     "colorTheme": "Color Theme",
     "language": "Language",
+    "version": "Version",
     "addAccount": "Add account",
     "moveUp": "Move up",
     "moveDown": "Move down",

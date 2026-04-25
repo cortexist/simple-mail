@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { getVersion } from '@tauri-apps/api/app';
   import type { Account, MailServerSettings, CalDavSettings, CardDavSettings, Theme } from '$lib/types';
   import { discoverMailSettings, startDavServer, stopDavServer, getDavServerStatus, addDavUser, removeDavUser, listDavUsers, getStorageInfo, setStorageQuota, getAccountOfflineDownload, setAccountOfflineDownload } from '$lib/data/dataService';
   import type { StorageInfo } from '$lib/data/dataService';
@@ -916,8 +917,13 @@
     }
   }
 
+  let appVersion = $state('');
+
   onMount(() => {
     refreshStorageInfo();
+    getVersion().then(v => { appVersion = v; }).catch(err => {
+      console.error('Failed to read app version:', err);
+    });
     // Focus first nav item (General, or Accounts in requireAccount mode)
     setTimeout(() => {
       settingsPanelEl?.querySelector<HTMLButtonElement>('.settings-nav-item')?.focus();
@@ -1143,6 +1149,7 @@
 
       <div class="settings-content-body">
         {#if selectedTab === 'general'}
+          <div class="settings-tab-general">
           <!-- ── Storage (top section) ── -->
           <section class="settings-section">
             <h4 class="section-title">{t('settings.storage')}</h4>
@@ -1339,6 +1346,11 @@
               {/each}
             </div>
           </section>
+
+          {#if appVersion}
+            <p class="app-version">{t('settings.version')} {appVersion}</p>
+          {/if}
+          </div>
 
         {:else if selectedTab === 'sync-server'}
           <!-- ── Local Sync Server ── -->
@@ -2284,6 +2296,21 @@
     background: var(--accent-light);
     color: var(--text-primary);
     font-weight: 600;
+  }
+
+  .settings-tab-general {
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+  }
+
+  .app-version {
+    margin-top: auto;
+    padding-top: 24px;
+    padding-bottom: 12px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    text-align: center;
   }
 
   /* ── Color swatches ── */
