@@ -501,6 +501,7 @@
   }
 
   .cmd-syncing .sync-icon {
+    color: var(--accent-active);
     animation: spin 1s linear infinite;
   }
 

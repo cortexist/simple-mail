@@ -1950,7 +1950,7 @@
   }
 
   .settings-nav-item.selected:hover {
-    border-left-color: var(--accent);
+    color: var(--text-secondary);
   }
 
   /* ── Accounts sub-items (nested under Accounts) ── */
@@ -1971,8 +1971,8 @@
     border-left-color: var(--accent-active);
   }
 
-  .settings-nav-account-row.selected:hover {
-    border-left-color: var(--accent);
+  .settings-nav-account-row.selected:hover .settings-nav-account-name {
+    color: var(--text-secondary);
   }
 
   .settings-nav-account-item {
@@ -2496,9 +2496,9 @@
     transition: background 0.1s, color 0.1s;
   }
 
-    .dav-add-user-form  .password-toggle {
-      left: 470px;
-    }
+  .dav-add-user-form .password-toggle {
+    left: 470px;
+  }
 
   .password-toggle:hover {
     background: var(--bg-hover);

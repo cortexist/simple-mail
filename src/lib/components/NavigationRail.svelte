@@ -98,15 +98,16 @@
   }
 
   .nav-item.selected {
-    color: var(--accent);
+    color: var(--accent-active);
     background: var(--bg-selected);
   }
 
   .nav-item.selected:hover {
     border-left: 4px solid var(--accent);
+    color: var(--text-secondary);
   }
 
-  .nav-item.active {
+  .nav-item.selected.active {
     border-left: 4px solid var(--accent-active);
     background: var(--bg-selected);
   }

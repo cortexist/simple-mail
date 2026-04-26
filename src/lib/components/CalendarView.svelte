@@ -3108,8 +3108,13 @@
     transition: background 0.1s;
     outline: none;
   }
+ 
+  .search-event-item:hover {
+    background-color: var(--bg-hover);
+  }
 
-  .search-event-item.active {
+  .search-event-item.active,
+  .search-event-item.active:hover {
     background: var(--bg-selected);
   }
 
@@ -3124,8 +3129,8 @@
     opacity: 1;
   }
 
-  .search-event-item:hover {
-    background-color: var(--bg-hover);
+  .search-event-item.active:hover .search-event-title {
+    color: var(--text-secondary);
   }
 
   .search-event-info {

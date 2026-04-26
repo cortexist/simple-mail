@@ -2593,14 +2593,14 @@
     display: flex;
     flex-direction: column;
     flex: 1;
-    gap: 1px;
+    gap: 0;
     min-width: 0;
     padding: 4px 0 5px 4px;
     background-color: var(--bg-primary);
   }
 
   .network-indicator {
-    height: 2px;
+    height: 4px;
     overflow: hidden;
     position: relative;
     flex-shrink: 0;
@@ -2609,16 +2609,21 @@
   .network-indicator.active::before {
     content: '';
     position: absolute;
-    inset: 0;
-    background-image: linear-gradient(90deg, transparent 0%, var(--accent) 50%, transparent 100%);
-    background-size: 50% 100%;
-    background-repeat: repeat;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    border: 1px solid var(--bg-primary);
+    border-right: 4px solid var(--accent-active);
+    border-radius: 0 2px 2px 0;
+    background-image: linear-gradient(45deg, transparent 0%, var(--accent-active) 100%);
     animation: network-slide 1.2s linear infinite;
+    will-change: transform;
   }
 
   @keyframes network-slide {
-    0%   { background-position: 0 0; }
-    100% { background-position: 100% 0; }
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(200%); }
   }
 
   .sync-error-banner {

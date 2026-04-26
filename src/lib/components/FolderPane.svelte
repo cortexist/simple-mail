@@ -306,9 +306,10 @@
 
   .folder-item.selected:hover {
     border-left-color: var(--accent);
+    color: var(--text-secondary); 
   }
 
-  .folder-pane.active .folder-item.selected:not(:hover) {
+  .folder-pane.active .folder-item.selected {
     border-left-color: var(--accent-active);
   }
 

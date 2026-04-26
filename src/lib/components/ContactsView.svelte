@@ -1403,7 +1403,6 @@
   .contacts-nav-item:hover {
     background: var(--bg-hover);
     border-left-color: var(--border-hover); 
-    color: var(--text-primary);
   }
 
   .contacts-nav-item.selected {
@@ -1414,9 +1413,10 @@
 
   .contacts-nav-item.selected:hover {
     border-left-color: var(--accent);
+    color: var(--text-secondary);
   }
 
-  .contacts-nav.active .contacts-nav-item.selected:not(:hover) {
+  .contacts-nav.active .contacts-nav-item.selected {
     border-left-color: var(--accent-active);
   }
 
@@ -1515,7 +1515,11 @@
     border-left-color: var(--accent);
   }
 
-  .contacts-scroll.active .contact-item.selected:not(:hover) {
+  .contact-item.selected:hover .contact-item-name {
+    color: var(--text-secondary);
+  }
+
+  .contacts-scroll.active .contact-item.selected {
     border-left-color: var(--accent-active);
   }
 

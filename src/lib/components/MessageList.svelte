@@ -587,7 +587,12 @@
     border-left-color: var(--accent);
   }
 
-  .email-items.active .email-item.selected:not(:hover) {
+  .email-item.selected:hover .sender-name {
+    color: var(--text-secondary);
+  }
+
+  .email-items.active .email-item.selected,
+  .email-items.active .email-item.selected:hover {
     border-left-color: var(--accent-active);
   }
 
