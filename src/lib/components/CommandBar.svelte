@@ -294,11 +294,13 @@
       <div class="more-wrapper">
         <button
           class="cmd-btn cmd-icon-only"
+          class:cmd-invisible={!hasOverflow}
           data-cmd-id="__more"
           tabindex="-1"
-          data-tooltip={t('commandBar.moreOptions')}
+          data-tooltip={hasOverflow ? t('commandBar.moreOptions') : null}
           data-tooltip-position="bottom"
           aria-label={t('commandBar.moreOptions')}
+          aria-hidden={!hasOverflow}
           disabled={!hasOverflow}
           onclick={(e) => { e.stopPropagation(); showMoreMenu = !showMoreMenu; }}
         >
@@ -554,6 +556,12 @@
   .more-wrapper {
     position: relative;
     flex-shrink: 0;
+  }
+
+  /* Reserve the slot when there's no overflow so the right-aligned buttons
+     don't shift. visibility:hidden also blocks pointer/tooltip events. */
+  .cmd-btn.cmd-invisible {
+    visibility: hidden;
   }
 
   .more-menu {
