@@ -1512,13 +1512,13 @@
             </div>
           {/if}
           <div class="event-detail-actions">
-            <button bind:this={detailEditBtnEl} class="ev-detail-action-btn ev-edit-btn" onclick={() => openEditEvent(selectedEvent!)}>
+            <button bind:this={detailEditBtnEl} class="btn btn-primary" onclick={() => openEditEvent(selectedEvent!)}>
               <svg width="14" height="14" viewBox="0 0 24 24">
                 <path fill="currentColor" d="M13.25 4a.75.75 0 0 1 0 1.5h-7A1.75 1.75 0 0 0 4.5 7.25v10.5c0 .966.784 1.75 1.75 1.75h10.5a1.75 1.75 0 0 0 1.75-1.75v-7a.75.75 0 0 1 1.5 0v7A3.25 3.25 0 0 1 16.75 21H6.25A3.25 3.25 0 0 1 3 17.75V7.25A3.25 3.25 0 0 1 6.25 4zm6.47-.78a.75.75 0 1 1 1.06 1.06L10.59 14.47L9 15l.53-1.59z"/>
               </svg>
               {t('calendar.editBtn')}
             </button>
-            <button bind:this={detailDeleteBtnEl} class="ev-detail-action-btn ev-delete-btn" onclick={() => confirmDeleteEvent(selectedEvent!)}>
+            <button bind:this={detailDeleteBtnEl} class="btn btn-danger" onclick={() => confirmDeleteEvent(selectedEvent!)}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
               </svg>
@@ -1714,11 +1714,11 @@
       </div>
       <div class="ev-modal-footer">
         {#if editingEventId}
-          <button class="ev-btn ev-btn-danger" onclick={deleteEvent}>{t('common.delete')}</button>
+          <button class="btn btn-danger" onclick={deleteEvent}>{t('common.delete')}</button>
         {/if}
         <div class="ev-footer-spacer"></div>
-        <button class="ev-btn ev-btn-secondary" onclick={closeEventModal}>{t('common.cancel')}</button>
-        <button class="ev-btn ev-btn-primary" onclick={saveEvent} disabled={!evTitle.trim()}>{t('common.save')}</button>
+        <button class="btn btn-secondary" onclick={closeEventModal}>{t('common.cancel')}</button>
+        <button class="btn btn-primary" onclick={saveEvent} disabled={!evTitle.trim()}>{t('common.save')}</button>
       </div>
     </div>
   </div>
@@ -1745,11 +1745,11 @@
       <h3 class="ev-delete-recur-title">{t('calendar.deleteRecurring')}</h3>
       <p class="ev-delete-recur-desc">{t('calendar.deleteRecurringDesc', { title: pendingDeleteEvent.title })}</p>
       <div class="ev-delete-recur-actions">
-        <button class="ev-btn ev-btn-secondary" onclick={() => executeRecurDelete('single')}>{t('calendar.thisEventOnly')}</button>
-        <button class="ev-btn ev-btn-secondary" onclick={() => executeRecurDelete('future')}>{t('calendar.thisAndFuture')}</button>
-        <button class="ev-btn ev-btn-danger" onclick={() => executeRecurDelete('all')}>{t('calendar.allEvents')}</button>
+        <button class="btn btn-secondary" onclick={() => executeRecurDelete('single')}>{t('calendar.thisEventOnly')}</button>
+        <button class="btn btn-secondary" onclick={() => executeRecurDelete('future')}>{t('calendar.thisAndFuture')}</button>
+        <button class="btn btn-danger" onclick={() => executeRecurDelete('all')}>{t('calendar.allEvents')}</button>
       </div>
-      <button class="ev-btn ev-btn-secondary ev-delete-recur-cancel" onclick={() => { showDeleteRecurDialog = false; pendingDeleteEvent = null; }}>{t('common.cancel')}</button>
+      <button class="btn btn-secondary ev-delete-recur-cancel" onclick={() => { showDeleteRecurDialog = false; pendingDeleteEvent = null; }}>{t('common.cancel')}</button>
     </div>
   </div>
 {/if}
@@ -2588,7 +2588,7 @@
     margin-top: 4px;
   }
 
-  .ev-detail-action-btn {
+  .btn {
     display: flex;
     align-items: center;
     gap: 4px;
@@ -2600,31 +2600,47 @@
     outline: none;
   }
 
-  .ev-edit-btn {
-    background: var(--accent);
+  .btn:focus {
+    border: 1px solid var(--accent-active);
   }
 
-  .ev-edit-btn:hover {
-    color: #000;
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: var(--text-on-accent);
+  }
+
+  .btn-primary:hover {
     background: var(--accent-hover);
   }
 
-  .ev-edit-btn:focus {
-    color: #000;
+  .btn-primary:focus {
     background: var(--accent-active);
   }
 
-  .ev-delete-btn {
-    border: 1px solid var(--danger, #d13438);
-    color: var(--danger, #d13438);
-    background: transparent;
+  .btn-secondary {
+    background: var(--bg-tertiary);
   }
 
-  .ev-delete-btn:hover {
+  .btn-secondary:hover {
+    background: var(--bg-hover);
+  }
+  
+  .btn-danger {
+    background: transparent;
+    color: var(--danger, #d13438);
+    border: 1px solid var(--danger, #d13438);
+  }
+
+  .btn-danger:hover {
     background: rgba(var(--danger-rgb, 209, 52, 56), 0.2);
   }
   
-  .ev-delete-btn:focus {
+  .btn-danger:focus {
     background: rgba(var(--danger-rgb, 209, 52, 56), 0.3);
   }
 
@@ -2763,54 +2779,6 @@
 
   .ev-footer-spacer {
     flex: 1;
-  }
-
-  .ev-btn {
-    padding: 6px 16px;
-    border-radius: 4px;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.1s;
-  }
-
-  .ev-btn:focus {
-    outline: none;
-    border: 1px solid var(--accent-active);
-  }
-
-  .ev-btn-primary {
-    background: var(--accent);
-    color: var(--text-primary);
-  }
-
-  .ev-btn-primary:hover:not(:disabled) {
-    background: var(--accent-hover);
-  }
-
-  .ev-btn-primary:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
-  .ev-btn-secondary {
-    background: transparent;
-    color: var(--text-primary);
-    border: 1px solid var(--border);
-  }
-
-  .ev-btn-secondary:hover {
-    background: var(--bg-hover);
-  }
-
-  .ev-btn-danger {
-    background: transparent;
-    color: var(--danger, #d13438);
-    border: 1px solid var(--danger, #d13438);
-  }
-
-  .ev-btn-danger:hover {
-    background: rgba(209, 52, 56, 0.08);
   }
 
   /* ── Attendees ── */

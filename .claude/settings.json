@@ -5,7 +5,8 @@
       "Bash(git add *)",
       "Bash(awk -F: '$1 > 736 {print; exit}')",
       "Bash(npx svelte-check *)",
-      "Bash(git ls-remote *)"
+      "Bash(git ls-remote *)",
+      "WebSearch"
     ]
   }
 }

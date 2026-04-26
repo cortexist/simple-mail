@@ -1676,8 +1676,8 @@
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    background: var(--bg-primary);
-    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
     border-radius: 8px;
     padding: 24px;
     z-index: 10001;
@@ -1719,18 +1719,17 @@
     background: #777;
   }
 
+  .discard-dialog-btn.danger:focus {
+    background: rgba(209, 52, 56, 0.3);
+  }
+
   .discard-dialog-btn.danger {
-    background-color: #4d0303;
-    border-color: #4d0303;
+    background: transparent;
+    color: var(--danger, #d13438);
+    border: 1px solid var(--danger, #d13438);
   }
 
   .discard-dialog-btn.danger:hover {
-    color: white;
-    background: #b52a2d;
-  }
-
-  .discard-dialog-btn.danger:focus {
-    color: white;
-    background: #d13438;
+    background: rgba(209, 52, 56, 0.2);
   }
 </style>

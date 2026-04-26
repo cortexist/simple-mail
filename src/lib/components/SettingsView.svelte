@@ -1205,7 +1205,7 @@
               {#if !storageEditing}
                 <div class="storage-actions">
                   {#if info.canEnable}
-                    <button class="btn" onclick={beginEditStorage}>
+                    <button class="btn btn-secondary" onclick={beginEditStorage}>
                       {info.quotaBytes != null ? t('settings.storageChange') : t('settings.storageSet')}
                     </button>
                   {:else}
@@ -2513,12 +2513,15 @@
   }
 
   .btn {
-    padding: 6px 16px;
-    font-size: 12px;
-    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 12px;
     border-radius: 4px;
+    font-size: 12px;
     cursor: pointer;
-    transition: background 0.1s, color 0.1s;
+    transition: background 0.1s;
+    outline: none;
   }
 
   .btn-primary {
@@ -2556,7 +2559,7 @@
   }
 
   .btn-danger:hover {
-    background: rgba(209, 52, 56, 0.08);
+    background: rgba(209, 52, 56, 0.2);
   }
 
   /* ── Empty state ── */

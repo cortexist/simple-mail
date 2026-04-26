@@ -1263,8 +1263,8 @@
       </div>
       <div class="ct-modal-footer">
         <div class="ct-footer-spacer"></div>
-        <button class="ct-btn ct-btn-secondary" onclick={closeContactModal}>{t('common.cancel')}</button>
-        <button class="ct-btn ct-btn-primary" onclick={saveContact} disabled={!ctCanSave}>{t('common.save')}</button>
+        <button class="btn btn-secondary" onclick={closeContactModal}>{t('common.cancel')}</button>
+        <button class="btn btn-primary" onclick={saveContact} disabled={!ctCanSave}>{t('common.save')}</button>
       </div>
     </div>
   </div>
@@ -1310,7 +1310,7 @@
           <div class="cl-add-row">
             <input autocomplete="off" type="text" class="ct-input cl-add-input" bind:value={clNewName} placeholder={t('contacts.nameOptional')} />
             <input autocomplete="off" type="email" class="ct-input cl-add-input" class:invalid={clNewEmail.trim() && !isLikelyEmail(clNewEmail)} bind:value={clNewEmail} placeholder={t('contacts.emailPlaceholder')} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addListMember(); } }} />
-            <button class="ct-btn ct-btn-secondary cl-add-btn" tabindex="-1" onclick={addListMember} disabled={!clNewEmail.trim() || !isLikelyEmail(clNewEmail)}>{t('common.add')}</button>
+            <button class="btn btn-secondary cl-add-btn" tabindex="-1" onclick={addListMember} disabled={!clNewEmail.trim() || !isLikelyEmail(clNewEmail)}>{t('common.add')}</button>
           </div>
           <button class="cl-pick-contacts-btn" tabindex="-1" onclick={() => (showContactPicker = !showContactPicker)}>
             <svg width="14" height="14" viewBox="0 0 24 24">
@@ -1341,11 +1341,11 @@
       </div>
       <div class="ct-modal-footer">
         {#if editingListId}
-          <button class="ct-btn ct-btn-danger" tabindex="-1" onclick={deleteList}>{t('common.delete')}</button>
+          <button class="btn btn-danger" tabindex="-1" onclick={deleteList}>{t('common.delete')}</button>
         {/if}
         <div class="ct-footer-spacer"></div>
-        <button class="ct-btn ct-btn-secondary" tabindex="-1" onclick={closeListModal}>{t('common.cancel')}</button>
-        <button class="ct-btn ct-btn-primary" tabindex="-1" onclick={saveList} disabled={!clName.trim()}>{t('common.save')}</button>
+        <button class="btn btn-secondary" tabindex="-1" onclick={closeListModal}>{t('common.cancel')}</button>
+        <button class="btn btn-primary" tabindex="-1" onclick={saveList} disabled={!clName.trim()}>{t('common.save')}</button>
       </div>
     </div>
   </div>
@@ -2162,52 +2162,54 @@
     flex: 1;
   }
 
-  .ct-btn {
-    padding: 6px 16px;
+  .btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 12px;
     border-radius: 4px;
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 12px;
     cursor: pointer;
     transition: background 0.1s;
     outline: none;
   }
 
-  .ct-btn:focus {
+  .btn:focus {
     box-shadow: 0 0 0 1px var(--accent-active);
   }
 
-  .ct-btn-primary {
+  .btn-primary {
     background: var(--accent);
-    color: var(--text-primary);
+    color: var(--text-on-accent);
   }
 
-  .ct-btn-primary:hover:not(:disabled) {
+  .btn-primary:hover:not(:disabled) {
     background: var(--accent-hover);
   }
 
-  .ct-btn-primary:disabled {
+  .btn-primary:disabled {
     opacity: 0.5;
     cursor: default;
   }
 
-  .ct-btn-secondary {
+  .btn-secondary {
     background: transparent;
     color: var(--text-primary);
     border: 1px solid var(--border);
   }
 
-  .ct-btn-secondary:hover {
+  .btn-secondary:hover {
     background: var(--bg-hover);
   }
 
-  .ct-btn-danger {
+  .btn-danger {
     background: transparent;
     color: var(--danger, #d13438);
     border: 1px solid var(--danger, #d13438);
   }
 
-  .ct-btn-danger:hover {
-    background: rgba(209, 52, 56, 0.08);
+  .btn-danger:hover {
+    background: rgba(209, 52, 56, 0.2);
   }
 
   /* ── Photo Picker ── */
