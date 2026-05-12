@@ -2,6 +2,7 @@
 
 :root {
   /* Accent */
+  --app-icon: #7979d1;
   --accent: #0078d4;
   --accent-hover: #106ebe;
   --accent-active: #005a9e;
@@ -86,6 +87,7 @@ a {
 
 /* ── Dark theme ── */
 [data-theme="dark"] {
+  --app-icon: #9797ef;
   --accent: #4cc2ff;
   --accent-hover: #62cdff;
   --accent-active: #2eb8ff;

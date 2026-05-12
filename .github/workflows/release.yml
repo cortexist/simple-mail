@@ -88,8 +88,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'Simple Mail ${{ github.ref_name }}'
-          releaseBody: 'See the [changelog](https://github.com/cortexist/simple-mail/blob/main/CHANGELOG.md) for details.'
+          releaseName: 'Agentic Mail ${{ github.ref_name }}'
+          releaseBody: 'See the [changelog](https://github.com/cortexist/agentic-mail/blob/main/CHANGELOG.md) for details.'
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }} ${{ matrix.args }}

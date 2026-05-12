@@ -242,7 +242,7 @@
 
   .app-icon {
     flex-shrink: 0;
-    color: var(--accent);
+    color: var(--app-icon);
   }
 
   .app-name {

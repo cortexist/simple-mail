@@ -1,6 +1,6 @@
 {
-  "productName": "simple-mail",
-  "identifier": "com.cortexist.simple-mail",
+  "productName": "agentic-mail",
+  "identifier": "com.cortexist.agentic-mail",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:2040",

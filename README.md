@@ -1,11 +1,11 @@
-# Simple Mail
+# Agentic Mail
 by Cortexist
 
 A privacy-focused desktop mail, calendar, and contacts client built with Tauri, Svelte 5, and Rust. All data stays on your machine — no third-party cloud, no telemetry. Ships with light, dark, and system color themes, full internationalization in nine languages, and runs natively on Windows, macOS, and Linux.
 
 [![Buy Me A Coffee](https://img.shields.io/badge/-buy_me_a_coffee-gray?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/cortexist)
 
-![Simple Mail by Cortexist](./screenshots/theme-i18n.png)
+![Agentic Mail by Cortexist](./screenshots/theme-i18n.png)
 
 ## Features
 
@@ -141,8 +141,8 @@ The production binary and installer are output to `src-tauri/target/release/bund
 Gmail no longer accepts your regular Google password over IMAP/SMTP. Use an **App Password**:
 
 1. Go to https://myaccount.google.com/security and enable **2-Step Verification**. This is a required separate step — Google may already send SMS codes to your phone on risky sign-ins, but that is *not* the same as having 2-Step Verification turned on, and the App Passwords page stays hidden until you explicitly enable it.
-2. Once 2-Step Verification is on, visit https://myaccount.google.com/apppasswords and generate a 16-character app password for Simple Mail.
-3. In Simple Mail, add a Gmail account with:
+2. Once 2-Step Verification is on, visit https://myaccount.google.com/apppasswords and generate a 16-character app password for Agentic Mail.
+3. In Agentic Mail, add a Gmail account with:
    - IMAP: `imap.gmail.com` port `993`, SSL/TLS
    - SMTP: `smtp.gmail.com` port `465` (SSL) or `587` (STARTTLS)
    - Username: your full Gmail address
@@ -150,9 +150,9 @@ Gmail no longer accepts your regular Google password over IMAP/SMTP. Use an **Ap
 
 Gmail's `[Gmail]/All Mail` is intentionally not synced — on IMAP it contains every message in the account, including everything already visible in Inbox/Sent/Trash, so syncing it would duplicate the entire mailbox. This matches Thunderbird's default behavior. Messages you archived in Gmail web (removed from Inbox but kept only in All Mail) remain on the server and are reachable via the browser.
 
-**Labels.** Simple Mail treats Gmail labels as display-only chips on the message, not as folders in the sidebar. User labels show as clickable chips under the subject line in the reading pane; clicking a chip runs a `label:<name>` search. Gmail's own internal markers (`\Inbox`, `\Starred`, `\Important`, `CATEGORY_*`) are hidden since they already map to other UI state. Custom user labels are currently read-only — adding or removing labels from within Simple Mail is not yet supported.
+**Labels.** Agentic Mail treats Gmail labels as display-only chips on the message, not as folders in the sidebar. User labels show as clickable chips under the subject line in the reading pane; clicking a chip runs a `label:<name>` search. Gmail's own internal markers (`\Inbox`, `\Starred`, `\Important`, `CATEGORY_*`) are hidden since they already map to other UI state. Custom user labels are currently read-only — adding or removing labels from within Agentic Mail is not yet supported.
 
-**Primary / Promotions / Social / Updates / Forums** are mapped to Simple Mail's Priority / Regular split: Primary → Priority, the other four → Regular. Uncategorized messages fall through to the built-in heuristic. If you manually change Priority/Regular on a message, your choice persists through syncs.
+**Primary / Promotions / Social / Updates / Forums** are mapped to Agentic Mail's Priority / Regular split: Primary → Priority, the other four → Regular. Uncategorized messages fall through to the built-in heuristic. If you manually change Priority/Regular on a message, your choice persists through syncs.
 
 ## Search
 
