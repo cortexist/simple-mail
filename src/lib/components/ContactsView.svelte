@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { FullContact, ContactList, ContactListMember } from '$lib/types';
-  import { toggleContactFavorite } from '$lib/data/dataService';
+  import { fireToggleContactFavorite } from '$lib/stores/contactsStore.svelte';
   import { t } from '$lib/i18n/index.svelte';
   import { isLikelyEmail } from '$lib/utils';
 
@@ -54,9 +54,13 @@
     return mutedAddresses.has(contact.email.toLowerCase());
   }
 
-  async function toggleFavorite(contact: FullContact) {
+  function toggleFavorite(contact: FullContact) {
     const newVal = !contact.isFavorite;
-    await toggleContactFavorite(contact.id, newVal);
+    // Local-only DB write — fire and forget. The backend's
+    // contacts:favorite-changed echo also updates parent state via
+    // applyContactFavoriteEcho, so the visual stays consistent across
+    // multiple subscribers (incl. future MCP-driven changes).
+    fireToggleContactFavorite(contact.id, newVal);
     onToggleFavorite?.(contact.id, newVal);
   }
 

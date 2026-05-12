@@ -9,8 +9,10 @@ mod carddav_client;
 mod autodiscover;
 pub mod dav_server;
 mod offline_download;
+mod events;
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::path::PathBuf;
 use log::LevelFilter;
 use rusqlite::Connection;
@@ -266,6 +268,17 @@ pub struct AppState {
     /// Cancellation tokens for the per-account offline-download workers.
     /// Presence of a key ⇒ a worker is running.
     pub offline_workers: Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>,
+    /// Monotonic sequence number tagged onto every push event. The frontend
+    /// stores the last seen seq per (entity, field) and drops echoes that
+    /// arrive out of order — e.g. quick star → unstar where the IMAP round
+    /// trips complete in reverse.
+    pub event_seq: AtomicU64,
+}
+
+impl AppState {
+    pub fn next_seq(&self) -> u64 {
+        self.event_seq.fetch_add(1, Ordering::Relaxed) + 1
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────
@@ -820,13 +833,13 @@ fn set_account_positions(
 }
 
 #[tauri::command]
-async fn update_email_read(
+fn update_email_read(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     email_id: String,
     is_read: bool,
 ) -> Result<(), String> {
-    // Update local DB first
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -836,7 +849,6 @@ async fn update_email_read(
         .map_err(|e| e.to_string())?;
     }
 
-    // Sync \Seen flag to IMAP server
     let (uid, folder, settings) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let uid_folder: Option<(u32, String)> = conn.query_row(
@@ -849,42 +861,60 @@ async fn update_email_read(
         (uid_folder.as_ref().map(|(u, _)| *u), uid_folder.map(|(_, f)| f), settings)
     };
 
-    if let (Some(uid), Some(folder), Some(settings)) = (uid, folder, settings) {
-        match imap_client::connect(&settings).await {
-            Ok(mut session) => {
+    let seq = state.next_seq();
+    let db_arc = state.db.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let mut applied = is_read;
+        if let (Some(uid), Some(folder), Some(settings)) = (uid, folder, settings) {
+            let outcome = async {
+                let mut session = imap_client::connect(&settings).await?;
                 let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
                 let imap_folder = remote_folders.iter()
                     .find(|(_, mapped)| *mapped == folder)
                     .map(|(name, _)| name.clone());
                 if let Some(imap_folder) = imap_folder {
                     let flags = &[async_imap::types::Flag::Seen];
-                    if is_read {
-                        if let Err(e) = imap_client::set_flags(&mut session, &imap_folder, &[uid], flags).await {
-                            log::error!("IMAP set \\Seen failed for UID {}: {}", uid, e);
-                        }
+                    let res = if is_read {
+                        imap_client::set_flags(&mut session, &imap_folder, &[uid], flags).await
                     } else {
-                        if let Err(e) = imap_client::remove_flags(&mut session, &imap_folder, &[uid], flags).await {
-                            log::error!("IMAP remove \\Seen failed for UID {}: {}", uid, e);
-                        }
-                    }
+                        imap_client::remove_flags(&mut session, &imap_folder, &[uid], flags).await
+                    };
+                    let _ = session.logout().await;
+                    res
+                } else {
+                    let _ = session.logout().await;
+                    Ok(())
                 }
-                let _ = session.logout().await;
+            }.await;
+
+            if let Err(e) = outcome {
+                log::error!("IMAP \\Seen sync failed for UID {}: {}", uid, e);
+                applied = !is_read;
+                if let Ok(conn) = db_arc.lock() {
+                    let _ = conn.execute(
+                        "UPDATE emails SET is_read = ?2 WHERE id = ?1",
+                        rusqlite::params![email_id, applied as i32],
+                    );
+                }
             }
-            Err(e) => log::error!("IMAP connect failed for read flag sync: {}", e),
         }
-    }
+        events::emit_email_flag_changed(&app, &account_id, &email_id, "read", applied, seq);
+    });
 
     Ok(())
 }
 
 #[tauri::command]
-async fn update_email_starred(
+fn update_email_starred(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     email_id: String,
     is_starred: bool,
 ) -> Result<(), String> {
-    // Update local DB first
+    // 1. Apply to local DB synchronously so any concurrent read sees the new
+    //    value before this command returns.
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -894,7 +924,7 @@ async fn update_email_starred(
         .map_err(|e| e.to_string())?;
     }
 
-    // Sync \Flagged to IMAP server
+    // 2. Snapshot the IMAP coordinates before releasing the lock.
     let (uid, folder, settings) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let uid_folder: Option<(u32, String)> = conn.query_row(
@@ -907,41 +937,73 @@ async fn update_email_starred(
         (uid_folder.as_ref().map(|(u, _)| *u), uid_folder.map(|(_, f)| f), settings)
     };
 
-    if let (Some(uid), Some(folder), Some(settings)) = (uid, folder, settings) {
-        match imap_client::connect(&settings).await {
-            Ok(mut session) => {
+    // 3. Stamp the success-case seq up front so the echo carries the same
+    //    sequence regardless of how long the IMAP call takes.
+    let seq = state.next_seq();
+    let db_arc = state.db.clone();
+
+    // 4. Background the IMAP round trip + echo emit. The command returns now.
+    tauri::async_runtime::spawn(async move {
+        let mut applied = is_starred;
+        if let (Some(uid), Some(folder), Some(settings)) = (uid, folder, settings) {
+            let outcome = async {
+                let mut session = imap_client::connect(&settings).await?;
                 let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
                 let imap_folder = remote_folders.iter()
                     .find(|(_, mapped)| *mapped == folder)
                     .map(|(name, _)| name.clone());
                 if let Some(imap_folder) = imap_folder {
                     let flags = &[async_imap::types::Flag::Flagged];
-                    if is_starred {
-                        if let Err(e) = imap_client::set_flags(&mut session, &imap_folder, &[uid], flags).await {
-                            log::error!("IMAP set \\Flagged failed for UID {}: {}", uid, e);
-                        }
+                    let res = if is_starred {
+                        imap_client::set_flags(&mut session, &imap_folder, &[uid], flags).await
                     } else {
-                        if let Err(e) = imap_client::remove_flags(&mut session, &imap_folder, &[uid], flags).await {
-                            log::error!("IMAP remove \\Flagged failed for UID {}: {}", uid, e);
-                        }
-                    }
+                        imap_client::remove_flags(&mut session, &imap_folder, &[uid], flags).await
+                    };
+                    let _ = session.logout().await;
+                    res
+                } else {
+                    let _ = session.logout().await;
+                    Ok(())
                 }
-                let _ = session.logout().await;
+            }.await;
+
+            if let Err(e) = outcome {
+                log::error!("IMAP \\Flagged sync failed for UID {}: {}", uid, e);
+                applied = !is_starred;
+                // Roll back the local DB so it matches authoritative server state.
+                if let Ok(conn) = db_arc.lock() {
+                    let _ = conn.execute(
+                        "UPDATE emails SET is_starred = ?2 WHERE id = ?1",
+                        rusqlite::params![email_id, applied as i32],
+                    );
+                }
             }
-            Err(e) => log::error!("IMAP connect failed for starred flag sync: {}", e),
         }
-    }
+        events::emit_email_flag_changed(&app, &account_id, &email_id, "starred", applied, seq);
+    });
 
     Ok(())
 }
 
 #[tauri::command]
-async fn update_email_replied(
+fn update_email_replied(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     email_id: String,
     is_replied: bool,
 ) -> Result<(), String> {
+    // Snapshot the prior replied_at so a rollback can restore it without
+    // losing the original "Replied 3 days ago" timestamp.
+    let prev_replied_at: Option<String> = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT replied_at FROM emails WHERE id = ?1",
+            rusqlite::params![email_id],
+            |row| row.get(0),
+        ).ok().flatten()
+    };
+
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -952,7 +1014,6 @@ async fn update_email_replied(
         .map_err(|e| e.to_string())?;
     }
 
-    // Sync \Answered flag to IMAP server
     let (uid, folder, settings) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let uid_folder: Option<(u32, String)> = conn.query_row(
@@ -965,61 +1026,101 @@ async fn update_email_replied(
         (uid_folder.as_ref().map(|(u, _)| *u), uid_folder.map(|(_, f)| f), settings)
     };
 
-    if let (Some(uid), Some(folder), Some(settings)) = (uid, folder, settings) {
-        match imap_client::connect(&settings).await {
-            Ok(mut session) => {
+    let seq = state.next_seq();
+    let db_arc = state.db.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let mut applied = is_replied;
+        if let (Some(uid), Some(folder), Some(settings)) = (uid, folder, settings) {
+            let outcome = async {
+                let mut session = imap_client::connect(&settings).await?;
                 let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
                 let imap_folder = remote_folders.iter()
                     .find(|(_, mapped)| *mapped == folder)
                     .map(|(name, _)| name.clone());
                 if let Some(imap_folder) = imap_folder {
                     let flags = &[async_imap::types::Flag::Answered];
-                    if is_replied {
-                        if let Err(e) = imap_client::set_flags(&mut session, &imap_folder, &[uid], flags).await {
-                            log::error!("IMAP set \\Answered failed for UID {}: {}", uid, e);
-                        }
+                    let res = if is_replied {
+                        imap_client::set_flags(&mut session, &imap_folder, &[uid], flags).await
                     } else {
-                        if let Err(e) = imap_client::remove_flags(&mut session, &imap_folder, &[uid], flags).await {
-                            log::error!("IMAP remove \\Answered failed for UID {}: {}", uid, e);
-                        }
-                    }
+                        imap_client::remove_flags(&mut session, &imap_folder, &[uid], flags).await
+                    };
+                    let _ = session.logout().await;
+                    res
+                } else {
+                    let _ = session.logout().await;
+                    Ok(())
                 }
-                let _ = session.logout().await;
+            }.await;
+
+            if let Err(e) = outcome {
+                log::error!("IMAP \\Answered sync failed for UID {}: {}", uid, e);
+                applied = !is_replied;
+                if let Ok(conn) = db_arc.lock() {
+                    let _ = conn.execute(
+                        "UPDATE emails SET is_replied = ?2, replied_at = ?3 WHERE id = ?1",
+                        rusqlite::params![email_id, applied as i32, prev_replied_at],
+                    );
+                }
             }
-            Err(e) => log::error!("IMAP connect failed for replied flag sync: {}", e),
         }
-    }
+        events::emit_email_flag_changed(&app, &account_id, &email_id, "replied", applied, seq);
+    });
 
     Ok(())
 }
 
 #[tauri::command]
 fn update_email_pinned(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     email_id: String,
     is_pinned: bool,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE emails SET is_pinned = ?2 WHERE id = ?1",
-        rusqlite::params![email_id, is_pinned as i32],
-    )
-    .map_err(|e| e.to_string())?;
+    let account_id: Option<String> = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE emails SET is_pinned = ?2 WHERE id = ?1",
+            rusqlite::params![email_id, is_pinned as i32],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT account_id FROM emails WHERE id = ?1",
+            rusqlite::params![email_id],
+            |row| row.get(0),
+        ).ok()
+    };
+    let seq = state.next_seq();
+    if let Some(account_id) = account_id {
+        events::emit_email_flag_changed(&app, &account_id, &email_id, "pinned", is_pinned, seq);
+    }
     Ok(())
 }
 
 #[tauri::command]
 fn update_email_focused(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     email_id: String,
     is_focused: bool,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE emails SET is_focused = ?2, is_focused_manual = 1 WHERE id = ?1",
-        rusqlite::params![email_id, is_focused as i32],
-    )
-    .map_err(|e| e.to_string())?;
+    let account_id: Option<String> = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE emails SET is_focused = ?2, is_focused_manual = 1 WHERE id = ?1",
+            rusqlite::params![email_id, is_focused as i32],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT account_id FROM emails WHERE id = ?1",
+            rusqlite::params![email_id],
+            |row| row.get(0),
+        ).ok()
+    };
+    let seq = state.next_seq();
+    if let Some(account_id) = account_id {
+        events::emit_email_flag_changed(&app, &account_id, &email_id, "focused", is_focused, seq);
+    }
     Ok(())
 }
 
@@ -1124,9 +1225,16 @@ fn apply_email_labels(
 
 #[tauri::command]
 async fn sync_mail(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
 ) -> Result<MailSyncResult, String> {
+    let seq = state.next_seq();
+    let event_account_id = account_id.clone();
+    // Wrap the existing IMAP sync logic so we can capture the result and emit
+    // `mail:sync-completed` before returning — frontend treats the command as
+    // fire-and-forget and reacts to the event.
+    let result: Result<MailSyncResult, String> = async {
     // Load settings from DB (need to clone out because we can't hold the lock across await)
     let (settings, folders_to_sync) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -1484,12 +1592,37 @@ async fn sync_mail(
         flag_updates: total_flags,
         errors,
     })
+    }.await;
+
+    let event = match &result {
+        Ok(r) => events::MailSyncCompletedEvent {
+            account_id: event_account_id.clone(),
+            ok: true,
+            new_count: r.new_count,
+            deleted_count: r.deleted_count,
+            flag_updates: r.flag_updates,
+            errors: r.errors.clone(),
+            seq,
+        },
+        Err(e) => events::MailSyncCompletedEvent {
+            account_id: event_account_id.clone(),
+            ok: false,
+            new_count: 0,
+            deleted_count: 0,
+            flag_updates: 0,
+            errors: vec![e.clone()],
+            seq,
+        },
+    };
+    events::emit_mail_sync_completed(&app, event);
+    result
 }
 
 // ── Delete email ────────────────────────────────────────
 
 #[tauri::command]
-async fn delete_email(
+fn delete_email(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     email_id: String,
@@ -1505,7 +1638,6 @@ async fn delete_email(
             )
             .map_err(|_| "Email not found".to_string())?;
 
-        // Look up the IMAP UID for this email
         let uid: Option<u32> = conn
             .query_row(
                 "SELECT uid FROM imap_uid_map WHERE email_id = ?1",
@@ -1520,95 +1652,114 @@ async fn delete_email(
         (folder, uid, message_id, settings)
     };
 
-    // Sync deletion to IMAP server if we have UID and settings
-    let mut new_trash_uid: Option<u32> = None;
-    if let (Some(uid), Some(settings)) = (uid, settings) {
-        match imap_client::connect(&settings).await {
-            Ok(mut session) => {
-                let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
+    // Apply local DB change up front so the UI's folder filter sees it
+    // immediately: soft delete moves the row to 'deleted'; permanent delete
+    // (already in 'deleted') drops it entirely.
+    let permanent = folder == "deleted";
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        if permanent {
+            conn.execute("DELETE FROM email_recipients WHERE email_id = ?1", rusqlite::params![email_id]).ok();
+            conn.execute("DELETE FROM imap_uid_map WHERE email_id = ?1", rusqlite::params![email_id]).ok();
+            conn.execute("DELETE FROM emails WHERE id = ?1", rusqlite::params![email_id])
+                .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "UPDATE emails SET folder = 'deleted' WHERE id = ?1",
+                rusqlite::params![email_id],
+            ).map_err(|e| e.to_string())?;
+            // Stale source-folder UID mapping; rebuilds when the IMAP move resolves
+            // or on the next sync if it fails.
+            conn.execute("DELETE FROM imap_uid_map WHERE email_id = ?1", rusqlite::params![email_id]).ok();
+        }
+    }
 
-                // Find the IMAP name for the email's current folder
+    let seq = state.next_seq();
+    let db_arc = state.db.clone();
+    let folder_clone = folder.clone();
+
+    tauri::async_runtime::spawn(async move {
+        // Default: report success — soft delete emits folder=deleted, permanent emits removed.
+        let mut soft_delete_failed = false;
+
+        if let (Some(uid), Some(settings)) = (uid, settings) {
+            let outcome = async {
+                let mut session = imap_client::connect(&settings).await?;
+                let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
                 let source_imap = remote_folders.iter()
-                    .find(|(_, mapped)| *mapped == folder)
+                    .find(|(_, mapped)| *mapped == folder_clone)
                     .map(|(name, _)| name.clone());
 
-                if let Some(source) = source_imap {
-                    if folder == "deleted" {
-                        // Permanently delete: flag as \Deleted + EXPUNGE
-                        let del_result: Result<(), String> = async {
-                            use futures::TryStreamExt;
-                            session.select(&source).await.map_err(|e| e.to_string())?;
-                            let uid_str = uid.to_string();
-                            session.uid_store(&uid_str, "+FLAGS (\\Deleted)").await
-                                .map_err(|e| e.to_string())?
-                                .try_collect::<Vec<_>>().await.map_err(|e| e.to_string())?;
-                            session.expunge().await.map_err(|e| e.to_string())?
-                                .try_collect::<Vec<_>>().await.map_err(|e| e.to_string())?;
-                            Ok(())
-                        }.await;
-                        if let Err(e) = del_result {
-                            log::error!("IMAP permanent delete failed for UID {}: {}", uid, e);
-                        }
+                let res: anyhow::Result<Option<u32>> = if let Some(source) = source_imap {
+                    if permanent {
+                        use futures::TryStreamExt;
+                        session.select(&source).await?;
+                        let uid_str = uid.to_string();
+                        session.uid_store(&uid_str, "+FLAGS (\\Deleted)").await?
+                            .try_collect::<Vec<_>>().await?;
+                        session.expunge().await?.try_collect::<Vec<_>>().await?;
+                        Ok(None)
                     } else {
-                        // Move to Trash/Deleted folder
                         let trash_imap = remote_folders.iter()
                             .find(|(_, mapped)| mapped == "deleted")
                             .map(|(name, _)| name.clone());
-
                         if let Some(trash) = trash_imap {
-                            match imap_client::move_message(&mut session, &source, &trash, uid, &message_id).await {
-                                Ok(new_uid) => { new_trash_uid = new_uid; }
-                                Err(e) => log::error!("IMAP move to trash failed for UID {}: {}", uid, e),
-                            }
+                            imap_client::move_message(&mut session, &source, &trash, uid, &message_id).await
                         } else {
-                            // No Trash folder — just flag as deleted
+                            // No Trash folder — flag as \Deleted in place.
                             log::warn!("No Trash folder found on IMAP server, flagging as \\Deleted");
-                            let del_result: Result<(), String> = async {
-                                use futures::TryStreamExt;
-                                session.select(&source).await.map_err(|e| e.to_string())?;
-                                let uid_str = uid.to_string();
-                                session.uid_store(&uid_str, "+FLAGS (\\Deleted)").await
-                                    .map_err(|e| e.to_string())?
-                                    .try_collect::<Vec<_>>().await.map_err(|e| e.to_string())?;
-                                session.expunge().await.map_err(|e| e.to_string())?
-                                    .try_collect::<Vec<_>>().await.map_err(|e| e.to_string())?;
-                                Ok(())
-                            }.await;
-                            if let Err(e) = del_result {
-                                log::error!("IMAP delete-flag failed for UID {}: {}", uid, e);
-                            }
+                            use futures::TryStreamExt;
+                            session.select(&source).await?;
+                            let uid_str = uid.to_string();
+                            session.uid_store(&uid_str, "+FLAGS (\\Deleted)").await?
+                                .try_collect::<Vec<_>>().await?;
+                            session.expunge().await?.try_collect::<Vec<_>>().await?;
+                            Ok(None)
+                        }
+                    }
+                } else {
+                    Ok(None)
+                };
+                let _ = session.logout().await;
+                res
+            }.await;
+
+            match outcome {
+                Ok(new_uid) => {
+                    if let Some(new_uid) = new_uid {
+                        if let Ok(conn) = db_arc.lock() {
+                            sync_state::insert_imap_uid(&conn, &account_id, "deleted", new_uid, &email_id).ok();
                         }
                     }
                 }
-                let _ = session.logout().await;
-            }
-            Err(e) => {
-                log::error!("IMAP connect failed for delete: {}", e);
+                Err(e) => {
+                    log::error!("IMAP delete/move-to-trash failed for UID {}: {}", uid, e);
+                    if !permanent {
+                        // Roll the folder column back so the UI doesn't keep showing
+                        // it in Trash when the server still has it where it was.
+                        if let Ok(conn) = db_arc.lock() {
+                            let _ = conn.execute(
+                                "UPDATE emails SET folder = ?1 WHERE id = ?2",
+                                rusqlite::params![folder_clone, email_id],
+                            );
+                        }
+                        soft_delete_failed = true;
+                    }
+                    // For permanent delete we don't resurrect the local row — the
+                    // next sync re-fetches the message from the server if it's
+                    // still there.
+                }
             }
         }
-    }
 
-    // Update local DB
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    if folder == "deleted" {
-        conn.execute("DELETE FROM email_recipients WHERE email_id = ?1", rusqlite::params![email_id]).ok();
-        conn.execute("DELETE FROM imap_uid_map WHERE email_id = ?1", rusqlite::params![email_id]).ok();
-        conn.execute("DELETE FROM emails WHERE id = ?1", rusqlite::params![email_id]).ok();
-    } else {
-        conn.execute(
-            "UPDATE emails SET folder = 'deleted' WHERE id = ?1",
-            rusqlite::params![email_id],
-        ).map_err(|e| e.to_string())?;
-
-        // Refresh imap_uid_map: drop the stale source-folder row and insert the
-        // new destination mapping if we resolved it. If the resolution failed,
-        // drop the stale entry anyway so the next sync re-inserts cleanly (the
-        // Message-ID dedup in apply_sync_results will attach to the same email).
-        conn.execute("DELETE FROM imap_uid_map WHERE email_id = ?1", rusqlite::params![email_id]).ok();
-        if let Some(new_uid) = new_trash_uid {
-            sync_state::insert_imap_uid(&conn, &account_id, "deleted", new_uid, &email_id).ok();
+        if permanent {
+            events::emit_email_removed(&app, &account_id, vec![email_id], seq);
+        } else if soft_delete_failed {
+            events::emit_email_folder_changed(&app, &account_id, &email_id, &folder_clone, seq);
+        } else {
+            events::emit_email_folder_changed(&app, &account_id, &email_id, "deleted", seq);
         }
-    }
+    });
 
     Ok(())
 }
@@ -1616,90 +1767,103 @@ async fn delete_email(
 // ── Empty folder (permanently delete all emails in a folder) ────────
 
 #[tauri::command]
-async fn empty_folder(
+fn empty_folder(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     folder: String,
 ) -> Result<u64, String> {
-    // Collect all UIDs for IMAP deletion
-    let (uids, settings) = {
+    // Snapshot email ids + IMAP UIDs in the doomed folder, then delete locally
+    // in one transaction so the UI sees the folder empty as soon as it re-reads.
+    let (email_ids, uids, settings) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
 
         let mut stmt = conn.prepare(
-            "SELECT m.uid FROM imap_uid_map m JOIN emails e ON e.id = m.email_id
+            "SELECT e.id, m.uid
+             FROM emails e
+             LEFT JOIN imap_uid_map m ON m.email_id = e.id
              WHERE e.account_id = ?1 AND e.folder = ?2",
         ).map_err(|e| e.to_string())?;
 
-        let uids: Vec<u32> = stmt
-            .query_map(rusqlite::params![account_id, folder], |row| row.get(0))
+        let rows: Vec<(String, Option<u32>)> = stmt
+            .query_map(rusqlite::params![account_id, folder], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<u32>>(1)?))
+            })
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
             .collect();
 
+        let email_ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
+        let uids: Vec<u32> = rows.iter().filter_map(|(_, uid)| *uid).collect();
+
         let settings = sync_state::load_mail_settings(&conn, &account_id)
             .map_err(|e| e.to_string())?;
 
-        (uids, settings)
+        (email_ids, uids, settings)
     };
 
-    // Delete from IMAP server
-    if let Some(settings) = settings {
-        if !uids.is_empty() {
-            match imap_client::connect(&settings).await {
-                Ok(mut session) => {
+    // Local DB delete up front.
+    let deleted = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM imap_uid_map WHERE email_id IN (SELECT id FROM emails WHERE account_id = ?1 AND folder = ?2)",
+            rusqlite::params![account_id, folder],
+        ).ok();
+        conn.execute(
+            "DELETE FROM email_recipients WHERE email_id IN (SELECT id FROM emails WHERE account_id = ?1 AND folder = ?2)",
+            rusqlite::params![account_id, folder],
+        ).ok();
+        conn.execute(
+            "DELETE FROM emails WHERE account_id = ?1 AND folder = ?2",
+            rusqlite::params![account_id, folder],
+        ).map_err(|e| e.to_string())? as u64
+    };
+
+    log::info!("empty_folder: deleted {} emails from {} for account {}", deleted, folder, account_id);
+
+    let seq = state.next_seq();
+    let account_for_task = account_id.clone();
+    let folder_for_task = folder.clone();
+
+    tauri::async_runtime::spawn(async move {
+        if let Some(settings) = settings {
+            if !uids.is_empty() {
+                let outcome = async {
+                    let mut session = imap_client::connect(&settings).await?;
                     let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
                     let imap_folder = remote_folders.iter()
-                        .find(|(_, mapped)| *mapped == folder)
+                        .find(|(_, mapped)| *mapped == folder_for_task)
                         .map(|(name, _)| name.clone());
 
                     if let Some(imap_name) = imap_folder {
-                        let del_result: Result<(), String> = async {
-                            use futures::TryStreamExt;
-                            session.select(&imap_name).await.map_err(|e| e.to_string())?;
-                            let uid_set = uids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
-                            session.uid_store(&uid_set, "+FLAGS (\\Deleted)").await
-                                .map_err(|e| e.to_string())?
-                                .try_collect::<Vec<_>>().await.map_err(|e| e.to_string())?;
-                            session.expunge().await.map_err(|e| e.to_string())?
-                                .try_collect::<Vec<_>>().await.map_err(|e| e.to_string())?;
-                            Ok(())
-                        }.await;
-                        if let Err(e) = &del_result {
-                            log::error!("IMAP empty folder failed for {}: {}", folder, e);
-                        }
+                        use futures::TryStreamExt;
+                        session.select(&imap_name).await?;
+                        let uid_set = uids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
+                        session.uid_store(&uid_set, "+FLAGS (\\Deleted)").await?
+                            .try_collect::<Vec<_>>().await?;
+                        session.expunge().await?.try_collect::<Vec<_>>().await?;
                     }
                     let _ = session.logout().await;
-                }
-                Err(e) => {
-                    log::error!("IMAP connect failed for empty_folder: {}", e);
+                    anyhow::Ok(())
+                }.await;
+                if let Err(e) = outcome {
+                    log::error!("IMAP empty folder failed for {}: {}", folder_for_task, e);
+                    // We don't resurrect the local rows; the next sync re-fetches
+                    // any messages the server still has.
                 }
             }
         }
-    }
+        events::emit_email_removed(&app, &account_for_task, email_ids, seq);
+    });
 
-    // Delete from local DB
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "DELETE FROM imap_uid_map WHERE email_id IN (SELECT id FROM emails WHERE account_id = ?1 AND folder = ?2)",
-        rusqlite::params![account_id, folder],
-    ).ok();
-    conn.execute(
-        "DELETE FROM email_recipients WHERE email_id IN (SELECT id FROM emails WHERE account_id = ?1 AND folder = ?2)",
-        rusqlite::params![account_id, folder],
-    ).ok();
-    let deleted = conn.execute(
-        "DELETE FROM emails WHERE account_id = ?1 AND folder = ?2",
-        rusqlite::params![account_id, folder],
-    ).map_err(|e| e.to_string())? as u64;
-
-    log::info!("empty_folder: deleted {} emails from {} for account {}", deleted, folder, account_id);
     Ok(deleted)
 }
 
 // ── Move email to folder ────────────────────────────────
 
 #[tauri::command]
-async fn move_email(
+fn move_email(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     email_id: String,
@@ -1734,50 +1898,71 @@ async fn move_email(
         return Ok(());
     }
 
-    // Sync move to IMAP server
-    let mut new_target_uid: Option<u32> = None;
-    if let (Some(uid), Some(settings)) = (uid, settings) {
-        match imap_client::connect(&settings).await {
-            Ok(mut session) => {
+    // Apply the move to local DB synchronously so the UI's folder filter
+    // (when it re-reads state) sees the new folder immediately. The IMAP
+    // move + new UID insertion run in the background; failure rolls the
+    // folder column back and emits the restored value.
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE emails SET folder = ?1 WHERE id = ?2",
+            rusqlite::params![target_folder, email_id],
+        ).map_err(|e| e.to_string())?;
+        // Drop the stale source-folder UID mapping now; the IMAP task will
+        // re-insert the destination mapping if the move succeeds. If IMAP
+        // fails we leave the row mapping-less and the next sync rebuilds it.
+        conn.execute("DELETE FROM imap_uid_map WHERE email_id = ?1", rusqlite::params![email_id]).ok();
+    }
+
+    let seq = state.next_seq();
+    let db_arc = state.db.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let mut applied_folder = target_folder.clone();
+        if let (Some(uid), Some(settings)) = (uid, settings) {
+            let outcome = async {
+                let mut session = imap_client::connect(&settings).await?;
                 let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
 
                 let source_imap = remote_folders.iter()
                     .find(|(_, mapped)| *mapped == current_folder)
                     .map(|(name, _)| name.clone());
-
                 let target_imap = remote_folders.iter()
                     .find(|(_, mapped)| *mapped == target_folder)
                     .map(|(name, _)| name.clone());
 
-                if let (Some(source), Some(target)) = (source_imap, target_imap) {
-                    match imap_client::move_message(&mut session, &source, &target, uid, &message_id).await {
-                        Ok(new_uid) => { new_target_uid = new_uid; }
-                        Err(e) => log::error!("IMAP move failed for UID {} from {} to {}: {}", uid, source, target, e),
-                    }
+                let res = if let (Some(source), Some(target)) = (source_imap, target_imap) {
+                    imap_client::move_message(&mut session, &source, &target, uid, &message_id).await
                 } else {
                     log::warn!("Could not find IMAP folder mapping for move: {} -> {}", current_folder, target_folder);
-                }
+                    Ok(None)
+                };
                 let _ = session.logout().await;
-            }
-            Err(e) => {
-                log::error!("IMAP connect failed for move: {}", e);
+                res
+            }.await;
+
+            match outcome {
+                Ok(new_uid) => {
+                    if let Some(new_uid) = new_uid {
+                        if let Ok(conn) = db_arc.lock() {
+                            sync_state::insert_imap_uid(&conn, &account_id, &target_folder, new_uid, &email_id).ok();
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("IMAP move failed for UID {} from {} to {}: {}", uid, current_folder, target_folder, e);
+                    applied_folder = current_folder.clone();
+                    if let Ok(conn) = db_arc.lock() {
+                        let _ = conn.execute(
+                            "UPDATE emails SET folder = ?1 WHERE id = ?2",
+                            rusqlite::params![applied_folder, email_id],
+                        );
+                    }
+                }
             }
         }
-    }
-
-    // Update local DB
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE emails SET folder = ?1 WHERE id = ?2",
-        rusqlite::params![target_folder, email_id],
-    ).map_err(|e| e.to_string())?;
-
-    // Refresh imap_uid_map so the next sync doesn't treat the destination copy
-    // as a new message. See comment in delete_email for details.
-    conn.execute("DELETE FROM imap_uid_map WHERE email_id = ?1", rusqlite::params![email_id]).ok();
-    if let Some(new_uid) = new_target_uid {
-        sync_state::insert_imap_uid(&conn, &account_id, &target_folder, new_uid, &email_id).ok();
-    }
+        events::emit_email_folder_changed(&app, &account_id, &email_id, &applied_folder, seq);
+    });
 
     Ok(())
 }
@@ -1786,10 +1971,15 @@ async fn move_email(
 
 #[tauri::command]
 async fn fetch_email_body(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     email_id: String,
 ) -> Result<serde_json::Value, String> {
+    let seq = state.next_seq();
+    let event_account_id = account_id.clone();
+    let event_email_id = email_id.clone();
+    let result: Result<serde_json::Value, String> = async {
     // First check if body is already cached
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -1930,6 +2120,28 @@ async fn fetch_email_body(
         "hasAttachment": has_attachment,
         "attachments": attachments
     }))
+    }.await;
+
+    // Emit the body-fetched echo on success so the frontend can patch the
+    // email row via the shared event subscription. Errors stay on the return
+    // channel — no event is emitted for failed fetches (the existing dataService
+    // wrapper still surfaces them to any awaited caller).
+    if let Ok(value) = &result {
+        let payload = events::EmailBodyFetchedEvent {
+            account_id: event_account_id,
+            email_id: event_email_id,
+            body: value.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            preview: value.get("preview").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            auth_results: value.get("authResults").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            has_attachment: value.get("hasAttachment").and_then(|v| v.as_bool()).unwrap_or(false),
+            attachments: value.get("attachments").cloned()
+                .and_then(|v| if let serde_json::Value::Array(a) = v { Some(a) } else { None })
+                .unwrap_or_default(),
+            seq,
+        };
+        events::emit_email_body_fetched(&app, payload);
+    }
+    result
 }
 
 // ── Fetch previews around a viewport anchor ─────────────
@@ -1940,12 +2152,16 @@ async fn fetch_email_body(
 /// the anchor itself. Only rows whose preview is currently empty are fetched.
 #[tauri::command]
 async fn fetch_previews_around(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     email_id: String,
     ahead: u32,
     behind: u32,
 ) -> Result<serde_json::Value, String> {
+    let seq = state.next_seq();
+    let event_account_id = account_id.clone();
+    let result: Result<serde_json::Value, String> = async {
     let (settings, anchor_folder, anchor_date, targets) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
 
@@ -2086,6 +2302,21 @@ async fn fetch_previews_around(
     }
 
     Ok(serde_json::json!({ "updates": updates }))
+    }.await;
+
+    if let Ok(value) = &result {
+        if let Some(arr) = value.get("updates").and_then(|v| if let serde_json::Value::Array(a) = v { Some(a.clone()) } else { None }) {
+            if !arr.is_empty() {
+                let payload = events::EmailPreviewsFetchedEvent {
+                    account_id: event_account_id,
+                    updates: arr,
+                    seq,
+                };
+                events::emit_email_previews_fetched(&app, payload);
+            }
+        }
+    }
+    result
 }
 
 // ── Open attachment ─────────────────────────────────────
@@ -2217,6 +2448,7 @@ async fn send_email(
     account_id: String,
     email: smtp_client::OutboundEmail,
 ) -> Result<(), String> {
+    let seq = state.next_seq();
     let (settings, from_email, from_name) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let settings = sync_state::load_mail_settings(&conn, &account_id)
@@ -2269,7 +2501,9 @@ async fn send_email(
                 rusqlite::params![outbox_id, e.to_string()],
             )
             .map_err(|e| e.to_string())?;
-            return Err(format!("Send failed, queued for retry: {}", e));
+            let err_msg = format!("Send failed, queued for retry: {}", e);
+            events::emit_mail_send_failed(&app, &account_id, &err_msg, seq);
+            return Err(err_msg);
         }
     };
 
@@ -2466,9 +2700,13 @@ struct CalSyncResult {
 
 #[tauri::command]
 async fn sync_calendars(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
 ) -> Result<CalSyncResult, String> {
+    let seq = state.next_seq();
+    let event_account_id = account_id.clone();
+    let result: Result<CalSyncResult, String> = async {
     log::info!("sync_calendars: starting for account {}", account_id);
     let dav_settings = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -2876,6 +3114,22 @@ async fn sync_calendars(
 
     log::info!("sync_calendars: done for account {} — {} new, {} updated, {} deleted", account_id, total_new, total_updated, total_deleted);
     Ok(CalSyncResult { new_count: total_new, updated_count: total_updated, deleted_count: total_deleted })
+    }.await;
+
+    let event = match &result {
+        Ok(r) => events::CalendarSyncCompletedEvent {
+            account_id: event_account_id.clone(), ok: true,
+            new_count: r.new_count, updated_count: r.updated_count, deleted_count: r.deleted_count,
+            error: None, seq,
+        },
+        Err(e) => events::CalendarSyncCompletedEvent {
+            account_id: event_account_id.clone(), ok: false,
+            new_count: 0, updated_count: 0, deleted_count: 0,
+            error: Some(e.clone()), seq,
+        },
+    };
+    events::emit_calendar_sync_completed(&app, event);
+    result
 }
 
 // ── CardDAV sync command ────────────────────────────────
@@ -2890,9 +3144,13 @@ struct ContactSyncResult {
 
 #[tauri::command]
 async fn sync_contacts(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
 ) -> Result<ContactSyncResult, String> {
+    let seq = state.next_seq();
+    let event_account_id = account_id.clone();
+    let result: Result<ContactSyncResult, String> = async {
     log::info!("sync_contacts: starting for account {}", account_id);
 
     // ── Cleanup: fix stale sync state and duplicates ──────────────────────
@@ -3309,12 +3567,29 @@ async fn sync_contacts(
 
     log::info!("sync_contacts: done for account {} — {} new, {} updated, {} deleted", account_id, total_new, total_updated, total_deleted);
     Ok(ContactSyncResult { new_count: total_new, updated_count: total_updated, deleted_count: total_deleted })
+    }.await;
+
+    let event = match &result {
+        Ok(r) => events::ContactsSyncCompletedEvent {
+            account_id: event_account_id.clone(), ok: true,
+            new_count: r.new_count, updated_count: r.updated_count, deleted_count: r.deleted_count,
+            error: None, seq,
+        },
+        Err(e) => events::ContactsSyncCompletedEvent {
+            account_id: event_account_id.clone(), ok: false,
+            new_count: 0, updated_count: 0, deleted_count: 0,
+            error: Some(e.clone()), seq,
+        },
+    };
+    events::emit_contacts_sync_completed(&app, event);
+    result
 }
 
 // ── CalDAV CRUD commands ────────────────────────────────
 
 #[tauri::command]
 async fn save_calendar_event(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     event_id: String,
@@ -3331,6 +3606,10 @@ async fn save_calendar_event(
     meeting_url: Option<String>,
     alert_minutes: Option<i32>,
 ) -> Result<String, String> {
+    let seq = state.next_seq();
+    let event_requested_id = event_id.clone();
+    let event_account_id = account_id.clone();
+    let result: Result<String, String> = async {
     // Load CalDAV settings (optional — events can be saved locally without CalDAV)
     let dav_settings = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -3538,14 +3817,41 @@ async fn save_calendar_event(
     }
 
     Ok(local_id)
+    }.await;
+
+    // Construct + emit the canonical CalendarEvent so subscribers (including
+    // MCP agents that didn't drive the save) can apply the new state.
+    if let Ok(canonical_id) = &result {
+        let event_opt: Option<CalendarEvent> = {
+            if let Ok(conn) = state.db.lock() {
+                query_events(&conn, &event_account_id).into_iter().find(|e| e.id == *canonical_id)
+            } else {
+                None
+            }
+        };
+        if let Some(event) = event_opt {
+            events::emit_calendar_event_upserted(&app, events::CalendarEventUpsertedEvent {
+                account_id: event_account_id,
+                requested_id: event_requested_id,
+                event,
+                seq,
+            });
+        }
+    }
+    result
 }
 
 #[tauri::command]
 async fn delete_calendar_event(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     event_id: String,
 ) -> Result<(), String> {
+    let seq = state.next_seq();
+    let event_account_id = account_id.clone();
+    let event_event_id = event_id.clone();
+    let result: Result<(), String> = async {
     // Attempt CalDAV server delete if settings + resource state are available (non-fatal)
     let caldav_info: Option<(sync_state::DavSettings, String, String)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -3586,12 +3892,19 @@ async fn delete_calendar_event(
     }
 
     Ok(())
+    }.await;
+
+    if result.is_ok() {
+        events::emit_calendar_event_removed(&app, &event_account_id, &event_event_id, seq);
+    }
+    result
 }
 
 // ── CardDAV CRUD commands ───────────────────────────────
 
 #[tauri::command]
 async fn save_contact_entry(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     contact_id: String,
@@ -3612,6 +3925,10 @@ async fn save_contact_entry(
     is_favorite: bool,
     photo_url: Option<String>,
 ) -> Result<String, String> {
+    let seq = state.next_seq();
+    let event_account_id = account_id.clone();
+    let event_requested_id = contact_id.clone();
+    let result: Result<String, String> = async {
     let dav_settings = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         sync_state::load_carddav_settings(&conn, &account_id)
@@ -3750,6 +4067,26 @@ async fn save_contact_entry(
     };
 
     Ok(local_id)
+    }.await;
+
+    if let Ok(canonical_id) = &result {
+        let contact_opt: Option<FullContact> = {
+            if let Ok(conn) = state.db.lock() {
+                query_contacts(&conn, &event_account_id).into_iter().find(|c| c.id == *canonical_id)
+            } else {
+                None
+            }
+        };
+        if let Some(contact) = contact_opt {
+            events::emit_contact_upserted(&app, events::ContactUpsertedEvent {
+                account_id: event_account_id,
+                requested_id: event_requested_id,
+                contact,
+                seq,
+            });
+        }
+    }
+    result
 }
 
 fn normalize_contact_emails(mut v: Vec<ContactEmailEntry>) -> Vec<ContactEmailEntry> {
@@ -3863,10 +4200,15 @@ pub(crate) fn write_contact_children(
 
 #[tauri::command]
 async fn delete_contact_entry(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     contact_id: String,
 ) -> Result<(), String> {
+    let seq = state.next_seq();
+    let event_account_id = account_id.clone();
+    let event_contact_id = contact_id.clone();
+    let result: Result<(), String> = async {
     let dav_settings = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         sync_state::load_carddav_settings(&conn, &account_id)
@@ -3899,21 +4241,32 @@ async fn delete_contact_entry(
     }
 
     Ok(())
+    }.await;
+
+    if result.is_ok() {
+        events::emit_contact_removed(&app, &event_account_id, &event_contact_id, seq);
+    }
+    result
 }
 
 // ── Toggle Contact Favorite (local-only) ─────────────────
 
 #[tauri::command]
-async fn toggle_contact_favorite(
+fn toggle_contact_favorite(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     contact_id: String,
     is_favorite: bool,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE contacts SET is_favorite = ?2 WHERE id = ?1",
-        rusqlite::params![contact_id, is_favorite as i32],
-    ).map_err(|e| e.to_string())?;
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE contacts SET is_favorite = ?2 WHERE id = ?1",
+            rusqlite::params![contact_id, is_favorite as i32],
+        ).map_err(|e| e.to_string())?;
+    }
+    let seq = state.next_seq();
+    events::emit_contact_favorite_changed(&app, &contact_id, is_favorite, seq);
     Ok(())
 }
 
@@ -4083,43 +4436,63 @@ fn get_contact_lists(
 
 #[tauri::command]
 fn save_contact_list(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     id: String,
     name: String,
     members: Vec<ContactListMember>,
 ) -> Result<String, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
 
-    conn.execute(
-        "INSERT INTO contact_lists (id, account_id, name) VALUES (?1, ?2, ?3)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name",
-        rusqlite::params![id, account_id, name],
-    ).map_err(|e| e.to_string())?;
-
-    conn.execute(
-        "DELETE FROM contact_list_members WHERE list_id = ?1",
-        rusqlite::params![id],
-    ).map_err(|e| e.to_string())?;
-
-    for m in &members {
         conn.execute(
-            "INSERT OR IGNORE INTO contact_list_members (list_id, name, email) VALUES (?1, ?2, ?3)",
-            rusqlite::params![id, m.name, m.email],
+            "INSERT INTO contact_lists (id, account_id, name) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+            rusqlite::params![id, account_id, name],
         ).map_err(|e| e.to_string())?;
+
+        conn.execute(
+            "DELETE FROM contact_list_members WHERE list_id = ?1",
+            rusqlite::params![id],
+        ).map_err(|e| e.to_string())?;
+
+        for m in &members {
+            conn.execute(
+                "INSERT OR IGNORE INTO contact_list_members (list_id, name, email) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, m.name, m.email],
+            ).map_err(|e| e.to_string())?;
+        }
     }
 
+    let seq = state.next_seq();
+    let list_payload = serde_json::json!({
+        "id": id,
+        "name": name,
+        "members": members.iter().map(|m| serde_json::json!({ "name": m.name, "email": m.email })).collect::<Vec<_>>(),
+    });
+    events::emit_contact_list_upserted(&app, events::ContactListUpsertedEvent {
+        account_id: account_id.clone(),
+        requested_id: id.clone(),
+        list: list_payload,
+        seq,
+    });
     Ok(id)
 }
 
 #[tauri::command]
 fn delete_contact_list(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM contact_lists WHERE id = ?1", rusqlite::params![id])
-        .map_err(|e| e.to_string())?;
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM contact_lists WHERE id = ?1", rusqlite::params![id])
+            .map_err(|e| e.to_string())?;
+    }
+    let seq = state.next_seq();
+    events::emit_contact_list_removed(&app, &id, seq);
     Ok(())
 }
 
@@ -5074,6 +5447,7 @@ pub fn run() {
                 dav_handle: Mutex::new(None),
                 storage_dir: storage_dir.clone(),
                 offline_workers: Mutex::new(std::collections::HashMap::new()),
+                event_seq: AtomicU64::new(0),
             });
 
             // Resume offline-download workers for any accounts that had the
