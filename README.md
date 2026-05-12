@@ -44,6 +44,13 @@ A privacy-focused desktop mail, calendar, and contacts client built with Tauri, 
 
 Highlights since late March 2026:
 
+### Architecture
+- **Event-driven core.** Every mail / calendar / contacts mutation is fire-and-forget: the frontend invokes a Tauri command without awaiting, and the backend pushes the result on a typed event channel (`mail:email-flag-changed`, `mail:email-folder-changed`, `mail:email-removed`, `mail:sync-completed`, `mail:send-failed`, `mail:email-body-fetched`, `mail:email-previews-fetched`, `calendar:event-upserted`, `calendar:event-removed`, `calendar:sync-completed`, `contacts:contact-upserted`, `contacts:contact-removed`, `contacts:favorite-changed`, `contacts:sync-completed`, `contacts:list-upserted`, `contacts:list-removed`). The UI subscribes once and reconciles state from echoes — paving the way for an in-process MCP server or agentic workflows to drive the same channels.
+- **Hybrid optimistic policy.** Local-only writes (pin, focused, favorite, contact lists) apply immediately; network-bearing writes (star, replied, read, move, delete, save event, save contact) wait for the echo and the backend rolls the DB back automatically if the IMAP / CalDAV / CardDAV round trip fails.
+- **Monotonic sequence tags.** Each echo carries a backend-stamped `seq` so rapid toggles (star → unstar → star) settle on the freshest server state regardless of round-trip ordering — stale echoes are dropped at the subscribe layer.
+- **ID reconciliation on upsert.** Calendar and contact upserts carry both the caller's `requestedId` and the canonical id, so optimistic temp IDs are swapped for the server-assigned UUIDs without ID-mismatch glitches.
+- **Per-operation in-flight tracking.** A shared counter feeds the global network indicator and makes per-row spinners possible without per-action plumbing.
+
 ### Reliability & Performance
 - **Crash-safe send.** Every outbound mail is queued with a stable `Message-ID` before SMTP submission. If the app is killed mid-send, the next sync reconciles against the IMAP Sent folder by `Message-ID` to decide whether to retry — no more silent duplicates.
 - **Parallel account sync.** IMAP, CalDAV, CardDAV, and outbox flush run concurrently instead of sequentially when clicking Sync.

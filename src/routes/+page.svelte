@@ -25,29 +25,12 @@
     saveMailSettings,
     saveCalDavSettings,
     saveCardDavSettings,
-    markEmailRead,
-    updateEmailStarred,
-    updateEmailPinned,
-    updateEmailFocused,
-    deleteEmail,
-    emptyFolder,
-    moveEmail,
     syncMail,
     syncCalendars,
     syncContacts,
-    sendEmail,
-    updateEmailReplied,
-    fetchEmailBody,
-    fetchPreviewsAround,
     openAttachment,
     flushOutbox,
-    saveCalendarEvent,
-    deleteCalendarEvent,
-    saveContactEntry,
-    deleteContactEntry,
     getContactLists,
-    saveContactList,
-    deleteContactList,
     addToSenderBlocklist,
     removeFromSenderBlocklist,
     saveAttachment,
@@ -61,6 +44,55 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { save as dialogSave } from '@tauri-apps/plugin-dialog';
   import { listen } from '@tauri-apps/api/event';
+  import {
+    fireToggleStar,
+    fireMarkRead,
+    fireToggleReplied,
+    fireTogglePinned,
+    fireToggleFocused,
+    fireMoveEmail,
+    fireDeleteEmail,
+    fireEmptyFolder,
+    fireSendEmail,
+    fireFetchEmailBody,
+    fireFetchPreviewsAround,
+    subscribeFlagEvents,
+    subscribeFolderEvents,
+    subscribeRemovedEvents,
+    subscribeBodyFetched,
+    subscribePreviewsFetched,
+    subscribeSendFailed,
+    type EmailFlagChangedEvent,
+    type EmailFolderChangedEvent,
+    type EmailRemovedEvent,
+    type EmailBodyFetchedEvent,
+    type EmailPreviewsFetchedEvent,
+    type MailSendFailedEvent,
+  } from '$lib/stores/mailStore.svelte';
+  import {
+    fireSaveCalendarEvent,
+    fireDeleteCalendarEvent,
+    subscribeEventUpserted,
+    subscribeEventRemoved,
+    type CalendarEventUpsertedEvent,
+    type CalendarEventRemovedEvent,
+  } from '$lib/stores/calendarStore.svelte';
+  import {
+    fireSaveContactEntry,
+    fireDeleteContactEntry,
+    fireSaveContactList,
+    fireDeleteContactList,
+    subscribeContactUpserted,
+    subscribeContactRemoved,
+    subscribeContactFavoriteChanged,
+    subscribeContactListUpserted,
+    subscribeContactListRemoved,
+    type ContactUpsertedEvent,
+    type ContactRemovedEvent,
+    type ContactFavoriteChangedEvent,
+    type ContactListUpsertedEvent,
+    type ContactListRemovedEvent,
+  } from '$lib/stores/contactsStore.svelte';
   import { onMount, onDestroy, untrack } from 'svelte';
   import { requestNotificationPermission, rebuildAlertQueue, clearAlertQueue } from '$lib/eventAlerts';
   import { networkActivity } from '$lib/networkActivity.svelte';
@@ -117,6 +149,19 @@
   let syncTimerId: ReturnType<typeof setInterval> | null = null;
   let unlistenMailSent: (() => void) | null = null;
   let unlistenOffline: (() => void) | null = null;
+  let unlistenFlagEvents: (() => void) | null = null;
+  let unlistenFolderEvents: (() => void) | null = null;
+  let unlistenRemovedEvents: (() => void) | null = null;
+  let unlistenBodyFetched: (() => void) | null = null;
+  let unlistenPreviewsFetched: (() => void) | null = null;
+  let unlistenSendFailed: (() => void) | null = null;
+  let unlistenEventUpserted: (() => void) | null = null;
+  let unlistenEventRemoved: (() => void) | null = null;
+  let unlistenContactUpserted: (() => void) | null = null;
+  let unlistenContactRemoved: (() => void) | null = null;
+  let unlistenContactFavorite: (() => void) | null = null;
+  let unlistenContactListUpserted: (() => void) | null = null;
+  let unlistenContactListRemoved: (() => void) | null = null;
 
   // Search-coverage indicator for the title bar. Populated per active account;
   // null when the account is fully indexed (or we haven't loaded yet).
@@ -221,30 +266,27 @@
     switch (entry.action) {
       case 'markRead':
       case 'markUnread':
-        emails = emails.map(e => e.id === entry.emailId ? { ...e, isRead: entry.prevIsRead } : e);
-        markEmailRead(activeAccountId, entry.emailId, entry.prevIsRead);
+        fireMarkRead(activeAccountId, entry.emailId, entry.prevIsRead);
         break;
       case 'delete':
-        emails = emails.map(e => e.id === entry.email.id ? { ...e, folder: entry.prevFolder } : e);
-        moveEmail(activeAccountId, entry.email.id, entry.prevFolder);
+        fireMoveEmail(activeAccountId, entry.email.id, entry.prevFolder);
         break;
       case 'move':
       case 'archive':
       case 'junk':
-        emails = emails.map(e => e.id === entry.emailId ? { ...e, folder: entry.prevFolder } : e);
-        moveEmail(activeAccountId, entry.emailId, entry.prevFolder);
+        fireMoveEmail(activeAccountId, entry.emailId, entry.prevFolder);
         break;
       case 'toggleStar':
-        emails = emails.map(e => e.id === entry.emailId ? { ...e, isStarred: entry.prevIsStarred } : e);
-        updateEmailStarred(activeAccountId, entry.emailId, entry.prevIsStarred);
+        fireToggleStar(activeAccountId, entry.emailId, entry.prevIsStarred);
         break;
       case 'togglePin':
+        // Local-only: keep the optimistic UI update; echo will redundantly confirm.
         emails = emails.map(e => e.id === entry.emailId ? { ...e, isPinned: entry.prevIsPinned } : e);
-        updateEmailPinned(entry.emailId, entry.prevIsPinned);
+        fireTogglePinned(entry.emailId, entry.prevIsPinned);
         break;
       case 'toggleFocused':
         emails = emails.map(e => e.id === entry.emailId ? { ...e, isFocused: entry.prevIsFocused } : e);
-        updateEmailFocused(entry.emailId, entry.prevIsFocused);
+        fireToggleFocused(entry.emailId, entry.prevIsFocused);
         break;
     }
   }
@@ -279,56 +321,50 @@
       // ── Calendar ──
       case 'editEvent': {
         const prev = entry.prevEvent;
-        accounts = accounts.map(a => a.id === activeAccountId
-          ? { ...a, calendarEvents: a.calendarEvents.map(e => e.id === prev.id ? prev : e) }
-          : a);
-        saveCalendarEvent(activeAccountId, prev.id, prev.title,
-          prev.start instanceof Date ? prev.start.toISOString() : String(prev.start),
-          prev.end instanceof Date ? prev.end.toISOString() : String(prev.end),
-          prev.location, prev.description, prev.isAllDay, prev.calendarId,
-          prev.attendees ?? [], prev.recurrence, prev.isOnlineMeeting ?? false, prev.meetingUrl, prev.alertMinutes);
+        fireSaveCalendarEvent({
+          accountId: activeAccountId,
+          eventId: prev.id,
+          title: prev.title,
+          start: prev.start instanceof Date ? prev.start.toISOString() : String(prev.start),
+          end: prev.end instanceof Date ? prev.end.toISOString() : String(prev.end),
+          location: prev.location, description: prev.description,
+          isAllDay: prev.isAllDay, calendarId: prev.calendarId,
+          attendees: prev.attendees ?? [], recurrence: prev.recurrence,
+          isOnlineMeeting: prev.isOnlineMeeting ?? false,
+          meetingUrl: prev.meetingUrl, alertMinutes: prev.alertMinutes,
+        });
         break;
       }
       case 'deleteEvent': {
         const prev = entry.prevEvent;
-        accounts = accounts.map(a => a.id === activeAccountId
-          ? { ...a, calendarEvents: [...a.calendarEvents, prev] }
-          : a);
-        saveCalendarEvent(activeAccountId, prev.id, prev.title,
-          prev.start instanceof Date ? prev.start.toISOString() : String(prev.start),
-          prev.end instanceof Date ? prev.end.toISOString() : String(prev.end),
-          prev.location, prev.description, prev.isAllDay, prev.calendarId,
-          prev.attendees ?? [], prev.recurrence, prev.isOnlineMeeting ?? false, prev.meetingUrl, prev.alertMinutes);
+        fireSaveCalendarEvent({
+          accountId: activeAccountId,
+          eventId: prev.id,
+          title: prev.title,
+          start: prev.start instanceof Date ? prev.start.toISOString() : String(prev.start),
+          end: prev.end instanceof Date ? prev.end.toISOString() : String(prev.end),
+          location: prev.location, description: prev.description,
+          isAllDay: prev.isAllDay, calendarId: prev.calendarId,
+          attendees: prev.attendees ?? [], recurrence: prev.recurrence,
+          isOnlineMeeting: prev.isOnlineMeeting ?? false,
+          meetingUrl: prev.meetingUrl, alertMinutes: prev.alertMinutes,
+        });
         break;
       }
       case 'createEvent':
-        accounts = accounts.map(a => a.id === activeAccountId
-          ? { ...a, calendarEvents: a.calendarEvents.filter(e => e.id !== entry.eventId) }
-          : a);
-        deleteCalendarEvent(activeAccountId, entry.eventId);
+        fireDeleteCalendarEvent(activeAccountId, entry.eventId);
         break;
       // ── Contacts ──
       case 'editContact': {
-        const prev = entry.prevContact;
-        accounts = accounts.map(a => a.id === activeAccountId
-          ? { ...a, contacts: a.contacts.map(c => c.id === prev.id ? prev : c) }
-          : a);
-        saveContactEntry(activeAccountId, prev);
+        fireSaveContactEntry(activeAccountId, entry.prevContact);
         break;
       }
       case 'deleteContact': {
-        const prev = entry.prevContact;
-        accounts = accounts.map(a => a.id === activeAccountId
-          ? { ...a, contacts: [...a.contacts, prev] }
-          : a);
-        saveContactEntry(activeAccountId, prev);
+        fireSaveContactEntry(activeAccountId, entry.prevContact);
         break;
       }
       case 'createContact':
-        accounts = accounts.map(a => a.id === activeAccountId
-          ? { ...a, contacts: a.contacts.filter(c => c.id !== entry.contactId) }
-          : a);
-        deleteContactEntry(activeAccountId, entry.contactId);
+        fireDeleteContactEntry(activeAccountId, entry.contactId);
         break;
     }
   }
@@ -796,6 +832,23 @@
         listen<string>('mail:sent', (event) => {
           handleSyncAccount(event.payload);
         }).then((unlisten) => { unlistenMailSent = unlisten; });
+        // Phase 1: backend pushes echoes via the mail event channels. The store
+        // filters stale echoes; we apply the new values to the relevant emails array.
+        subscribeFlagEvents(applyFlagEcho).then((unlisten) => { unlistenFlagEvents = unlisten; });
+        subscribeFolderEvents(applyFolderEcho).then((unlisten) => { unlistenFolderEvents = unlisten; });
+        subscribeRemovedEvents(applyRemovedEcho).then((unlisten) => { unlistenRemovedEvents = unlisten; });
+        subscribeBodyFetched(applyBodyEcho).then((unlisten) => { unlistenBodyFetched = unlisten; });
+        subscribePreviewsFetched(applyPreviewsEcho).then((unlisten) => { unlistenPreviewsFetched = unlisten; });
+        subscribeSendFailed(applySendFailedEcho).then((unlisten) => { unlistenSendFailed = unlisten; });
+        // Phase 2: calendar event echoes.
+        subscribeEventUpserted(applyEventUpsertedEcho).then((unlisten) => { unlistenEventUpserted = unlisten; });
+        subscribeEventRemoved(applyEventRemovedEcho).then((unlisten) => { unlistenEventRemoved = unlisten; });
+        // Phase 3: contact + list echoes.
+        subscribeContactUpserted(applyContactUpsertedEcho).then((unlisten) => { unlistenContactUpserted = unlisten; });
+        subscribeContactRemoved(applyContactRemovedEcho).then((unlisten) => { unlistenContactRemoved = unlisten; });
+        subscribeContactFavoriteChanged(applyContactFavoriteEcho).then((unlisten) => { unlistenContactFavorite = unlisten; });
+        subscribeContactListUpserted(applyContactListUpsertedEcho).then((unlisten) => { unlistenContactListUpserted = unlisten; });
+        subscribeContactListRemoved(applyContactListRemovedEcho).then((unlisten) => { unlistenContactListRemoved = unlisten; });
       } else {
         requireAccountSetup = true;
         startupStatus = 'needs-account';
@@ -818,6 +871,19 @@
     if (syncTimerId) clearInterval(syncTimerId);
     if (unlistenMailSent) unlistenMailSent();
     if (unlistenOffline) unlistenOffline();
+    if (unlistenFlagEvents) unlistenFlagEvents();
+    if (unlistenFolderEvents) unlistenFolderEvents();
+    if (unlistenRemovedEvents) unlistenRemovedEvents();
+    if (unlistenBodyFetched) unlistenBodyFetched();
+    if (unlistenPreviewsFetched) unlistenPreviewsFetched();
+    if (unlistenSendFailed) unlistenSendFailed();
+    if (unlistenEventUpserted) unlistenEventUpserted();
+    if (unlistenEventRemoved) unlistenEventRemoved();
+    if (unlistenContactUpserted) unlistenContactUpserted();
+    if (unlistenContactRemoved) unlistenContactRemoved();
+    if (unlistenContactFavorite) unlistenContactFavorite();
+    if (unlistenContactListUpserted) unlistenContactListUpserted();
+    if (unlistenContactListRemoved) unlistenContactListRemoved();
     if (globalKeyHandler) document.removeEventListener('keydown', globalKeyHandler, true);
     clearAlertQueue();
   });
@@ -1203,7 +1269,8 @@
     )
   );
 
-  // Track body-fetch in-flight to avoid duplicates
+  // Track body-fetch in-flight to dedupe fire calls. Cleared when the
+  // mail:email-body-fetched echo arrives.
   let fetchingBodyId = $state<string | null>(null);
 
   function handleSelectEmail(email: Email) {
@@ -1221,68 +1288,161 @@
     }
 
     if (!email.isRead) {
-      emails = emails.map((e) => (e.id === email.id ? { ...e, isRead: true } : e));
-      markEmailRead(activeAccountId, email.id, true);
+      fireMarkRead(activeAccountId, email.id, true);
     }
 
-    // Lazy-load full body if not yet fetched
+    // Lazy-load full body if not yet fetched. The backend caches; the echo
+    // arrives via mail:email-body-fetched (applyBodyEcho).
     if (!email.body && activeAccountId && email.id !== fetchingBodyId) {
       fetchingBodyId = email.id;
-      fetchEmailBody(activeAccountId, email.id)
-        .then((result) => {
-          if (result) {
-            emails = emails.map((e) =>
-              e.id === email.id
-                ? {
-                    ...e,
-                    body: result.body,
-                    searchText: buildSearchText(result.body),
-                    preview: e.preview || result.preview,
-                    authResults: result.authResults || e.authResults,
-                    hasAttachment: result.hasAttachment ?? e.hasAttachment,
-                    attachments: result.attachments ?? e.attachments,
-                  }
-                : e
-            );
-          }
-        })
-        .catch((err) => console.error('Failed to fetch email body:', err))
-        .finally(() => {
-          if (fetchingBodyId === email.id) fetchingBodyId = null;
-        });
+      fireFetchEmailBody(activeAccountId, email.id);
     }
   }
 
+  /** Patch the active emails array when the backend has fetched a body. */
+  function applyBodyEcho(ev: EmailBodyFetchedEvent) {
+    const patch = (e: Email): Email => ({
+      ...e,
+      body: ev.body,
+      searchText: buildSearchText(ev.body),
+      preview: e.preview || ev.preview,
+      authResults: ev.authResults || e.authResults,
+      hasAttachment: ev.hasAttachment ?? e.hasAttachment,
+      attachments: ev.attachments ?? e.attachments,
+    });
+    if (ev.accountId === activeAccountId) {
+      emails = emails.map((e) => (e.id === ev.emailId ? patch(e) : e));
+    } else {
+      accounts = accounts.map((a) =>
+        a.id === ev.accountId
+          ? { ...a, emails: a.emails.map((e) => (e.id === ev.emailId ? patch(e) : e)) }
+          : a);
+    }
+    if (fetchingBodyId === ev.emailId) fetchingBodyId = null;
+  }
+
   // Track in-flight preview-window fetches to avoid hammering IMAP while the
-  // user scrolls fast. Keyed by anchor email id.
+  // user scrolls fast. Keyed by anchor email id; cleared when the echo arrives.
   const previewFetchesInFlight = new Set<string>();
 
-  async function handlePreviewMissing(email: Email) {
+  function handlePreviewMissing(email: Email) {
     if (!activeAccountId || previewFetchesInFlight.has(email.id)) return;
     previewFetchesInFlight.add(email.id);
-    try {
-      const updates = await fetchPreviewsAround(activeAccountId, email.id, 20, 10);
-      if (!updates.length) return;
-      const byId = new Map(updates.map(u => [u.id, u]));
-      emails = emails.map((e) => {
-        const u = byId.get(e.id);
-        if (!u) return e;
-        const nextBody = u.body || e.body;
-        return {
-          ...e,
-          body: nextBody,
-          searchText: u.body ? buildSearchText(u.body) : e.searchText,
-          preview: u.preview || e.preview,
-          authResults: u.authResults ?? e.authResults,
-          hasAttachment: u.hasAttachment ?? e.hasAttachment,
-          attachments: u.attachments ?? e.attachments,
-        };
-      });
-    } catch (err) {
-      console.error('Failed to prefetch previews:', err);
-    } finally {
-      previewFetchesInFlight.delete(email.id);
+    fireFetchPreviewsAround(activeAccountId, email.id, 20, 10);
+    // The echo arrives via mail:email-previews-fetched (applyPreviewsEcho).
+    // We optimistically clear the in-flight marker after a short window so a
+    // failed fetch (no event) doesn't prevent a retry on the next scroll-in.
+    setTimeout(() => previewFetchesInFlight.delete(email.id), 5000);
+  }
+
+  /** Apply a batch of preview updates pushed from the backend. */
+  function applyPreviewsEcho(ev: EmailPreviewsFetchedEvent) {
+    const byId = new Map(ev.updates.map((u) => [u.id, u]));
+    for (const id of byId.keys()) previewFetchesInFlight.delete(id);
+    const patchAccountEmails = (list: Email[]): Email[] => list.map((e) => {
+      const u = byId.get(e.id);
+      if (!u) return e;
+      const nextBody = u.body || e.body;
+      return {
+        ...e,
+        body: nextBody,
+        searchText: u.body ? buildSearchText(u.body) : e.searchText,
+        preview: u.preview || e.preview,
+        authResults: u.authResults ?? e.authResults,
+        hasAttachment: u.hasAttachment ?? e.hasAttachment,
+        attachments: u.attachments ?? e.attachments,
+      };
+    });
+    if (ev.accountId === activeAccountId) {
+      emails = patchAccountEmails(emails);
+    } else {
+      accounts = accounts.map((a) =>
+        a.id === ev.accountId ? { ...a, emails: patchAccountEmails(a.emails) } : a);
     }
+  }
+
+  /** Surface SMTP failures as a console error + non-fatal sync toast. */
+  function applySendFailedEcho(ev: MailSendFailedEvent) {
+    console.error(`Send failed for ${ev.accountId}:`, ev.error);
+    syncErrors = [...syncErrors, `${ev.accountId}: ${ev.error}`];
+  }
+
+  // ── Calendar echo handlers ──────────────────────────────
+
+  /** Backend confirmed a calendar event was created or updated. Reconcile any
+   * optimistic placeholder with the canonical event (the requestedId may
+   * differ from event.id when the backend assigned a fresh UUID). */
+  function applyEventUpsertedEcho(ev: CalendarEventUpsertedEvent) {
+    const reified: CalendarEvent = {
+      ...ev.event,
+      start: new Date(ev.event.start),
+      end: new Date(ev.event.end),
+    } as unknown as CalendarEvent;
+    accounts = accounts.map((a) => {
+      if (a.id !== ev.accountId) return a;
+      const idx = a.calendarEvents.findIndex((e) => e.id === ev.requestedId || e.id === reified.id);
+      const next = idx >= 0
+        ? a.calendarEvents.map((e, i) => (i === idx ? reified : e))
+        : [...a.calendarEvents, reified];
+      return { ...a, calendarEvents: next };
+    });
+    // If undo registered the old (requested) id, swap it to the canonical id.
+    if (undoCalendar?.action === 'createEvent' && undoCalendar.eventId === ev.requestedId) {
+      undoCalendar = { ...undoCalendar, eventId: reified.id };
+    }
+  }
+
+  function applyEventRemovedEcho(ev: CalendarEventRemovedEvent) {
+    accounts = accounts.map((a) =>
+      a.id === ev.accountId
+        ? { ...a, calendarEvents: a.calendarEvents.filter((e) => e.id !== ev.eventId) }
+        : a);
+  }
+
+  // ── Contact echo handlers ───────────────────────────────
+
+  function applyContactUpsertedEcho(ev: ContactUpsertedEvent) {
+    accounts = accounts.map((a) => {
+      if (a.id !== ev.accountId) return a;
+      const idx = a.contacts.findIndex((c) => c.id === ev.requestedId || c.id === ev.contact.id);
+      const next = idx >= 0
+        ? a.contacts.map((c, i) => (i === idx ? ev.contact : c))
+        : [...a.contacts, ev.contact];
+      return { ...a, contacts: next };
+    });
+    if (undoContacts?.action === 'createContact' && undoContacts.contactId === ev.requestedId) {
+      undoContacts = { ...undoContacts, contactId: ev.contact.id };
+    }
+  }
+
+  function applyContactRemovedEcho(ev: ContactRemovedEvent) {
+    accounts = accounts.map((a) =>
+      a.id === ev.accountId
+        ? { ...a, contacts: a.contacts.filter((c) => c.id !== ev.contactId) }
+        : a);
+  }
+
+  function applyContactFavoriteEcho(ev: ContactFavoriteChangedEvent) {
+    accounts = accounts.map((a) => ({
+      ...a,
+      contacts: a.contacts.map((c) => (c.id === ev.contactId ? { ...c, isFavorite: ev.isFavorite } : c)),
+    }));
+  }
+
+  function applyContactListUpsertedEcho(ev: ContactListUpsertedEvent) {
+    // Contact lists are scoped to the active account today; we keep them in
+    // the `contactLists` state alongside the active account view.
+    if (ev.accountId !== activeAccountId) return;
+    const idx = contactLists.findIndex((l) => l.id === ev.requestedId || l.id === ev.list.id);
+    if (idx >= 0) {
+      contactLists = contactLists.map((l, i) => (i === idx ? ev.list : l));
+    } else {
+      contactLists = [...contactLists, ev.list];
+    }
+  }
+
+  function applyContactListRemovedEcho(ev: ContactListRemovedEvent) {
+    contactLists = contactLists.filter((l) => l.id !== ev.listId);
   }
 
   function handleLabelClick(label: string) {
@@ -1353,9 +1513,7 @@
     const entries: MailSingleUndo[] = targets.map((e) => ({
       view: 'mail', action: 'markRead', emailId: e.id, prevIsRead: e.isRead,
     }));
-    const ids = new Set(targets.map((e) => e.id));
-    emails = emails.map((e) => (ids.has(e.id) ? { ...e, isRead: true } : e));
-    targets.forEach((e) => markEmailRead(activeAccountId, e.id, true));
+    targets.forEach((e) => fireMarkRead(activeAccountId, e.id, true));
     if (entries.length === 1) {
       pushUndo(entries[0], 'Marked as read — Ctrl+Z to undo');
     } else {
@@ -1371,9 +1529,7 @@
     const entries: MailSingleUndo[] = targets.map((e) => ({
       view: 'mail', action: 'markUnread', emailId: e.id, prevIsRead: e.isRead,
     }));
-    const ids = new Set(targets.map((e) => e.id));
-    emails = emails.map((e) => (ids.has(e.id) ? { ...e, isRead: false } : e));
-    targets.forEach((e) => markEmailRead(activeAccountId, e.id, false));
+    targets.forEach((e) => fireMarkRead(activeAccountId, e.id, false));
     if (entries.length === 1) {
       pushUndo(entries[0], 'Marked as unread — Ctrl+Z to undo');
     } else {
@@ -1398,15 +1554,11 @@
     if (permanent.length > 0) {
       undoMail = null; dismissToast();
     }
-    const undoableIds = new Set(undoable.map((e) => e.id));
-    const permanentIds = new Set(permanent.map((e) => e.id));
-    emails = emails
-      .filter((e) => !permanentIds.has(e.id))
-      .map((e) => (undoableIds.has(e.id) ? { ...e, folder: 'deleted' } : e));
-    targets.forEach((e) => deleteEmail(activeAccountId, e.id));
-    if (selectedEmailId && (undoableIds.has(selectedEmailId) || permanentIds.has(selectedEmailId))) {
+    const allIds = new Set(targets.map((e) => e.id));
+    if (selectedEmailId && allIds.has(selectedEmailId)) {
       selectedEmailId = '';
     }
+    targets.forEach((e) => fireDeleteEmail(activeAccountId, e.id));
     if (undoable.length > 0) {
       const entries: MailSingleUndo[] = undoable.map((e) => ({
         view: 'mail', action: 'delete', email: { ...e }, prevFolder: e.folder,
@@ -1421,13 +1573,11 @@
     if (email.folder === 'deleted') {
       // Permanent delete — NOT undoable; clear undo slot
       undoMail = null; dismissToast();
-      emails = emails.filter((e) => e.id !== email.id);
     } else {
       pushUndo({ view: 'mail', action: 'delete', email: { ...email }, prevFolder: email.folder }, 'Deleted — Ctrl+Z to undo');
-      emails = emails.map((e) => (e.id === email.id ? { ...e, folder: 'deleted' } : e));
     }
     if (selectedEmailId === email.id) selectedEmailId = '';
-    deleteEmail(activeAccountId, email.id);
+    fireDeleteEmail(activeAccountId, email.id);
   }
 
   function handleMoveEmail(targetFolder: string) {
@@ -1438,9 +1588,8 @@
       view: 'mail', action: 'move', emailId: e.id, prevFolder: e.folder,
     }));
     const ids = new Set(targets.map((e) => e.id));
-    emails = emails.map((e) => (ids.has(e.id) ? { ...e, folder: targetFolder } : e));
     if (selectedEmailId && ids.has(selectedEmailId)) selectedEmailId = '';
-    targets.forEach((e) => moveEmail(activeAccountId, e.id, targetFolder));
+    targets.forEach((e) => fireMoveEmail(activeAccountId, e.id, targetFolder));
     if (entries.length === 1) {
       pushUndo(entries[0], 'Moved — Ctrl+Z to undo');
     } else {
@@ -1457,9 +1606,8 @@
       view: 'mail', action: 'archive', emailId: e.id, prevFolder: e.folder,
     }));
     const ids = new Set(targets.map((e) => e.id));
-    emails = emails.map((e) => (ids.has(e.id) ? { ...e, folder: 'archive' } : e));
     if (selectedEmailId && ids.has(selectedEmailId)) selectedEmailId = '';
-    targets.forEach((e) => moveEmail(activeAccountId, e.id, 'archive'));
+    targets.forEach((e) => fireMoveEmail(activeAccountId, e.id, 'archive'));
     if (entries.length === 1) {
       pushUndo(entries[0], 'Archived — Ctrl+Z to undo');
     } else {
@@ -1483,9 +1631,8 @@
       view: 'mail', action: 'junk', emailId: e.id, prevFolder: e.folder,
     }));
     const ids = new Set(toMove.map((e) => e.id));
-    emails = emails.map((e) => (ids.has(e.id) ? { ...e, folder: target } : e));
     if (selectedEmailId && ids.has(selectedEmailId)) selectedEmailId = '';
-    toMove.forEach((e) => moveEmail(activeAccountId, e.id, target));
+    toMove.forEach((e) => fireMoveEmail(activeAccountId, e.id, target));
     // Update sender blocklist per-email
     toMove.forEach((e) => {
       if (target === 'junk') {
@@ -1503,25 +1650,75 @@
     clearBatchSelection();
   }
 
+  /** Apply a backend-pushed flag echo to the local emails array.
+   * `emails` is the active-account view; the `$effect` at the top of
+   * the script syncs it back into `accounts`. Echoes for non-active
+   * accounts update `accounts` directly. */
+  function applyFlagEcho(ev: EmailFlagChangedEvent) {
+    const patch = (e: Email): Email => {
+      switch (ev.field) {
+        case 'read':    return { ...e, isRead:    ev.value };
+        case 'starred': return { ...e, isStarred: ev.value };
+        case 'replied': return { ...e, isReplied: ev.value };
+        case 'pinned':  return { ...e, isPinned:  ev.value };
+        case 'focused': return { ...e, isFocused: ev.value };
+      }
+    };
+    if (ev.accountId === activeAccountId) {
+      emails = emails.map((e) => (e.id === ev.emailId ? patch(e) : e));
+    } else {
+      accounts = accounts.map((a) =>
+        a.id === ev.accountId
+          ? { ...a, emails: a.emails.map((e) => (e.id === ev.emailId ? patch(e) : e)) }
+          : a);
+    }
+  }
+
+  function applyFolderEcho(ev: EmailFolderChangedEvent) {
+    if (ev.accountId === activeAccountId) {
+      emails = emails.map((e) => (e.id === ev.emailId ? { ...e, folder: ev.folder } : e));
+    } else {
+      accounts = accounts.map((a) =>
+        a.id === ev.accountId
+          ? { ...a, emails: a.emails.map((e) => (e.id === ev.emailId ? { ...e, folder: ev.folder } : e)) }
+          : a);
+    }
+  }
+
+  function applyRemovedEcho(ev: EmailRemovedEvent) {
+    const ids = new Set(ev.emailIds);
+    if (ev.accountId === activeAccountId) {
+      emails = emails.filter((e) => !ids.has(e.id));
+      if (selectedEmailId && ids.has(selectedEmailId)) selectedEmailId = '';
+    } else {
+      accounts = accounts.map((a) =>
+        a.id === ev.accountId
+          ? { ...a, emails: a.emails.filter((e) => !ids.has(e.id)) }
+          : a);
+    }
+  }
+
   function handleToggleStar(email: Email) {
     pushUndo({ view: 'mail', action: 'toggleStar', emailId: email.id, prevIsStarred: email.isStarred }, `${email.isStarred ? 'Unstarred' : 'Starred'} — Ctrl+Z to undo`);
-    const newVal = !email.isStarred;
-    emails = emails.map((e) => (e.id === email.id ? { ...e, isStarred: newVal } : e));
-    updateEmailStarred(activeAccountId, email.id, newVal);
+    // Network-bearing action: don't optimistically update — the backend
+    // emits mail:email-flag-changed when the IMAP \Flagged round trip
+    // finishes (or carries the rolled-back value on failure).
+    fireToggleStar(activeAccountId, email.id, !email.isStarred);
   }
 
   function handleTogglePin(email: Email) {
     pushUndo({ view: 'mail', action: 'togglePin', emailId: email.id, prevIsPinned: email.isPinned }, `${email.isPinned ? 'Unpinned' : 'Pinned'} — Ctrl+Z to undo`);
+    // Local-only: optimistic update is appropriate; the echo will redundantly confirm.
     const newVal = !email.isPinned;
     emails = emails.map((e) => (e.id === email.id ? { ...e, isPinned: newVal } : e));
-    updateEmailPinned(email.id, newVal);
+    fireTogglePinned(email.id, newVal);
   }
 
   function handleToggleFocused(email: Email) {
     pushUndo({ view: 'mail', action: 'toggleFocused', emailId: email.id, prevIsFocused: email.isFocused ?? true }, 'Focus toggled — Ctrl+Z to undo');
     const newVal = !(email.isFocused ?? true);
     emails = emails.map((e) => (e.id === email.id ? { ...e, isFocused: newVal } : e));
-    updateEmailFocused(email.id, newVal);
+    fireToggleFocused(email.id, newVal);
   }
 
   /** Strip HTML tags to produce a plain-text preview */
@@ -1726,27 +1923,21 @@
     const fe = emails.filter((e) => e.folder === activeFolder && !e.isSending);
     selectedEmailId = fe[0]?.id ?? '';
 
-    // Send in the background — draft stays hidden (isSending) while in-flight
-    try {
-      await sendEmail(accountId, outbound);
-    } catch (e) {
-      console.error('Send failed:', e);
-      syncErrors = [...syncErrors, `Send failed: ${e}`];
-      // Restore draft so it reappears in Drafts and the user can retry
-      if (draftId) {
-        emails = emails.map((em) => em.id === draftId ? { ...em, isSending: false } : em);
-      }
-      return;
-    }
+    // Fire the send — backend queues to outbox, spawns SMTP + IMAP APPEND,
+    // emits `mail:sent` on success and `mail:send-failed` on SMTP rejection.
+    // The compose-side cleanup happens immediately; the post-send sync is
+    // triggered by the mail:sent listener wired in onMount.
+    fireSendEmail(accountId, outbound);
 
-    // Mark the original email as replied (\Answered) when replying
+    // Mark the original email as replied (\Answered) when replying. Network-
+    // bearing — the echo updates isReplied when the IMAP write completes.
     if ((mode === 'reply' || mode === 'replyAll') && replyTo) {
-      const repliedId = replyTo.id;
-      emails = emails.map((e) => e.id === repliedId ? { ...e, isReplied: true } : e);
-      updateEmailReplied(accountId, repliedId, true);
+      fireToggleReplied(accountId, replyTo.id, true);
     }
 
-    // Remove the sent draft from the emails array (IMAP sync will fetch the Sent copy)
+    // Remove the sent draft from the emails array (IMAP sync will fetch the
+    // Sent copy). If the SMTP send fails, the outbox row stays in 'pending'
+    // and the next flush_outbox retries — we don't restore the draft row.
     if (draftId) {
       emails = emails.filter((e) => e.id !== draftId);
     }
@@ -1975,76 +2166,47 @@
     folderModal = { kind: 'empty', folderId, folderName: folder.name };
   }
 
-  async function commitEmptyFolder(folderId: string) {
+  function commitEmptyFolder(folderId: string) {
     folderModal = null;
     const acct = accounts.find((a) => a.id === activeAccountId);
     if (!acct) return;
 
-    // Optimistic: remove emails locally
-    emails = emails.filter((e) => !(e.folder === folderId));
+    // Clear the reading pane immediately if the selected email is in the
+    // folder being emptied. The backend echoes mail:email-removed when the
+    // DB delete completes; applyRemovedEcho strips the rows from `emails`.
     if (selectedEmail?.folder === folderId) {
       selectedEmail = null;
     }
-
-    try {
-      await emptyFolder(acct.id, folderId);
-    } catch (err) {
-      console.error('empty_folder failed:', err);
-    }
+    fireEmptyFolder(acct.id, folderId);
   }
 
-  // Calendar event handlers
-  async function handleSaveEvent(event: CalendarEvent) {
+  // Calendar event handlers — network-bearing per the hybrid rule, so we
+  // don't optimistically mutate state. The backend's calendar:event-upserted
+  // echo (handled in applyEventUpsertedEcho) inserts/updates the event with
+  // the canonical id; applyEventRemovedEcho strips deletes.
+  function handleSaveEvent(event: CalendarEvent) {
     const acct = accounts.find((a) => a.id === activeAccountId);
     if (!acct) return;
 
-    // Optimistic local update
     const existing = acct.calendarEvents.findIndex((e) => e.id === event.id);
     if (existing >= 0) {
       pushUndo({ view: 'calendar', action: 'editEvent', prevEvent: { ...acct.calendarEvents[existing] } }, 'Event updated — Ctrl+Z to undo');
     } else {
       pushUndo({ view: 'calendar', action: 'createEvent', eventId: event.id }, 'Event created — Ctrl+Z to undo');
     }
-    let updatedEvents: CalendarEvent[];
-    if (existing >= 0) {
-      updatedEvents = acct.calendarEvents.map((e) => (e.id === event.id ? event : e));
-    } else {
-      updatedEvents = [...acct.calendarEvents, event];
-    }
-    const updated = { ...acct, calendarEvents: updatedEvents };
-    accounts = accounts.map((a) => (a.id === updated.id ? updated : a));
 
-    // Push to local DB (and CalDAV server if configured)
-    try {
-      const localId = await saveCalendarEvent(
-        acct.id, event.id, event.title,
-        event.start.toISOString(), event.end.toISOString(),
-        event.location, event.description,
-        event.isAllDay, event.calendarId,
-        event.attendees ?? [],
-        event.recurrence,
-        event.isOnlineMeeting ?? false,
-        event.meetingUrl,
-        event.alertMinutes,
-      );
-      // If a new ID was assigned, update local state + undo entry
-      if (localId && localId !== event.id) {
-        const withNewId = { ...event, id: localId };
-        accounts = accounts.map((a) =>
-          a.id === acct.id
-            ? { ...a, calendarEvents: a.calendarEvents.map((e) => (e.id === event.id ? withNewId : e)) }
-            : a
-        );
-        if (undoCalendar?.action === 'createEvent' && undoCalendar.eventId === event.id) {
-          undoCalendar = { ...undoCalendar, eventId: localId };
-        }
-      }
-    } catch (e) {
-      console.error('Failed to save event:', e);
-    }
+    fireSaveCalendarEvent({
+      accountId: acct.id, eventId: event.id, title: event.title,
+      start: event.start.toISOString(), end: event.end.toISOString(),
+      location: event.location, description: event.description,
+      isAllDay: event.isAllDay, calendarId: event.calendarId,
+      attendees: event.attendees ?? [], recurrence: event.recurrence,
+      isOnlineMeeting: event.isOnlineMeeting ?? false,
+      meetingUrl: event.meetingUrl, alertMinutes: event.alertMinutes,
+    });
   }
 
-  async function handleDeleteEvent(eventId: string, instanceDate?: string, deleteMode?: 'single' | 'future' | 'all') {
+  function handleDeleteEvent(eventId: string, instanceDate?: string, deleteMode?: 'single' | 'future' | 'all') {
     const acct = accounts.find((a) => a.id === activeAccountId);
     if (!acct) return;
 
@@ -2052,110 +2214,65 @@
     if (!event) return;
 
     if (deleteMode === 'single' && instanceDate && event.recurrence) {
-      // Add exception date — this is an edit, not a delete
+      // Add exception date — this is an edit, not a delete.
       const prevEvent = { ...event, recurrence: event.recurrence ? { ...event.recurrence } : undefined };
       pushUndo({ view: 'calendar', action: 'editEvent', prevEvent }, 'Occurrence removed — Ctrl+Z to undo');
       const exdates = [...(event.recurrence.exdates ?? []), instanceDate];
-      const updatedEvent = { ...event, recurrence: { ...event.recurrence, exdates } };
-      accounts = accounts.map((a) =>
-        a.id === acct.id ? { ...a, calendarEvents: a.calendarEvents.map((e) => e.id === eventId ? updatedEvent : e) } : a
-      );
-      try {
-        await saveCalendarEvent(
-          acct.id, event.id, event.title,
-          event.start.toISOString(), event.end.toISOString(),
-          event.location, event.description,
-          event.isAllDay, event.calendarId,
-          event.attendees ?? [],
-          updatedEvent.recurrence,
-          event.isOnlineMeeting ?? false, event.meetingUrl,
-          event.alertMinutes,
-        );
-      } catch (e) { console.error('Failed to save event with exdate:', e); }
+      fireSaveCalendarEvent({
+        accountId: acct.id, eventId: event.id, title: event.title,
+        start: event.start.toISOString(), end: event.end.toISOString(),
+        location: event.location, description: event.description,
+        isAllDay: event.isAllDay, calendarId: event.calendarId,
+        attendees: event.attendees ?? [],
+        recurrence: { ...event.recurrence, exdates },
+        isOnlineMeeting: event.isOnlineMeeting ?? false, meetingUrl: event.meetingUrl,
+        alertMinutes: event.alertMinutes,
+      });
       return;
     }
 
     if (deleteMode === 'future' && instanceDate && event.recurrence) {
-      // Truncate series: set endDate to day before this instance
       const d = new Date(instanceDate + 'T00:00:00');
       d.setDate(d.getDate() - 1);
       const endDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       const prevEvent = { ...event, recurrence: event.recurrence ? { ...event.recurrence } : undefined };
       pushUndo({ view: 'calendar', action: 'editEvent', prevEvent }, 'Future occurrences removed — Ctrl+Z to undo');
-      const updatedEvent = { ...event, recurrence: { ...event.recurrence, endDate } };
-      accounts = accounts.map((a) =>
-        a.id === acct.id ? { ...a, calendarEvents: a.calendarEvents.map((e) => e.id === eventId ? updatedEvent : e) } : a
-      );
-      try {
-        await saveCalendarEvent(
-          acct.id, event.id, event.title,
-          event.start.toISOString(), event.end.toISOString(),
-          event.location, event.description,
-          event.isAllDay, event.calendarId,
-          event.attendees ?? [],
-          updatedEvent.recurrence,
-          event.isOnlineMeeting ?? false, event.meetingUrl,
-          event.alertMinutes,
-        );
-      } catch (e) { console.error('Failed to save event with truncated recurrence:', e); }
+      fireSaveCalendarEvent({
+        accountId: acct.id, eventId: event.id, title: event.title,
+        start: event.start.toISOString(), end: event.end.toISOString(),
+        location: event.location, description: event.description,
+        isAllDay: event.isAllDay, calendarId: event.calendarId,
+        attendees: event.attendees ?? [],
+        recurrence: { ...event.recurrence, endDate },
+        isOnlineMeeting: event.isOnlineMeeting ?? false, meetingUrl: event.meetingUrl,
+        alertMinutes: event.alertMinutes,
+      });
       return;
     }
 
-    // Mode "all" or non-recurring: delete entire event
+    // Mode "all" or non-recurring: delete entire event.
     pushUndo({ view: 'calendar', action: 'deleteEvent', prevEvent: { ...event } }, 'Event deleted — Ctrl+Z to undo');
-    const updated = { ...acct, calendarEvents: acct.calendarEvents.filter((e) => e.id !== eventId) };
-    accounts = accounts.map((a) => (a.id === updated.id ? updated : a));
-    try {
-      await deleteCalendarEvent(acct.id, eventId);
-    } catch (e) {
-      console.error('Failed to delete event:', e);
-    }
+    fireDeleteCalendarEvent(acct.id, eventId);
   }
 
-  // Contact handlers
-  async function handleSaveContact(contact: FullContact) {
+  // Contact handlers — network-bearing (CardDAV), no optimistic update.
+  function handleSaveContact(contact: FullContact) {
     const acct = accounts.find((a) => a.id === activeAccountId);
     if (!acct) return;
 
-    // Optimistic local update
     const existing = acct.contacts.findIndex((c) => c.id === contact.id);
     if (existing >= 0) {
       pushUndo({ view: 'contacts', action: 'editContact', prevContact: { ...acct.contacts[existing] } }, 'Contact updated — Ctrl+Z to undo');
     } else {
       pushUndo({ view: 'contacts', action: 'createContact', contactId: contact.id }, 'Contact created — Ctrl+Z to undo');
     }
-    let updatedContacts: FullContact[];
-    if (existing >= 0) {
-      updatedContacts = acct.contacts.map((c) => (c.id === contact.id ? contact : c));
-    } else {
-      updatedContacts = [...acct.contacts, contact];
-    }
-    const updated = { ...acct, contacts: updatedContacts };
-    accounts = accounts.map((a) => (a.id === updated.id ? updated : a));
 
-    // Push to CardDAV server + local DB
     if (acct.cardDavSettings?.url) {
-      try {
-        const localId = await saveContactEntry(acct.id, contact);
-        // If a new ID was assigned, update local state + undo entry
-        if (localId && localId !== contact.id) {
-          const withNewId = { ...contact, id: localId };
-          accounts = accounts.map((a) =>
-            a.id === acct.id
-              ? { ...a, contacts: a.contacts.map((c) => (c.id === contact.id ? withNewId : c)) }
-              : a
-          );
-          if (undoContacts?.action === 'createContact' && undoContacts.contactId === contact.id) {
-            undoContacts = { ...undoContacts, contactId: localId };
-          }
-        }
-      } catch (e) {
-        console.error('Failed to save contact to CardDAV:', e);
-      }
+      fireSaveContactEntry(acct.id, contact);
     }
   }
 
-  async function handleDeleteContact(contactId: string) {
+  function handleDeleteContact(contactId: string) {
     const acct = accounts.find((a) => a.id === activeAccountId);
     if (!acct) return;
 
@@ -2164,41 +2281,25 @@
       pushUndo({ view: 'contacts', action: 'deleteContact', prevContact: { ...contactToDelete } }, 'Contact deleted — Ctrl+Z to undo');
     }
 
-    // Optimistic local removal
-    const updated = { ...acct, contacts: acct.contacts.filter((c) => c.id !== contactId) };
-    accounts = accounts.map((a) => (a.id === updated.id ? updated : a));
-
-    // Delete from CardDAV server + local DB
     if (acct.cardDavSettings?.url) {
-      try {
-        await deleteContactEntry(acct.id, contactId);
-      } catch (e) {
-        console.error('Failed to delete contact from CardDAV:', e);
-      }
+      fireDeleteContactEntry(acct.id, contactId);
     }
   }
 
-  async function handleSaveContactList(list: ContactList) {
+  // Contact lists are local-only — optimistic per the hybrid rule.
+  function handleSaveContactList(list: ContactList) {
     const existing = contactLists.findIndex(l => l.id === list.id);
     if (existing >= 0) {
       contactLists = contactLists.map(l => l.id === list.id ? list : l);
     } else {
       contactLists = [...contactLists, list];
     }
-    try {
-      await saveContactList(activeAccountId, list.id, list.name, list.members);
-    } catch (e) {
-      console.error('Failed to save contact list:', e);
-    }
+    fireSaveContactList(activeAccountId, list.id, list.name, list.members);
   }
 
-  async function handleDeleteContactList(listId: string) {
+  function handleDeleteContactList(listId: string) {
     contactLists = contactLists.filter(l => l.id !== listId);
-    try {
-      await deleteContactList(listId);
-    } catch (e) {
-      console.error('Failed to delete contact list:', e);
-    }
+    fireDeleteContactList(listId);
   }
 
   // Trigger counters — bumped to signal child components to open modals
