@@ -13,18 +13,8 @@
   import {
     loadAccounts,
     loadTheme,
-    saveTheme,
     loadAccentColor,
-    saveAccentColor,
     loadLocale,
-    saveLocale,
-    updateAccount as persistUpdateAccount,
-    addAccount as persistAddAccount,
-    deleteAccount as persistDeleteAccount,
-    setAccountPositions as persistAccountPositions,
-    saveMailSettings,
-    saveCalDavSettings,
-    saveCardDavSettings,
     syncMail,
     syncCalendars,
     syncContacts,
@@ -93,6 +83,39 @@
     type ContactListUpsertedEvent,
     type ContactListRemovedEvent,
   } from '$lib/stores/contactsStore.svelte';
+  import {
+    fireUpdateAccount,
+    fireAddAccount,
+    fireDeleteAccount,
+    fireSetAccountPositions,
+    fireSetSetting,
+    fireSaveMailSettings,
+    fireSaveCalDavSettings,
+    fireSaveCardDavSettings,
+    subscribeSettingsAccountUpserted,
+    subscribeSettingsAccountRemoved,
+    subscribeSettingsAccountsReordered,
+    subscribeSettingsKvChanged,
+    subscribeSettingsStorageQuotaChanged,
+    subscribeSettingsOfflineDownloadChanged,
+    subscribeSettingsMailServerSaved,
+    subscribeSettingsCalDavSaved,
+    subscribeSettingsCardDavSaved,
+    subscribeSettingsDavServerChanged,
+    subscribeSettingsDavUsersChanged,
+    type SettingsAccountUpsertedEvent,
+    type SettingsAccountRemovedEvent,
+    type SettingsAccountsReorderedEvent,
+    type SettingsKvChangedEvent,
+    type SettingsStorageQuotaChangedEvent,
+    type SettingsOfflineDownloadChangedEvent,
+    type SettingsMailServerSavedEvent,
+    type SettingsDavSavedEvent,
+    type SettingsDavServerChangedEvent,
+    type SettingsDavUsersChangedEvent,
+  } from '$lib/stores/settingsStore.svelte';
+  import { getStorageInfo, getDavServerStatus, listDavUsers, getAccountOfflineDownload } from '$lib/data/dataService';
+  import type { StorageInfo } from '$lib/data/dataService';
   import { onMount, onDestroy, untrack } from 'svelte';
   import { requestNotificationPermission, rebuildAlertQueue, clearAlertQueue } from '$lib/eventAlerts';
   import { networkActivity } from '$lib/networkActivity.svelte';
@@ -162,6 +185,24 @@
   let unlistenContactFavorite: (() => void) | null = null;
   let unlistenContactListUpserted: (() => void) | null = null;
   let unlistenContactListRemoved: (() => void) | null = null;
+  let unlistenSettingsAccountUpserted: (() => void) | null = null;
+  let unlistenSettingsAccountRemoved: (() => void) | null = null;
+  let unlistenSettingsAccountsReordered: (() => void) | null = null;
+  let unlistenSettingsKvChanged: (() => void) | null = null;
+  let unlistenSettingsStorageQuota: (() => void) | null = null;
+  let unlistenSettingsOfflineDownload: (() => void) | null = null;
+  let unlistenSettingsMailServer: (() => void) | null = null;
+  let unlistenSettingsCalDav: (() => void) | null = null;
+  let unlistenSettingsCardDav: (() => void) | null = null;
+  let unlistenSettingsDavServer: (() => void) | null = null;
+  let unlistenSettingsDavUsers: (() => void) | null = null;
+
+  // Settings state pushed to SettingsView via props. Initial values are
+  // loaded once in onMount; subsequent changes arrive over settings:* events.
+  let storageInfo = $state<StorageInfo | null>(null);
+  let davServerAddr = $state<string | null>(null);
+  let davUsers = $state<[string, string][]>([]);
+  let offlineDownloadByAccount = $state<Record<string, boolean>>({});
 
   // Search-coverage indicator for the title bar. Populated per active account;
   // null when the account is fully indexed (or we haven't loaded yet).
@@ -849,7 +890,38 @@
         subscribeContactFavoriteChanged(applyContactFavoriteEcho).then((unlisten) => { unlistenContactFavorite = unlisten; });
         subscribeContactListUpserted(applyContactListUpsertedEcho).then((unlisten) => { unlistenContactListUpserted = unlisten; });
         subscribeContactListRemoved(applyContactListRemovedEcho).then((unlisten) => { unlistenContactListRemoved = unlisten; });
-      } else {
+      }
+
+      // Phase 4: settings echoes. Registered regardless of whether accounts
+      // exist — required so the account-upserted echo can populate state
+      // when the user adds their first account in the setup flow.
+      subscribeSettingsAccountUpserted(applySettingsAccountUpsertedEcho).then((u) => { unlistenSettingsAccountUpserted = u; });
+      subscribeSettingsAccountRemoved(applySettingsAccountRemovedEcho).then((u) => { unlistenSettingsAccountRemoved = u; });
+      subscribeSettingsAccountsReordered(applySettingsAccountsReorderedEcho).then((u) => { unlistenSettingsAccountsReordered = u; });
+      subscribeSettingsKvChanged(applySettingsKvChangedEcho).then((u) => { unlistenSettingsKvChanged = u; });
+      subscribeSettingsStorageQuotaChanged(applySettingsStorageQuotaEcho).then((u) => { unlistenSettingsStorageQuota = u; });
+      subscribeSettingsOfflineDownloadChanged(applySettingsOfflineDownloadEcho).then((u) => { unlistenSettingsOfflineDownload = u; });
+      subscribeSettingsMailServerSaved(applySettingsMailServerSavedEcho).then((u) => { unlistenSettingsMailServer = u; });
+      subscribeSettingsCalDavSaved(applySettingsCalDavSavedEcho).then((u) => { unlistenSettingsCalDav = u; });
+      subscribeSettingsCardDavSaved(applySettingsCardDavSavedEcho).then((u) => { unlistenSettingsCardDav = u; });
+      subscribeSettingsDavServerChanged(applySettingsDavServerEcho).then((u) => { unlistenSettingsDavServer = u; });
+      subscribeSettingsDavUsersChanged(applySettingsDavUsersEcho).then((u) => { unlistenSettingsDavUsers = u; });
+
+      // Initial settings reads — subsequent changes arrive via the echoes above.
+      refreshStorageInfo();
+      getDavServerStatus().then((addr) => { davServerAddr = addr; }).catch((err) => {
+        console.error('Failed to read DAV server status:', err);
+      });
+      listDavUsers().then((users) => { davUsers = users; }).catch((err) => {
+        console.error('Failed to read DAV users:', err);
+      });
+      Promise.all(
+        accounts.map((a) => getAccountOfflineDownload(a.id).then((v) => [a.id, v] as const).catch(() => [a.id, false] as const)),
+      ).then((pairs) => {
+        offlineDownloadByAccount = Object.fromEntries(pairs);
+      });
+
+      if (accounts.length === 0) {
         requireAccountSetup = true;
         startupStatus = 'needs-account';
       }
@@ -884,6 +956,17 @@
     if (unlistenContactFavorite) unlistenContactFavorite();
     if (unlistenContactListUpserted) unlistenContactListUpserted();
     if (unlistenContactListRemoved) unlistenContactListRemoved();
+    if (unlistenSettingsAccountUpserted) unlistenSettingsAccountUpserted();
+    if (unlistenSettingsAccountRemoved) unlistenSettingsAccountRemoved();
+    if (unlistenSettingsAccountsReordered) unlistenSettingsAccountsReordered();
+    if (unlistenSettingsKvChanged) unlistenSettingsKvChanged();
+    if (unlistenSettingsStorageQuota) unlistenSettingsStorageQuota();
+    if (unlistenSettingsOfflineDownload) unlistenSettingsOfflineDownload();
+    if (unlistenSettingsMailServer) unlistenSettingsMailServer();
+    if (unlistenSettingsCalDav) unlistenSettingsCalDav();
+    if (unlistenSettingsCardDav) unlistenSettingsCardDav();
+    if (unlistenSettingsDavServer) unlistenSettingsDavServer();
+    if (unlistenSettingsDavUsers) unlistenSettingsDavUsers();
     if (globalKeyHandler) document.removeEventListener('keydown', globalKeyHandler, true);
     clearAlertQueue();
   });
@@ -1445,6 +1528,111 @@
     contactLists = contactLists.filter((l) => l.id !== ev.listId);
   }
 
+  // ── Settings echoes ──────────────────────────────────────
+  //
+  // Backend update_account / add_account emits a full Account row, but the
+  // client-only hydration fields (serverSettings, calDavSettings,
+  // cardDavSettings, signature) live outside the DB row — preserve them
+  // from the existing local entry on merge.
+  function applySettingsAccountUpsertedEcho(ev: SettingsAccountUpsertedEvent) {
+    const existing = accounts.find((a) => a.id === ev.account.id);
+    const merged: Account = {
+      ...ev.account,
+      serverSettings: existing?.serverSettings,
+      calDavSettings: existing?.calDavSettings,
+      cardDavSettings: existing?.cardDavSettings,
+      signature: existing?.signature,
+    };
+    if (existing) {
+      accounts = accounts.map((a) => (a.id === merged.id ? merged : a));
+    } else {
+      const next = [...accounts, merged];
+      accounts = next;
+      applyAccountState(merged.id, next);
+      requireAccountSetup = false;
+    }
+  }
+
+  function applySettingsAccountRemovedEcho(ev: SettingsAccountRemovedEvent) {
+    if (!accounts.some((a) => a.id === ev.accountId)) return;
+    accounts = accounts.filter((a) => a.id !== ev.accountId);
+    if (activeAccountId === ev.accountId) {
+      const fallback = accounts[0];
+      if (fallback) {
+        handleSelectAccount(fallback.id);
+      } else {
+        applyAccountState('', accounts);
+        requireAccountSetup = true;
+      }
+    }
+  }
+
+  function applySettingsAccountsReorderedEcho(ev: SettingsAccountsReorderedEvent) {
+    const byId = new Map(accounts.map((a) => [a.id, a]));
+    const reordered = ev.orderedIds
+      .map((id) => byId.get(id))
+      .filter((a): a is Account => !!a);
+    if (reordered.length === accounts.length) {
+      accounts = reordered;
+    }
+  }
+
+  function applySettingsKvChangedEcho(ev: SettingsKvChangedEvent) {
+    if (ev.key === 'theme') {
+      if (ev.value === 'dark' || ev.value === 'light' || ev.value === 'system') theme = ev.value;
+    } else if (ev.key === 'accentColor') {
+      accentColor = ev.value;
+    } else if (ev.key === 'locale') {
+      if (ev.value && ev.value !== locale()) setLocale(ev.value);
+    }
+  }
+
+  function applySettingsStorageQuotaEcho(ev: SettingsStorageQuotaChangedEvent) {
+    // Quota changes also alter the usedBytes/maxQuotaBytes view; refetch.
+    if (storageInfo) {
+      storageInfo = { ...storageInfo, quotaBytes: ev.quotaBytes };
+    }
+    refreshStorageInfo();
+  }
+
+  function applySettingsOfflineDownloadEcho(ev: SettingsOfflineDownloadChangedEvent) {
+    offlineDownloadByAccount = { ...offlineDownloadByAccount, [ev.accountId]: ev.enabled };
+  }
+
+  function applySettingsMailServerSavedEcho(ev: SettingsMailServerSavedEvent) {
+    accounts = accounts.map((a) =>
+      a.id === ev.accountId ? { ...a, serverSettings: ev.settings } : a
+    );
+  }
+
+  function applySettingsCalDavSavedEcho(ev: SettingsDavSavedEvent) {
+    accounts = accounts.map((a) =>
+      a.id === ev.accountId ? { ...a, calDavSettings: ev.settings } : a
+    );
+  }
+
+  function applySettingsCardDavSavedEcho(ev: SettingsDavSavedEvent) {
+    accounts = accounts.map((a) =>
+      a.id === ev.accountId ? { ...a, cardDavSettings: ev.settings } : a
+    );
+  }
+
+  function applySettingsDavServerEcho(ev: SettingsDavServerChangedEvent) {
+    davServerAddr = ev.addr;
+  }
+
+  function applySettingsDavUsersEcho(ev: SettingsDavUsersChangedEvent) {
+    davUsers = ev.users;
+  }
+
+  async function refreshStorageInfo() {
+    try {
+      storageInfo = await getStorageInfo();
+    } catch (err) {
+      console.error('Failed to read storage info:', err);
+    }
+  }
+
   function handleLabelClick(label: string) {
     // Route to operator-aware search. Quote labels that contain whitespace.
     const value = /\s/.test(label) ? `"${label}"` : label;
@@ -1994,51 +2182,42 @@
 
   function handleChangeTheme(newTheme: Theme) {
     theme = newTheme;
-    saveTheme(newTheme);
+    fireSetSetting('theme', newTheme);
   }
 
   function handleChangeAccentColor(colorId: string) {
     accentColor = colorId;
-    saveAccentColor(colorId);
+    fireSetSetting('accentColor', colorId);
   }
 
   function handleChangeLocale(code: string) {
     setLocale(code);
-    saveLocale(code);
+    fireSetSetting('locale', code);
   }
 
-  async function handleUpdateAccount(updated: Account) {
-    accounts = accounts.map(a => a.id === updated.id ? updated : a);
-    await persistUpdateAccount(updated);
+  function handleUpdateAccount(updated: Account) {
+    fireUpdateAccount(updated);
     if (updated.serverSettings) {
-      await saveMailSettings(updated.id, updated.serverSettings);
+      fireSaveMailSettings(updated.id, updated.serverSettings);
     }
     if (updated.calDavSettings) {
-      await saveCalDavSettings(updated.id, updated.calDavSettings);
+      fireSaveCalDavSettings(updated.id, updated.calDavSettings);
     }
     if (updated.cardDavSettings) {
-      await saveCardDavSettings(updated.id, updated.cardDavSettings);
+      fireSaveCardDavSettings(updated.id, updated.cardDavSettings);
     }
   }
 
   function handleDeleteAccount(accountId: string) {
     if (accounts.length <= 1) return;
-    accounts = accounts.filter(a => a.id !== accountId);
-    persistDeleteAccount(accountId);
-    if (activeAccountId === accountId) {
-      handleSelectAccount(accounts[0].id);
-    }
+    fireDeleteAccount(accountId);
   }
 
-  async function handleReorderAccounts(orderedIds: string[]) {
-    const byId = new Map(accounts.map(a => [a.id, a]));
-    const reordered = orderedIds.map(id => byId.get(id)).filter((a): a is Account => !!a);
-    if (reordered.length !== accounts.length) return;
-    accounts = reordered;
-    await persistAccountPositions(orderedIds);
+  function handleReorderAccounts(orderedIds: string[]) {
+    fireSetAccountPositions(orderedIds);
   }
 
-  async function handleAddAccount(data: { name: string; email: string; initials: string; color: string; avatarUrl?: string }) {
+  function handleAddAccount(data: { name: string; email: string; initials: string; color: string; avatarUrl?: string }) {
     const newId = crypto.randomUUID();
     const newAccount: Account = {
       id: newId,
@@ -2060,10 +2239,9 @@
       calendarCategories: [],
       contacts: [],
     };
-    const nextAccounts = [...accounts, newAccount];
-    accounts = nextAccounts;
-    await persistAddAccount({ id: newId, name: data.name, email: data.email, initials: data.initials, color: data.color, avatarUrl: data.avatarUrl });
-    applyAccountState(newId, nextAccounts);
+    fireAddAccount({ id: newId, name: data.name, email: data.email, initials: data.initials, color: data.color, avatarUrl: data.avatarUrl });
+    // Echo from settings:account-upserted will replace the placeholder with
+    // the canonical row (including default folders/calendars seeded backend-side).
     return newAccount;
   }
 
@@ -2597,6 +2775,10 @@
     languageNames={LANGUAGE_NAMES}
     initialTab={requireAccountSetup ? 'accounts' : 'general'}
     requireAccount={requireAccountSetup}
+    {storageInfo}
+    {davServerAddr}
+    {davUsers}
+    {offlineDownloadByAccount}
     onChangeTheme={handleChangeTheme}
     onChangeAccentColor={handleChangeAccentColor}
     onChangeLocale={handleChangeLocale}

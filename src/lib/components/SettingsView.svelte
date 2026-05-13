@@ -2,8 +2,16 @@
   import { onMount } from 'svelte';
   import { getVersion } from '@tauri-apps/api/app';
   import type { Account, MailServerSettings, CalDavSettings, CardDavSettings, Theme } from '$lib/types';
-  import { discoverMailSettings, startDavServer, stopDavServer, getDavServerStatus, addDavUser, removeDavUser, listDavUsers, getStorageInfo, setStorageQuota, getAccountOfflineDownload, setAccountOfflineDownload } from '$lib/data/dataService';
+  import { discoverMailSettings } from '$lib/data/dataService';
   import type { StorageInfo } from '$lib/data/dataService';
+  import {
+    fireStartDavServer,
+    fireStopDavServer,
+    fireAddDavUser,
+    fireRemoveDavUser,
+    fireSetStorageQuota,
+    fireSetAccountOfflineDownload,
+  } from '$lib/stores/settingsStore.svelte';
   import { t } from '$lib/i18n/index.svelte';
   import { isLikelyEmail } from '$lib/utils';
   import type { DiscoveredConfig, ServerConfig } from '$lib/data/dataService';
@@ -16,6 +24,14 @@
     languageNames: Record<string, string>;
     initialTab?: 'general' | 'accounts';
     requireAccount?: boolean;
+    /** Storage quota info; pushed from +page.svelte. */
+    storageInfo: StorageInfo | null;
+    /** Address the embedded DAV server is bound to, or null if stopped. */
+    davServerAddr: string | null;
+    /** `[email, accountId]` pairs registered on the embedded DAV server. */
+    davUsers: [string, string][];
+    /** Per-account offline-download enabled flags. */
+    offlineDownloadByAccount: Record<string, boolean>;
     onChangeTheme: (theme: Theme) => void;
     onChangeAccentColor: (colorId: string) => void;
     onChangeLocale: (code: string) => void;
@@ -35,6 +51,10 @@
     languageNames,
     initialTab = 'general',
     requireAccount = false,
+    storageInfo,
+    davServerAddr,
+    davUsers,
+    offlineDownloadByAccount,
     onChangeTheme,
     onChangeAccentColor,
     onChangeLocale,
@@ -139,10 +159,8 @@
   let addPhotoInput = $state<HTMLInputElement | undefined>();
   let editPhotoInput = $state<HTMLInputElement | undefined>();
 
-  // DAV server state
-  let davServerAddr = $state<string | null>(null);
+  // DAV server form state (server addr + user list are pushed in via props)
   let davBindAddr = $state('0.0.0.0:5232');
-  let davUsers = $state<[string, string][]>([]);
   let davNewEmail = $state('');
   let davNewPassword = $state('');
   let davNewAccountId = $state('');
@@ -150,19 +168,13 @@
   let davError = $state('');
   let pendingDavAdds = $state<Array<{ email: string; password: string; acctId: string }>>([]);
 
-  async function loadDavStatus() {
-    davServerAddr = await getDavServerStatus();
-    davUsers = await listDavUsers();
-  }
-
   async function toggleDavServer() {
     davError = '';
     if (davServerAddr) {
-      await stopDavServer();
-      davServerAddr = null;
+      fireStopDavServer();
     } else {
       try {
-        davServerAddr = await startDavServer(davBindAddr);
+        await fireStartDavServer(davBindAddr);
       } catch (e: any) {
         davError = e?.toString() ?? 'Failed to start server';
       }
@@ -190,24 +202,21 @@
     pendingDavAdds = pendingDavAdds.filter(p => p.email !== email);
   }
 
-  async function handleRemoveDavUser(email: string) {
-    await removeDavUser(email);
-    davUsers = await listDavUsers();
+  function handleRemoveDavUser(email: string) {
+    fireRemoveDavUser(email);
   }
 
   async function saveLocalSync() {
     davError = '';
     for (const p of pendingDavAdds) {
       try {
-        await addDavUser(p.email, p.password, p.acctId);
+        await fireAddDavUser(p.email, p.password, p.acctId);
       } catch (e: any) {
         davError = e?.toString() ?? 'Failed to add user';
-        davUsers = await listDavUsers();
         return;
       }
     }
     pendingDavAdds = [];
-    davUsers = await listDavUsers();
     flashSaveSuccess();
   }
 
@@ -235,7 +244,6 @@
     showAddForm = false;
     addFormError = '';
     accountFormError = '';
-    loadOfflineDownloadFor(account.id);
     autodiscoverState = 'idle';
     autodiscoverMessage = '';
     if (autodiscoverTimer) {
@@ -699,7 +707,6 @@
     if (!didInitTab) {
       selectedTab = requireAccount ? 'accounts' : initialTab;
       didInitTab = true;
-      loadDavStatus();
     } else if (requireAccount && selectedTab !== 'accounts') {
       selectedTab = 'accounts';
     }
@@ -799,8 +806,7 @@
     }
   }
 
-  // ── Storage quota (General tab) ──
-  let storageInfo = $state<StorageInfo | null>(null);
+  // ── Storage quota (General tab) — storageInfo is pushed in via props ──
   let storageEditing = $state(false);
   let storageDraftMB = $state(100);
   let storageError = $state('');
@@ -814,14 +820,6 @@
     if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(0)} MB`;
     if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
     return `${n} B`;
-  }
-
-  async function refreshStorageInfo() {
-    try {
-      storageInfo = await getStorageInfo();
-    } catch (err) {
-      console.error('Failed to read storage info:', err);
-    }
   }
 
   function beginEditStorage() {
@@ -863,55 +861,36 @@
       return;
     }
     try {
-      await setStorageQuota(storageDraftMB * 1024 * 1024);
+      await fireSetStorageQuota(storageDraftMB * 1024 * 1024);
       storageEditing = false;
       storageError = '';
-      await refreshStorageInfo();
     } catch (err) {
       storageError = String(err);
     }
   }
 
-  async function clearStorageQuota() {
-    try {
-      await setStorageQuota(0);
-      storageEditing = false;
-      await refreshStorageInfo();
-      // Any in-memory offline-download checkbox bound to the current account
-      // is stale after a clear — re-sync it.
-      if (selectedAccountId) {
-        offlineDownloadEnabled = await getAccountOfflineDownload(selectedAccountId);
-      }
-    } catch (err) {
+  function clearStorageQuota() {
+    storageEditing = false;
+    fireSetStorageQuota(0).catch((err) => {
       console.error('Failed to clear storage quota:', err);
-    }
+    });
   }
 
-  // ── Per-account offline-download toggle ──
-  let offlineDownloadEnabled = $state(false);
+  // ── Per-account offline-download toggle (pushed via prop map) ──
   let offlineDownloadBusy = $state(false);
+  let offlineDownloadEnabled = $derived(
+    selectedAccountId ? (offlineDownloadByAccount[selectedAccountId] ?? false) : false
+  );
   let offlineDownloadDisabled = $derived(
     offlineDownloadBusy || !storageInfo || storageInfo.quotaBytes == null
   );
 
-  async function loadOfflineDownloadFor(accountId: string) {
-    try {
-      offlineDownloadEnabled = await getAccountOfflineDownload(accountId);
-    } catch (err) {
-      console.error('Failed to read offline-download setting:', err);
-      offlineDownloadEnabled = false;
-    }
-  }
-
   async function toggleOfflineDownload(accountId: string, next: boolean) {
     offlineDownloadBusy = true;
     try {
-      await setAccountOfflineDownload(accountId, next);
-      offlineDownloadEnabled = next;
+      await fireSetAccountOfflineDownload(accountId, next);
     } catch (err) {
       console.error('Failed to update offline-download setting:', err);
-      // Revert local flag if backend refused (e.g., no quota set).
-      offlineDownloadEnabled = !next;
     } finally {
       offlineDownloadBusy = false;
     }
@@ -920,7 +899,6 @@
   let appVersion = $state('');
 
   onMount(() => {
-    refreshStorageInfo();
     getVersion().then(v => { appVersion = v; }).catch(err => {
       console.error('Failed to read app version:', err);
     });

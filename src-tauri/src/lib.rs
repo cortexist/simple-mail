@@ -358,13 +358,22 @@ fn get_setting(state: tauri::State<'_, AppState>, key: String) -> Result<Option<
 }
 
 #[tauri::command]
-fn set_setting(state: tauri::State<'_, AppState>, key: String, value: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-        rusqlite::params![key, value],
-    )
-    .map_err(|e| e.to_string())?;
+fn set_setting(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    let seq = state.next_seq();
+    events::emit_settings_kv_changed(&app, &key, &value, seq);
     Ok(())
 }
 
@@ -443,8 +452,19 @@ fn set_storage_quota(
     use fs4::available_space;
 
     if bytes == 0 {
-        {
+        let disabled_ids: Vec<String> = {
             let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let mut ids: Vec<String> = conn
+                .prepare("SELECT SUBSTR(key, LENGTH('offline_download_') + 1) FROM settings WHERE key LIKE 'offline_download_%' AND value = '1'")
+                .ok()
+                .and_then(|mut stmt| {
+                    stmt.query_map([], |row| row.get::<_, String>(0))
+                        .ok()
+                        .map(|r| r.flatten().collect::<Vec<_>>())
+                })
+                .unwrap_or_default();
+            ids.sort();
+            ids.dedup();
             conn.execute(
                 "DELETE FROM settings WHERE key = 'storage_quota_bytes'",
                 [],
@@ -457,8 +477,15 @@ fn set_storage_quota(
                 [],
             )
             .map_err(|e| e.to_string())?;
-        }
+            ids
+        };
         stop_all_offline_workers(&state);
+        let seq = state.next_seq();
+        events::emit_settings_storage_quota_changed(&app, None, seq);
+        for acct_id in disabled_ids {
+            let seq = state.next_seq();
+            events::emit_settings_offline_download_changed(&app, &acct_id, false, seq);
+        }
         return Ok(());
     }
 
@@ -486,6 +513,9 @@ fn set_storage_quota(
         )
         .map_err(|e| e.to_string())?;
     }
+
+    let seq = state.next_seq();
+    events::emit_settings_storage_quota_changed(&app, Some(bytes), seq);
 
     // A quota increase may revive workers that had previously paused or
     // exited because the old cap was hit. Respawn any enabled-but-inactive
@@ -592,10 +622,12 @@ fn set_account_offline_download(
     }
 
     if enabled {
-        start_offline_worker(app, &state, &account_id);
+        start_offline_worker(app.clone(), &state, &account_id);
     } else {
         stop_offline_worker(&state, &account_id);
     }
+    let seq = state.next_seq();
+    events::emit_settings_offline_download_changed(&app, &account_id, enabled, seq);
     Ok(())
 }
 
@@ -723,8 +755,61 @@ fn resume_offline_workers(
     }
 }
 
+/// Hydrate a single Account row by id (folders + emails + calendar +
+/// contacts). Mirrors the per-row work `get_all_accounts` does.
+fn load_account(conn: &Connection, id: &str) -> Option<Account> {
+    conn.query_row(
+        "SELECT id, name, email, initials, color, avatar_url, alias FROM accounts WHERE id = ?1",
+        rusqlite::params![id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        },
+    )
+    .ok()
+    .map(|(id, name, email, initials, color, avatar_url, alias_raw)| Account {
+        id: id.clone(),
+        name,
+        email,
+        initials,
+        color,
+        avatar_url,
+        alias: alias_raw.filter(|s| !s.is_empty()),
+        folders: query_folders(conn, &id),
+        emails: query_emails(conn, &id),
+        calendar_events: query_events(conn, &id),
+        calendar_categories: query_cal_categories(conn, &id),
+        contacts: query_contacts(conn, &id),
+    })
+}
+
+fn load_dav_users(conn: &Connection) -> Vec<(String, String)> {
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dav_server_users (
+            email      TEXT PRIMARY KEY,
+            password   TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+        );"
+    );
+    let Ok(mut stmt) = conn.prepare("SELECT email, account_id FROM dav_server_users ORDER BY email") else {
+        return Vec::new();
+    };
+    stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 fn update_account(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
     name: String,
@@ -734,17 +819,29 @@ fn update_account(
     avatar_url: Option<String>,
     alias: Option<String>,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE accounts SET name=?2, email=?3, initials=?4, color=?5, avatar_url=?6, alias=?7 WHERE id=?1",
-        rusqlite::params![id, name, email, initials, color, avatar_url, alias.unwrap_or_default()],
-    )
-    .map_err(|e| e.to_string())?;
+    let account = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE accounts SET name=?2, email=?3, initials=?4, color=?5, avatar_url=?6, alias=?7 WHERE id=?1",
+            rusqlite::params![id, name, email, initials, color, avatar_url, alias.unwrap_or_default()],
+        )
+        .map_err(|e| e.to_string())?;
+        load_account(&conn, &id)
+    };
+    if let Some(account) = account {
+        let seq = state.next_seq();
+        events::emit_settings_account_upserted(&app, events::SettingsAccountUpsertedEvent {
+            requested_id: id,
+            account,
+            seq,
+        });
+    }
     Ok(())
 }
 
 #[tauri::command]
 fn add_account(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
     name: String,
@@ -795,20 +892,38 @@ fn add_account(
         .map_err(|e| e.to_string())?;
     }
 
+    let account = load_account(&conn, &id);
+    drop(conn);
+    if let Some(account) = account {
+        let seq = state.next_seq();
+        events::emit_settings_account_upserted(&app, events::SettingsAccountUpsertedEvent {
+            requested_id: id,
+            account,
+            seq,
+        });
+    }
     Ok(())
 }
 
 #[tauri::command]
-fn delete_account(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    conn.execute_batch("PRAGMA foreign_keys = ON;").map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM accounts WHERE id = ?1", rusqlite::params![id])
-        .map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM folders WHERE account_id = ?1", rusqlite::params![id]).ok();
-    conn.execute("DELETE FROM contacts WHERE account_id = ?1", rusqlite::params![id]).ok();
-    conn.execute("DELETE FROM emails WHERE account_id = ?1", rusqlite::params![id]).ok();
-    conn.execute("DELETE FROM calendar_categories WHERE account_id = ?1", rusqlite::params![id]).ok();
-    conn.execute("DELETE FROM calendar_events WHERE account_id = ?1", rusqlite::params![id]).ok();
+fn delete_account(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;").map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM accounts WHERE id = ?1", rusqlite::params![id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM folders WHERE account_id = ?1", rusqlite::params![id]).ok();
+        conn.execute("DELETE FROM contacts WHERE account_id = ?1", rusqlite::params![id]).ok();
+        conn.execute("DELETE FROM emails WHERE account_id = ?1", rusqlite::params![id]).ok();
+        conn.execute("DELETE FROM calendar_categories WHERE account_id = ?1", rusqlite::params![id]).ok();
+        conn.execute("DELETE FROM calendar_events WHERE account_id = ?1", rusqlite::params![id]).ok();
+    }
+    let seq = state.next_seq();
+    events::emit_settings_account_removed(&app, &id, seq);
     Ok(())
 }
 
@@ -816,19 +931,24 @@ fn delete_account(state: tauri::State<'_, AppState>, id: String) -> Result<(), S
 /// account ids in the desired display order; positions are written as 1..N.
 #[tauri::command]
 fn set_account_positions(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     ordered_ids: Vec<String>,
 ) -> Result<(), String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    for (idx, id) in ordered_ids.iter().enumerate() {
-        tx.execute(
-            "UPDATE accounts SET position = ?1 WHERE id = ?2",
-            rusqlite::params![(idx as i64) + 1, id],
-        )
-        .map_err(|e| e.to_string())?;
+    {
+        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for (idx, id) in ordered_ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE accounts SET position = ?1 WHERE id = ?2",
+                rusqlite::params![(idx as i64) + 1, id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
     }
-    tx.commit().map_err(|e| e.to_string())?;
+    let seq = state.next_seq();
+    events::emit_settings_accounts_reordered(&app, ordered_ids, seq);
     Ok(())
 }
 
@@ -1128,12 +1248,22 @@ fn update_email_focused(
 
 #[tauri::command]
 fn save_mail_settings(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     settings: sync_state::MailServerSettings,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    sync_state::save_mail_settings(&conn, &account_id, &settings).map_err(|e| e.to_string())
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        sync_state::save_mail_settings(&conn, &account_id, &settings).map_err(|e| e.to_string())?;
+    }
+    let seq = state.next_seq();
+    events::emit_settings_mail_server_saved(&app, events::SettingsMailServerSavedEvent {
+        account_id,
+        settings,
+        seq,
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -1147,12 +1277,22 @@ fn load_mail_settings(
 
 #[tauri::command]
 fn save_caldav_settings(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     settings: sync_state::DavSettings,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    sync_state::save_caldav_settings(&conn, &account_id, &settings).map_err(|e| e.to_string())
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        sync_state::save_caldav_settings(&conn, &account_id, &settings).map_err(|e| e.to_string())?;
+    }
+    let seq = state.next_seq();
+    events::emit_settings_caldav_saved(&app, events::SettingsDavSavedEvent {
+        account_id,
+        settings,
+        seq,
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -1166,12 +1306,22 @@ fn load_caldav_settings(
 
 #[tauri::command]
 fn save_carddav_settings(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
     settings: sync_state::DavSettings,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    sync_state::save_carddav_settings(&conn, &account_id, &settings).map_err(|e| e.to_string())
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        sync_state::save_carddav_settings(&conn, &account_id, &settings).map_err(|e| e.to_string())?;
+    }
+    let seq = state.next_seq();
+    events::emit_settings_carddav_saved(&app, events::SettingsDavSavedEvent {
+        account_id,
+        settings,
+        seq,
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -5301,6 +5451,7 @@ fn migrate_legacy_database<R: tauri::Runtime>(app: &tauri::App<R>, storage_dir: 
 
 #[tauri::command]
 async fn start_dav_server(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     bind_addr: String,
 ) -> Result<String, String> {
@@ -5323,15 +5474,24 @@ async fn start_dav_server(
         *handle = Some(server_handle);
     }
 
+    let seq = state.next_seq();
+    events::emit_settings_dav_server_changed(&app, Some(actual_addr.clone()), seq);
     Ok(actual_addr)
 }
 
 #[tauri::command]
-fn stop_dav_server(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut handle = state.dav_handle.lock().map_err(|e| e.to_string())?;
-    if let Some(h) = handle.take() {
-        h.stop();
+fn stop_dav_server(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    {
+        let mut handle = state.dav_handle.lock().map_err(|e| e.to_string())?;
+        if let Some(h) = handle.take() {
+            h.stop();
+        }
     }
+    let seq = state.next_seq();
+    events::emit_settings_dav_server_changed(&app, None, seq);
     Ok(())
 }
 
@@ -5343,43 +5503,52 @@ fn get_dav_server_status(state: tauri::State<'_, AppState>) -> Result<Option<Str
 
 #[tauri::command]
 fn add_dav_user(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     email: String,
     password: String,
     account_id: String,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let users = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
 
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS dav_server_users (
-            email      TEXT PRIMARY KEY,
-            password   TEXT NOT NULL,
-            account_id TEXT NOT NULL,
-            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-        );"
-    ).map_err(|e| e.to_string())?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS dav_server_users (
+                email      TEXT PRIMARY KEY,
+                password   TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+            );"
+        ).map_err(|e| e.to_string())?;
 
-    let enc_pw = crypto::encrypt_password(&password).map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT OR REPLACE INTO dav_server_users (email, password, account_id) VALUES (?1, ?2, ?3)",
-        rusqlite::params![email.to_lowercase(), enc_pw, account_id],
-    ).map_err(|e| e.to_string())?;
-
+        let enc_pw = crypto::encrypt_password(&password).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO dav_server_users (email, password, account_id) VALUES (?1, ?2, ?3)",
+            rusqlite::params![email.to_lowercase(), enc_pw, account_id],
+        ).map_err(|e| e.to_string())?;
+        load_dav_users(&conn)
+    };
+    let seq = state.next_seq();
+    events::emit_settings_dav_users_changed(&app, users, seq);
     Ok(())
 }
 
 #[tauri::command]
 fn remove_dav_user(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     email: String,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-
-    conn.execute(
-        "DELETE FROM dav_server_users WHERE email = ?1",
-        rusqlite::params![email.to_lowercase()],
-    ).map_err(|e| e.to_string())?;
-
+    let users = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM dav_server_users WHERE email = ?1",
+            rusqlite::params![email.to_lowercase()],
+        ).map_err(|e| e.to_string())?;
+        load_dav_users(&conn)
+    };
+    let seq = state.next_seq();
+    events::emit_settings_dav_users_changed(&app, users, seq);
     Ok(())
 }
 

@@ -9,7 +9,8 @@
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use crate::{CalendarEvent, FullContact};
+use crate::{Account, CalendarEvent, FullContact};
+use crate::sync_state::{DavSettings, MailServerSettings};
 
 // ── Channel names ───────────────────────────────────────
 // Keep these as constants so the frontend `listen(...)` calls and the
@@ -33,6 +34,18 @@ pub const CONTACTS_FAVORITE_CHANGED: &str = "contacts:favorite-changed";
 pub const CONTACTS_SYNC_COMPLETED: &str = "contacts:sync-completed";
 pub const CONTACTS_LIST_UPSERTED: &str = "contacts:list-upserted";
 pub const CONTACTS_LIST_REMOVED: &str = "contacts:list-removed";
+
+pub const SETTINGS_ACCOUNT_UPSERTED: &str = "settings:account-upserted";
+pub const SETTINGS_ACCOUNT_REMOVED: &str = "settings:account-removed";
+pub const SETTINGS_ACCOUNTS_REORDERED: &str = "settings:accounts-reordered";
+pub const SETTINGS_KV_CHANGED: &str = "settings:kv-changed";
+pub const SETTINGS_STORAGE_QUOTA_CHANGED: &str = "settings:storage-quota-changed";
+pub const SETTINGS_OFFLINE_DOWNLOAD_CHANGED: &str = "settings:offline-download-changed";
+pub const SETTINGS_MAIL_SERVER_SAVED: &str = "settings:mail-server-saved";
+pub const SETTINGS_CALDAV_SAVED: &str = "settings:caldav-saved";
+pub const SETTINGS_CARDDAV_SAVED: &str = "settings:carddav-saved";
+pub const SETTINGS_DAV_SERVER_CHANGED: &str = "settings:dav-server-changed";
+pub const SETTINGS_DAV_USERS_CHANGED: &str = "settings:dav-users-changed";
 
 // ── Payloads ────────────────────────────────────────────
 
@@ -378,5 +391,172 @@ pub fn emit_contact_list_removed(app: &AppHandle, list_id: &str, seq: u64) {
     let payload = ContactListRemovedEvent { list_id: list_id.to_string(), seq };
     if let Err(e) = app.emit(CONTACTS_LIST_REMOVED, payload) {
         log::error!("Failed to emit {}: {}", CONTACTS_LIST_REMOVED, e);
+    }
+}
+
+// ── Settings ────────────────────────────────────────────
+
+/// An account row was created or updated. The full Account is sent so the
+/// frontend can replace its local entry without a separate fetch. `requestedId`
+/// echoes the caller's id so a parent that holds a temp/new id can reconcile.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsAccountUpsertedEvent {
+    pub requested_id: String,
+    pub account: Account,
+    pub seq: u64,
+}
+
+pub fn emit_settings_account_upserted(app: &AppHandle, payload: SettingsAccountUpsertedEvent) {
+    if let Err(e) = app.emit(SETTINGS_ACCOUNT_UPSERTED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_ACCOUNT_UPSERTED, e);
+    }
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsAccountRemovedEvent {
+    pub account_id: String,
+    pub seq: u64,
+}
+
+pub fn emit_settings_account_removed(app: &AppHandle, account_id: &str, seq: u64) {
+    let payload = SettingsAccountRemovedEvent { account_id: account_id.to_string(), seq };
+    if let Err(e) = app.emit(SETTINGS_ACCOUNT_REMOVED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_ACCOUNT_REMOVED, e);
+    }
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsAccountsReorderedEvent {
+    pub ordered_ids: Vec<String>,
+    pub seq: u64,
+}
+
+pub fn emit_settings_accounts_reordered(app: &AppHandle, ordered_ids: Vec<String>, seq: u64) {
+    let payload = SettingsAccountsReorderedEvent { ordered_ids, seq };
+    if let Err(e) = app.emit(SETTINGS_ACCOUNTS_REORDERED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_ACCOUNTS_REORDERED, e);
+    }
+}
+
+/// A simple key/value setting changed (theme, accentColor, locale, …).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsKvChangedEvent {
+    pub key: String,
+    pub value: String,
+    pub seq: u64,
+}
+
+pub fn emit_settings_kv_changed(app: &AppHandle, key: &str, value: &str, seq: u64) {
+    let payload = SettingsKvChangedEvent { key: key.to_string(), value: value.to_string(), seq };
+    if let Err(e) = app.emit(SETTINGS_KV_CHANGED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_KV_CHANGED, e);
+    }
+}
+
+/// Storage quota was set (`quotaBytes != null`) or cleared (`quotaBytes == null`).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsStorageQuotaChangedEvent {
+    pub quota_bytes: Option<u64>,
+    pub seq: u64,
+}
+
+pub fn emit_settings_storage_quota_changed(app: &AppHandle, quota_bytes: Option<u64>, seq: u64) {
+    let payload = SettingsStorageQuotaChangedEvent { quota_bytes, seq };
+    if let Err(e) = app.emit(SETTINGS_STORAGE_QUOTA_CHANGED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_STORAGE_QUOTA_CHANGED, e);
+    }
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsOfflineDownloadChangedEvent {
+    pub account_id: String,
+    pub enabled: bool,
+    pub seq: u64,
+}
+
+pub fn emit_settings_offline_download_changed(
+    app: &AppHandle,
+    account_id: &str,
+    enabled: bool,
+    seq: u64,
+) {
+    let payload = SettingsOfflineDownloadChangedEvent {
+        account_id: account_id.to_string(),
+        enabled,
+        seq,
+    };
+    if let Err(e) = app.emit(SETTINGS_OFFLINE_DOWNLOAD_CHANGED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_OFFLINE_DOWNLOAD_CHANGED, e);
+    }
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsMailServerSavedEvent {
+    pub account_id: String,
+    pub settings: MailServerSettings,
+    pub seq: u64,
+}
+
+pub fn emit_settings_mail_server_saved(app: &AppHandle, payload: SettingsMailServerSavedEvent) {
+    if let Err(e) = app.emit(SETTINGS_MAIL_SERVER_SAVED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_MAIL_SERVER_SAVED, e);
+    }
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsDavSavedEvent {
+    pub account_id: String,
+    pub settings: DavSettings,
+    pub seq: u64,
+}
+
+pub fn emit_settings_caldav_saved(app: &AppHandle, payload: SettingsDavSavedEvent) {
+    if let Err(e) = app.emit(SETTINGS_CALDAV_SAVED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_CALDAV_SAVED, e);
+    }
+}
+
+pub fn emit_settings_carddav_saved(app: &AppHandle, payload: SettingsDavSavedEvent) {
+    if let Err(e) = app.emit(SETTINGS_CARDDAV_SAVED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_CARDDAV_SAVED, e);
+    }
+}
+
+/// Local DAV server started (`addr` is the bound address) or stopped (`addr` is null).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsDavServerChangedEvent {
+    pub addr: Option<String>,
+    pub seq: u64,
+}
+
+pub fn emit_settings_dav_server_changed(app: &AppHandle, addr: Option<String>, seq: u64) {
+    let payload = SettingsDavServerChangedEvent { addr, seq };
+    if let Err(e) = app.emit(SETTINGS_DAV_SERVER_CHANGED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_DAV_SERVER_CHANGED, e);
+    }
+}
+
+/// DAV-server user list changed (add/remove). Carries the full current
+/// `[email, accountId]` pairs so the frontend can replace its list wholesale.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsDavUsersChangedEvent {
+    pub users: Vec<(String, String)>,
+    pub seq: u64,
+}
+
+pub fn emit_settings_dav_users_changed(app: &AppHandle, users: Vec<(String, String)>, seq: u64) {
+    let payload = SettingsDavUsersChangedEvent { users, seq };
+    if let Err(e) = app.emit(SETTINGS_DAV_USERS_CHANGED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_DAV_USERS_CHANGED, e);
     }
 }
