@@ -119,7 +119,7 @@
   import { onMount, onDestroy, untrack } from 'svelte';
   import { requestNotificationPermission, rebuildAlertQueue, clearAlertQueue } from '$lib/eventAlerts';
   import { networkActivity } from '$lib/networkActivity.svelte';
-  import type { Email, NavItem, CalendarViewMode, ComposeMode, Theme, Account, CalendarEvent, FullContact, ComposeDraft, ContactList } from '$lib/types';
+  import type { Email, Contact, NavItem, CalendarViewMode, ComposeMode, Theme, Account, CalendarEvent, FullContact, ComposeDraft, ContactList } from '$lib/types';
   import { parseSearchQuery, emailMatchesQuery, buildSearchText } from '$lib/searchQuery';
   import { setLocale, detectLocale, locale, LANGUAGE_NAMES, t } from '$lib/i18n/index.svelte';
 
@@ -307,17 +307,23 @@
     switch (entry.action) {
       case 'markRead':
       case 'markUnread':
+        patchEmail(entry.emailId, { isRead: entry.prevIsRead });
         fireMarkRead(activeAccountId, entry.emailId, entry.prevIsRead);
         break;
       case 'delete':
+        // Re-home the row locally now (soft delete left it in 'deleted');
+        // applyFolderEcho reconciles, restoring prevFolder on IMAP failure.
+        patchEmail(entry.email.id, { folder: entry.prevFolder });
         fireMoveEmail(activeAccountId, entry.email.id, entry.prevFolder);
         break;
       case 'move':
       case 'archive':
       case 'junk':
+        patchEmail(entry.emailId, { folder: entry.prevFolder });
         fireMoveEmail(activeAccountId, entry.emailId, entry.prevFolder);
         break;
       case 'toggleStar':
+        patchEmail(entry.emailId, { isStarred: entry.prevIsStarred });
         fireToggleStar(activeAccountId, entry.emailId, entry.prevIsStarred);
         break;
       case 'togglePin':
@@ -871,7 +877,12 @@
         syncTimerId = setInterval(() => handlePerAccountSync(), 60_000);
         // Listen for backend push after a message is sent (sync Sent folder + \Answered flag)
         listen<string>('mail:sent', (event) => {
-          handleSyncAccount(event.payload);
+          const acctId = event.payload;
+          handleSyncAccount(acctId);
+          // Send succeeded: the post-send sync replaces `emails` with DB truth
+          // (the APPENDed Sent copy), so drop the optimistic placeholders we
+          // were tracking for this account — no rollback needed.
+          pendingSendIds = pendingSendIds.filter((p) => p.accountId !== acctId);
         }).then((unlisten) => { unlistenMailSent = unlisten; });
         // Phase 1: backend pushes echoes via the mail event channels. The store
         // filters stale echoes; we apply the new values to the relevant emails array.
@@ -1371,6 +1382,7 @@
     }
 
     if (!email.isRead) {
+      patchEmail(email.id, { isRead: true });
       fireMarkRead(activeAccountId, email.id, true);
     }
 
@@ -1448,6 +1460,15 @@
   function applySendFailedEcho(ev: MailSendFailedEvent) {
     console.error(`Send failed for ${ev.accountId}:`, ev.error);
     syncErrors = [...syncErrors, `${ev.accountId}: ${ev.error}`];
+    // Roll back the oldest optimistic Sent placeholder for this account
+    // (FIFO — send-failed doesn't carry the message id, and SMTP sends settle
+    // in order). The outbox row stays 'pending' for flush_outbox to retry.
+    const idx = pendingSendIds.findIndex((p) => p.accountId === ev.accountId);
+    if (idx >= 0) {
+      const { id } = pendingSendIds[idx];
+      pendingSendIds = pendingSendIds.filter((_, i) => i !== idx);
+      emails = emails.filter((e) => e.id !== id);
+    }
   }
 
   // ── Calendar echo handlers ──────────────────────────────
@@ -1701,7 +1722,7 @@
     const entries: MailSingleUndo[] = targets.map((e) => ({
       view: 'mail', action: 'markRead', emailId: e.id, prevIsRead: e.isRead,
     }));
-    targets.forEach((e) => fireMarkRead(activeAccountId, e.id, true));
+    targets.forEach((e) => { patchEmail(e.id, { isRead: true }); fireMarkRead(activeAccountId, e.id, true); });
     if (entries.length === 1) {
       pushUndo(entries[0], 'Marked as read — Ctrl+Z to undo');
     } else {
@@ -1717,7 +1738,7 @@
     const entries: MailSingleUndo[] = targets.map((e) => ({
       view: 'mail', action: 'markUnread', emailId: e.id, prevIsRead: e.isRead,
     }));
-    targets.forEach((e) => fireMarkRead(activeAccountId, e.id, false));
+    targets.forEach((e) => { patchEmail(e.id, { isRead: false }); fireMarkRead(activeAccountId, e.id, false); });
     if (entries.length === 1) {
       pushUndo(entries[0], 'Marked as unread — Ctrl+Z to undo');
     } else {
@@ -1746,7 +1767,7 @@
     if (selectedEmailId && allIds.has(selectedEmailId)) {
       selectedEmailId = '';
     }
-    targets.forEach((e) => fireDeleteEmail(activeAccountId, e.id));
+    targets.forEach((e) => { applyOptimisticDelete(e); fireDeleteEmail(activeAccountId, e.id); });
     if (undoable.length > 0) {
       const entries: MailSingleUndo[] = undoable.map((e) => ({
         view: 'mail', action: 'delete', email: { ...e }, prevFolder: e.folder,
@@ -1754,6 +1775,19 @@
       pushUndo({ view: 'mail', action: 'batch', entries }, `Deleted ${targets.length} — Ctrl+Z to undo`);
     }
     clearBatchSelection();
+  }
+
+  /** Optimistically mirror the backend's up-front local change so the list
+   * updates on click instead of waiting for the IMAP round-trip echo. Soft
+   * delete moves the row to 'deleted'; permanent delete (already there) drops
+   * it. applyFolderEcho / applyRemovedEcho reconcile when the echo arrives —
+   * including the backend's folder rollback if the IMAP move fails. */
+  function applyOptimisticDelete(email: Email) {
+    if (email.folder === 'deleted') {
+      emails = emails.filter((e) => e.id !== email.id);
+    } else {
+      emails = emails.map((e) => (e.id === email.id ? { ...e, folder: 'deleted' } : e));
+    }
   }
 
   function handleDeleteEmail(email: Email) {
@@ -1765,6 +1799,7 @@
       pushUndo({ view: 'mail', action: 'delete', email: { ...email }, prevFolder: email.folder }, 'Deleted — Ctrl+Z to undo');
     }
     if (selectedEmailId === email.id) selectedEmailId = '';
+    applyOptimisticDelete(email);
     fireDeleteEmail(activeAccountId, email.id);
   }
 
@@ -1777,7 +1812,7 @@
     }));
     const ids = new Set(targets.map((e) => e.id));
     if (selectedEmailId && ids.has(selectedEmailId)) selectedEmailId = '';
-    targets.forEach((e) => fireMoveEmail(activeAccountId, e.id, targetFolder));
+    targets.forEach((e) => { patchEmail(e.id, { folder: targetFolder }); fireMoveEmail(activeAccountId, e.id, targetFolder); });
     if (entries.length === 1) {
       pushUndo(entries[0], 'Moved — Ctrl+Z to undo');
     } else {
@@ -1795,7 +1830,7 @@
     }));
     const ids = new Set(targets.map((e) => e.id));
     if (selectedEmailId && ids.has(selectedEmailId)) selectedEmailId = '';
-    targets.forEach((e) => fireMoveEmail(activeAccountId, e.id, 'archive'));
+    targets.forEach((e) => { patchEmail(e.id, { folder: 'archive' }); fireMoveEmail(activeAccountId, e.id, 'archive'); });
     if (entries.length === 1) {
       pushUndo(entries[0], 'Archived — Ctrl+Z to undo');
     } else {
@@ -1820,7 +1855,7 @@
     }));
     const ids = new Set(toMove.map((e) => e.id));
     if (selectedEmailId && ids.has(selectedEmailId)) selectedEmailId = '';
-    toMove.forEach((e) => fireMoveEmail(activeAccountId, e.id, target));
+    toMove.forEach((e) => { patchEmail(e.id, { folder: target }); fireMoveEmail(activeAccountId, e.id, target); });
     // Update sender blocklist per-email
     toMove.forEach((e) => {
       if (target === 'junk') {
@@ -1886,12 +1921,19 @@
     }
   }
 
+  /** Optimistically apply a flag locally so the UI flips on click instead of
+   * waiting for the IMAP round-trip echo. The backend commits the value up
+   * front and emits mail:email-flag-changed — carrying the rolled-back value
+   * on IMAP failure — which applyFlagEcho reconciles (idempotent set). */
+  function patchEmail(emailId: string, patch: Partial<Email>) {
+    emails = emails.map((e) => (e.id === emailId ? { ...e, ...patch } : e));
+  }
+
   function handleToggleStar(email: Email) {
     pushUndo({ view: 'mail', action: 'toggleStar', emailId: email.id, prevIsStarred: email.isStarred }, `${email.isStarred ? 'Unstarred' : 'Starred'} — Ctrl+Z to undo`);
-    // Network-bearing action: don't optimistically update — the backend
-    // emits mail:email-flag-changed when the IMAP \Flagged round trip
-    // finishes (or carries the rolled-back value on failure).
-    fireToggleStar(activeAccountId, email.id, !email.isStarred);
+    const newVal = !email.isStarred;
+    patchEmail(email.id, { isStarred: newVal });
+    fireToggleStar(activeAccountId, email.id, newVal);
   }
 
   function handleTogglePin(email: Email) {
@@ -2049,6 +2091,12 @@
     }
   }
 
+  // Optimistic-send bookkeeping: temp ids of Sent-folder placeholders inserted
+  // on click, FIFO per account. A successful send clears its entry via the
+  // mail:sent listener (the post-send sync replaces `emails` wholesale); a
+  // failed send rolls its placeholder back in applySendFailedEcho.
+  let pendingSendIds: { id: string; accountId: string }[] = [];
+
   function triggerComposeSend() {
     if (composeDraft) {
       handleComposeSend(composeDraft);
@@ -2120,6 +2168,7 @@
     // Mark the original email as replied (\Answered) when replying. Network-
     // bearing — the echo updates isReplied when the IMAP write completes.
     if ((mode === 'reply' || mode === 'replyAll') && replyTo) {
+      patchEmail(replyTo.id, { isReplied: true });
       fireToggleReplied(accountId, replyTo.id, true);
     }
 
@@ -2129,6 +2178,57 @@
     if (draftId) {
       emails = emails.filter((e) => e.id !== draftId);
     }
+
+    // Optimistic Sent entry: show the message in the Sent folder immediately
+    // instead of waiting for the post-send IMAP sync. The mail:sent listener
+    // triggers handleSyncAccount, which replaces `emails` wholesale with DB
+    // truth (the real APPENDed copy), reconciling this placeholder away. On
+    // mail:send-failed, applySendFailedEcho removes it (FIFO).
+    const acct = accounts.find((a) => a.id === accountId);
+    if (acct) {
+      const toDisplay = parseContacts(draft.to);
+      const ccDisplay = parseContacts(draft.cc);
+      const pendingId = `pending-send-${crypto.randomUUID()}`;
+      const optimisticSent: Email = {
+        id: pendingId,
+        from: { name: acct.alias || acct.name, email: acct.email, initials: acct.initials, color: acct.color },
+        to: toDisplay,
+        cc: ccDisplay.length > 0 ? ccDisplay : undefined,
+        subject: outbound.subject || '(No subject)',
+        preview: stripHtmlPreview(outbound.bodyHtml),
+        body: outbound.bodyHtml,
+        searchText: buildSearchText(outbound.bodyHtml),
+        date: new Date(),
+        isRead: true,
+        isStarred: false,
+        isPinned: false,
+        hasAttachment: outbound.attachments.length > 0,
+        folder: 'sent',
+        isSending: true,
+      };
+      emails = [optimisticSent, ...emails];
+      pendingSendIds = [...pendingSendIds, { id: pendingId, accountId }];
+    }
+  }
+
+  /** Parse a "Name <email>; …" recipient string into display Contacts for an
+   * optimistic Sent placeholder. Names are preserved; commas inside
+   * "Last, First <email>" are not treated as separators. */
+  function parseContacts(str: string): Contact[] {
+    if (!str.trim()) return [];
+    const semiParts = str.split(';');
+    const parts: string[] = [];
+    for (const seg of semiParts) {
+      if (seg.includes('<') && seg.includes('>')) parts.push(seg);
+      else parts.push(...seg.split(','));
+    }
+    return parts.map((s) => s.trim()).filter(Boolean).map((s) => {
+      const m = s.match(/^(.*?)\s*<(.+)>$/);
+      const name = m ? m[1].trim() : s;
+      const email = m ? m[2] : s;
+      const initials = name.split(' ').map((w) => w[0]?.toUpperCase() || '').join('').slice(0, 2) || '??';
+      return { name, email, initials, color: '#666' };
+    });
   }
 
   function handleComposeDiscard() {
