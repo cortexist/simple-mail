@@ -175,6 +175,37 @@ export interface CardDavSettings {
   password: string;
 }
 
+/** Global LLM config as returned by get_ai_config — never includes the key. */
+export interface AiConfigView {
+  enabled: boolean;
+  baseUrl: string;
+  hasKey: boolean;
+  classifyModel: string;
+  draftModel: string;
+  maxTokens: number;
+  temperature: number;
+}
+
+/** Global LLM config sent to set_ai_config / test_ai_config. An empty apiKey
+ * preserves the stored key (the UI never receives the real key). */
+export interface AiConfigInput {
+  enabled: boolean;
+  baseUrl: string;
+  apiKey: string;
+  classifyModel: string;
+  draftModel: string;
+  maxTokens: number;
+  temperature: number;
+}
+
+/** Per-account AI feature toggles (all default off). */
+export interface AccountAiFeatures {
+  junkFilter: boolean;
+  priorityDetect: boolean;
+  autoDraft: boolean;
+  externalAccess: boolean;
+}
+
 export interface Account {
   id: string;
   name: string;

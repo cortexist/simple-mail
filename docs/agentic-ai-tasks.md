@@ -125,3 +125,25 @@ P0 Foundations ──▶ P1 Service refactor ──┬──▶ P2 Classificatio
 
 ### When implementation starts
 Ask me to load a phase into the live task list (TaskCreate) and I'll track it task-by-task. I'd open with the **first slice** (P0.1 → P0.2 → P0.3) to get a working model ping before anything depends on it.
+
+---
+
+## Appendix — Local test endpoint, model reality & prompt-cache strategy
+
+**Test endpoint (verified 2026-06-24):** OpenAI-compatible at `http://127.0.0.1:8080/v1`, served by `llama.cpp` (`llama-server`) from the sibling `../llama.cpp`. Launch:
+
+```
+../llama.cpp/build/bin/llama-server.exe \
+  -m ../llama.cpp/.scratch/gemma-4-e4b/gemma-4-E4B-it-Q4_K_M.gguf \
+  -fa on -np 1 -c 4096 --slot-save-path <dir> --alias gemma-4-e4b --host 127.0.0.1 --port 8080
+```
+Note: this build requires `-fa on` (not bare `-fa`).
+
+**Model reality:** the file named `gemma-4-E4B-it-Q4_K_M.gguf` actually contains **"Supergemma4 E4B Abliterated", 7.52B params, 4.95 GiB** (an abliterated fine-tune, not stock Gemma E4B). It runs the full ~7.5B every token on an **integrated AMD Radeon (Vulkan)** backend. Measured: **~80 tok/s prefill, ~10 tok/s generation.** `-fa on` vs `off` made no measurable difference (within noise) — keep it on. Functionally it returns clean classifier JSON with no thinking trace. For faster iteration, consider a genuinely smaller/stock model or the sibling `gemma-e4b-assistant-mtp-Q4_K_M.gguf` (multi-token-prediction variant — may speed generation).
+
+**Prompt-cache strategy (validated):** llama-server's prefix cache (`prompt cache is enabled` by default) reuses the KV of an identical leading prefix — measured `cached_tokens` covering the full system prefix, skipping its prefill. Design rules:
+- **`llm_client` (P0.3):** order messages so the **fixed** system instructions + schema + few-shot are a **byte-identical leading prefix**; put per-email/variable content strictly at the tail. Never interpolate per-call data into the system block (it breaks the prefix match).
+- **Classification (P2):** prefill-bound + short output → **biggest beneficiary**; a large stable prefix is nearly free after the first call.
+- **Drafting (P3):** generation-bound (~10 tok/s here) → prompt caching barely helps; expect tens of seconds per draft on this hardware.
+- **Warm cold-starts (optional):** `--slot-save-path` is enabled; prime a slot with the system prefix once, `POST /slots/0?action=save`, and `action=restore` on startup to avoid the first-call prefill and survive restarts.
+- **Reliability caveat:** at `temperature 0`, `-fa on` vs `off` flipped a borderline verdict — small-model classification is unstable on ambiguous mail. Reinforces P2's validate/retry (and consider low-but-nonzero ensembling only if needed).

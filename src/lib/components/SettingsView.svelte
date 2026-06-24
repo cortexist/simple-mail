@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getVersion } from '@tauri-apps/api/app';
-  import type { Account, MailServerSettings, CalDavSettings, CardDavSettings, Theme } from '$lib/types';
+  import type { Account, MailServerSettings, CalDavSettings, CardDavSettings, Theme, AiConfigInput, AccountAiFeatures } from '$lib/types';
   import { discoverMailSettings } from '$lib/data/dataService';
   import type { StorageInfo } from '$lib/data/dataService';
   import {
@@ -11,6 +11,11 @@
     fireRemoveDavUser,
     fireSetStorageQuota,
     fireSetAccountOfflineDownload,
+    getAiConfig,
+    fireSetAiConfig,
+    fireTestAiConfig,
+    getAccountAiFeatures,
+    fireSetAccountAiFeatures,
   } from '$lib/stores/settingsStore.svelte';
   import { t } from '$lib/i18n/index.svelte';
   import { isLikelyEmail } from '$lib/utils';
@@ -76,7 +81,7 @@
     onReorderAccounts?.(reordered.map(a => a.id));
   }
 
-  let selectedTab = $state<'general' | 'accounts' | 'sync-server'>('general');
+  let selectedTab = $state<'general' | 'accounts' | 'sync-server' | 'ai'>('general');
   let didInitTab = false;
 
   // ── Account selection & form ──
@@ -724,7 +729,7 @@
   let settingsPanelEl = $state<HTMLDivElement | null>(null);
 
   type NavItem =
-    | { kind: 'tab'; tab: 'general' | 'sync-server' }
+    | { kind: 'tab'; tab: 'general' | 'sync-server' | 'ai' }
     | { kind: 'account'; accountId: string }
     | { kind: 'add-account' };
 
@@ -734,12 +739,14 @@
     for (const a of accounts) items.push({ kind: 'account', accountId: a.id });
     items.push({ kind: 'add-account' });
     if (!requireAccount) items.push({ kind: 'tab', tab: 'sync-server' });
+    if (!requireAccount) items.push({ kind: 'tab', tab: 'ai' });
     return items;
   });
 
   function navIndexOfCurrent(): number {
     if (selectedTab === 'general') return navOrder.findIndex(i => i.kind === 'tab' && i.tab === 'general');
     if (selectedTab === 'sync-server') return navOrder.findIndex(i => i.kind === 'tab' && i.tab === 'sync-server');
+    if (selectedTab === 'ai') return navOrder.findIndex(i => i.kind === 'tab' && i.tab === 'ai');
     if (showAddForm) return navOrder.findIndex(i => i.kind === 'add-account');
     if (selectedAccountId) return navOrder.findIndex(i => i.kind === 'account' && i.accountId === selectedAccountId);
     return -1;
@@ -767,7 +774,12 @@
     const keyS = e.key === 's' || e.key === 'S';
     const keyD = e.key === 'd' || e.key === 'D';
 
-    if (modCtrl && keyS && selectedTab !== 'general') {
+    if (modCtrl && keyS && selectedTab === 'ai') {
+      e.preventDefault();
+      saveAiConfig();
+      return;
+    }
+    if (modCtrl && keyS && selectedTab !== 'general' && selectedTab !== 'ai') {
       e.preventDefault();
       saveFromHeader();
       return;
@@ -896,12 +908,117 @@
     }
   }
 
+  // ── AI settings (global config + per-account feature toggles) ──
+  const AI_FEATURE_ROWS: { key: keyof AccountAiFeatures; labelKey: string }[] = [
+    { key: 'junkFilter', labelKey: 'settings.aiJunkFilter' },
+    { key: 'priorityDetect', labelKey: 'settings.aiPriorityDetect' },
+    { key: 'autoDraft', labelKey: 'settings.aiAutoDraft' },
+    { key: 'externalAccess', labelKey: 'settings.aiExternalAccess' },
+  ];
+
+  let aiForm = $state({
+    enabled: false,
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: '',
+    classifyModel: 'gpt-4o-mini',
+    draftModel: 'gpt-4o-mini',
+    maxTokens: 1024,
+    temperature: 0.2,
+  });
+  let aiHasKey = $state(false);
+  let aiKeyDirty = $state(false);
+  let showAiKey = $state(false);
+  let aiSaving = $state(false);
+  let aiSaveError = $state<string | null>(null);
+  let aiTesting = $state(false);
+  let aiTestResult = $state<string | null>(null);
+  let aiTestError = $state<string | null>(null);
+  let aiFeaturesByAccount = $state<Record<string, AccountAiFeatures>>({});
+  let aiFeatureBusy = $state<string | null>(null);
+
+  async function loadAiSettings() {
+    const cfg = await getAiConfig();
+    if (cfg) {
+      aiForm.enabled = cfg.enabled;
+      aiForm.baseUrl = cfg.baseUrl;
+      aiForm.classifyModel = cfg.classifyModel;
+      aiForm.draftModel = cfg.draftModel;
+      aiForm.maxTokens = cfg.maxTokens;
+      aiForm.temperature = cfg.temperature;
+      aiHasKey = cfg.hasKey;
+      aiForm.apiKey = '';
+      aiKeyDirty = false;
+    }
+    const map: Record<string, AccountAiFeatures> = {};
+    for (const a of accounts) {
+      const f = await getAccountAiFeatures(a.id);
+      if (f) map[a.id] = f;
+    }
+    aiFeaturesByAccount = map;
+  }
+
+  function aiConfigInput(): AiConfigInput {
+    return {
+      enabled: aiForm.enabled,
+      baseUrl: aiForm.baseUrl.trim(),
+      // Empty apiKey preserves the stored key unless the user typed a new one.
+      apiKey: aiKeyDirty ? aiForm.apiKey : '',
+      classifyModel: aiForm.classifyModel.trim(),
+      draftModel: aiForm.draftModel.trim(),
+      maxTokens: aiForm.maxTokens,
+      temperature: aiForm.temperature,
+    };
+  }
+
+  async function saveAiConfig() {
+    aiSaving = true; aiSaveError = null;
+    try {
+      await fireSetAiConfig(aiConfigInput());
+      if (aiKeyDirty && aiForm.apiKey) aiHasKey = true;
+      aiForm.apiKey = ''; aiKeyDirty = false;
+      flashSaveSuccess();
+    } catch (e) {
+      aiSaveError = String(e);
+    } finally {
+      aiSaving = false;
+    }
+  }
+
+  async function testAiConfig() {
+    aiTesting = true; aiTestResult = null; aiTestError = null;
+    try {
+      aiTestResult = (await fireTestAiConfig(aiConfigInput())) || '(empty reply)';
+    } catch (e) {
+      aiTestError = String(e);
+    } finally {
+      aiTesting = false;
+    }
+  }
+
+  async function toggleAiFeature(accountId: string, key: keyof AccountAiFeatures) {
+    const cur: AccountAiFeatures = aiFeaturesByAccount[accountId]
+      ?? { junkFilter: false, priorityDetect: false, autoDraft: false, externalAccess: false };
+    const next: AccountAiFeatures = { ...cur, [key]: !cur[key] };
+    aiFeaturesByAccount = { ...aiFeaturesByAccount, [accountId]: next };
+    aiFeatureBusy = accountId;
+    try {
+      await fireSetAccountAiFeatures(accountId, next);
+    } catch (e) {
+      // Roll back on failure.
+      aiFeaturesByAccount = { ...aiFeaturesByAccount, [accountId]: cur };
+      console.error('set_account_ai_features failed:', e);
+    } finally {
+      aiFeatureBusy = null;
+    }
+  }
+
   let appVersion = $state('');
 
   onMount(() => {
     getVersion().then(v => { appVersion = v; }).catch(err => {
       console.error('Failed to read app version:', err);
     });
+    loadAiSettings().catch((err) => console.error('Failed to load AI settings:', err));
     // Focus first nav item (General, or Accounts in requireAccount mode)
     setTimeout(() => {
       settingsPanelEl?.querySelector<HTMLButtonElement>('.settings-nav-item')?.focus();
@@ -1035,6 +1152,19 @@
           {t('settings.localSync')}
         </button>
       {/if}
+      {#if !requireAccount}
+        <button
+          class="settings-nav-item"
+          class:selected={selectedTab === 'ai'}
+          tabindex="-1"
+          onclick={() => { selectedTab = 'ai'; }}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24">
+            <path fill="currentColor" d="M12 2a1 1 0 0 1 .94.66l1.2 3.25 3.25 1.2a1 1 0 0 1 0 1.88l-3.25 1.2-1.2 3.25a1 1 0 0 1-1.88 0l-1.2-3.25-3.25-1.2a1 1 0 0 1 0-1.88l3.25-1.2 1.2-3.25A1 1 0 0 1 12 2m6.5 11a.75.75 0 0 1 .7.49l.62 1.69 1.69.62a.75.75 0 0 1 0 1.4l-1.69.62-.62 1.69a.75.75 0 0 1-1.4 0l-.62-1.69-1.69-.62a.75.75 0 0 1 0-1.4l1.69-.62.62-1.69a.75.75 0 0 1 .7-.49"/>
+          </svg>
+          {t('settings.ai')}
+        </button>
+      {/if}
     </nav>
 
     <!-- Right content -->
@@ -1045,6 +1175,8 @@
             {t('settings.general')}
           {:else if selectedTab === 'sync-server'}
             {t('settings.localSyncServer')}
+          {:else if selectedTab === 'ai'}
+            {t('settings.ai')}
           {:else if showAddForm}
             {t('settings.addAccount')}
           {:else if selectedAccount}
@@ -1414,6 +1546,97 @@
                   <button class="btn btn-primary btn-sm" onclick={handleAddDavUser} disabled={!davNewEmail || !davNewPassword || !davNewAccountId}>{t('common.add')}</button>
                 </div>
               </div>
+            </div>
+          </section>
+
+        {:else if selectedTab === 'ai'}
+          <!-- ── AI / Agent ── -->
+          <section class="settings-section">
+            <h4 class="section-title">{t('settings.aiModelApi')}</h4>
+            <p class="dav-description">{t('settings.aiModelApiDesc')}</p>
+            <div class="detail-form">
+              <div class="form-row toggle-row">
+                <button type="button" class="toggle-switch" class:on={aiForm.enabled} aria-pressed={aiForm.enabled} aria-label={t('settings.aiEnable')} onclick={() => aiForm.enabled = !aiForm.enabled}>
+                  <span class="toggle-knob"></span>
+                </button>
+                <span class="form-label toggle-label">{t('settings.aiEnable')}</span>
+              </div>
+              <label class="form-row">
+                <span class="form-label">{t('settings.aiBaseUrl')}</span>
+                <input autocomplete="off" class="form-input" type="text" bind:value={aiForm.baseUrl} placeholder="http://127.0.0.1:8080/v1" />
+              </label>
+              <label class="form-row">
+                <span class="form-label">{t('settings.aiApiKey')} {#if aiHasKey && !aiKeyDirty}<span class="dav-user-account">{t('settings.aiKeyStored')}</span>{/if}</span>
+                <div class="password-wrapper">
+                  {#if showAiKey}
+                    <input autocomplete="off" class="form-input password-input" type="text" bind:value={aiForm.apiKey} oninput={() => aiKeyDirty = true} placeholder={aiHasKey ? '••••••••' : t('settings.aiKeyPlaceholder')} />
+                  {:else}
+                    <input autocomplete="off" class="form-input password-input" type="password" bind:value={aiForm.apiKey} oninput={() => aiKeyDirty = true} placeholder={aiHasKey ? '••••••••' : t('settings.aiKeyPlaceholder')} />
+                  {/if}
+                  <button class="password-toggle" type="button" onclick={() => showAiKey = !showAiKey} aria-label={showAiKey ? t('settings.hidePassword') : t('settings.showPassword')}>
+                    {#if showAiKey}
+                      <svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentColor" d="m9.343 18.782l-1.932-.518l.787-2.939a11 11 0 0 1-3.237-1.872l-2.153 2.154l-1.414-1.414l2.153-2.154a10.96 10.96 0 0 1-2.371-5.07l1.968-.359a9.002 9.002 0 0 0 17.713 0l1.968.358a10.96 10.96 0 0 1-2.372 5.071l2.154 2.154l-1.414 1.414l-2.154-2.154a11 11 0 0 1-3.237 1.872l.788 2.94l-1.932.517l-.788-2.94a11 11 0 0 1-3.74 0z"/></svg>
+                    {:else}
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+                    {/if}
+                  </button>
+                </div>
+              </label>
+              <div class="form-row-inline">
+                <label class="form-row" style="flex:1">
+                  <span class="form-label">{t('settings.aiClassifyModel')}</span>
+                  <input autocomplete="off" class="form-input" type="text" bind:value={aiForm.classifyModel} placeholder="gpt-4o-mini" />
+                </label>
+                <label class="form-row" style="flex:1">
+                  <span class="form-label">{t('settings.aiDraftModel')}</span>
+                  <input autocomplete="off" class="form-input" type="text" bind:value={aiForm.draftModel} placeholder="gpt-4o-mini" />
+                </label>
+              </div>
+              <div class="form-row-inline">
+                <label class="form-row" style="flex:1">
+                  <span class="form-label">{t('settings.aiMaxTokens')}</span>
+                  <input autocomplete="off" class="form-input port-input" type="number" bind:value={aiForm.maxTokens} />
+                </label>
+                <label class="form-row" style="flex:1">
+                  <span class="form-label">{t('settings.aiTemperature')}</span>
+                  <input autocomplete="off" class="form-input port-input" type="number" step="0.1" min="0" max="2" bind:value={aiForm.temperature} />
+                </label>
+              </div>
+              <p class="dav-description" style="margin-top:8px"><strong>{t('settings.aiPrivacyLabel')}</strong> {t('settings.aiPrivacyBody')}</p>
+              {#if aiSaveError}<div class="autodiscover-note error">{aiSaveError}</div>{/if}
+              {#if aiTestError}<div class="autodiscover-note error">{t('settings.aiTestFailed')} {aiTestError}</div>{/if}
+              {#if aiTestResult}<div class="autodiscover-note">{t('settings.aiTestReply')} {aiTestResult}</div>{/if}
+              <div class="form-actions">
+                <button class="btn btn-secondary btn-sm" onclick={testAiConfig} disabled={aiTesting || !aiForm.baseUrl}>{aiTesting ? t('settings.aiTesting') : t('settings.aiTest')}</button>
+                <button class="btn btn-primary btn-sm" onclick={saveAiConfig} disabled={aiSaving}>{aiSaving ? t('settings.aiSaving') : t('settings.aiSave')}</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h4 class="section-title">{t('settings.aiPerAccount')}</h4>
+            <p class="dav-description">{t('settings.aiPerAccountDesc')}</p>
+            <div class="detail-form">
+              {#if accounts.length === 0}
+                <p class="dav-no-users">{t('settings.aiNoAccounts')}</p>
+              {/if}
+              {#each accounts as account (account.id)}
+                {@const f = aiFeaturesByAccount[account.id] ?? { junkFilter: false, priorityDetect: false, autoDraft: false, externalAccess: false }}
+                <div style="margin-top:14px">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                    <span class="account-avatar-sm" style="background: {account.color}">{account.initials}</span>
+                    <span class="settings-nav-account-name">{account.name}</span>
+                  </div>
+                  {#each AI_FEATURE_ROWS as row}
+                    <div class="form-row toggle-row">
+                      <button type="button" class="toggle-switch" class:on={f[row.key]} disabled={aiFeatureBusy === account.id} aria-pressed={f[row.key]} aria-label={t(row.labelKey)} onclick={() => toggleAiFeature(account.id, row.key)}>
+                        <span class="toggle-knob"></span>
+                      </button>
+                      <span class="form-label toggle-label">{t(row.labelKey)}</span>
+                    </div>
+                  {/each}
+                </div>
+              {/each}
             </div>
           </section>
 

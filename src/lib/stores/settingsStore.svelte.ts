@@ -13,7 +13,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { incNetwork, decNetwork } from '$lib/networkActivity.svelte';
-import type { Account } from '$lib/types';
+import type { Account, AiConfigView, AiConfigInput, AccountAiFeatures } from '$lib/types';
 import type { MailServerSettings, DavSettings } from '$lib/data/dataService';
 
 // ── Event payloads ──────────────────────────────────────
@@ -70,6 +70,26 @@ export interface SettingsDavServerChangedEvent {
 
 export interface SettingsDavUsersChangedEvent {
   users: [string, string][];
+  seq: number;
+}
+
+export interface SettingsAiConfigChangedEvent {
+  enabled: boolean;
+  baseUrl: string;
+  hasKey: boolean;
+  classifyModel: string;
+  draftModel: string;
+  maxTokens: number;
+  temperature: number;
+  seq: number;
+}
+
+export interface SettingsAiFeaturesChangedEvent {
+  accountId: string;
+  junkFilter: boolean;
+  priorityDetect: boolean;
+  autoDraft: boolean;
+  externalAccess: boolean;
   seq: number;
 }
 
@@ -207,6 +227,28 @@ export async function subscribeSettingsDavUsersChanged(
   return listen<SettingsDavUsersChangedEvent>('settings:dav-users-changed', (event) => {
     const ev = event.payload;
     const k = seqKey('davusers', 'app');
+    if (inFlightCounts.has(k)) decOp(k);
+    handler(ev);
+  });
+}
+
+export async function subscribeSettingsAiConfigChanged(
+  handler: (ev: SettingsAiConfigChangedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<SettingsAiConfigChangedEvent>('settings:ai-config-changed', (event) => {
+    const ev = event.payload;
+    const k = seqKey('aiconfig', 'app');
+    if (inFlightCounts.has(k)) decOp(k);
+    handler(ev);
+  });
+}
+
+export async function subscribeSettingsAiFeaturesChanged(
+  handler: (ev: SettingsAiFeaturesChangedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<SettingsAiFeaturesChangedEvent>('settings:ai-features-changed', (event) => {
+    const ev = event.payload;
+    const k = seqKey('aifeatures', ev.accountId);
     if (inFlightCounts.has(k)) decOp(k);
     handler(ev);
   });
@@ -390,4 +432,36 @@ export function fireRemoveDavUser(email: string): void {
     console.error('remove_dav_user rejected:', err);
     decOp(k);
   });
+}
+
+// ── AI config + per-account AI features ─────────────────
+
+export async function getAiConfig(): Promise<AiConfigView | null> {
+  if (!inTauri()) return null;
+  return invoke<AiConfigView>('get_ai_config');
+}
+
+/** Save the global AI config. The caller awaits for success/error feedback;
+ * the ai-config-changed echo is emitted for any other listeners. Not tied to
+ * the network in-flight counter (a settings save, not a sync). */
+export function fireSetAiConfig(config: AiConfigInput): Promise<void> {
+  if (!inTauri()) return Promise.resolve();
+  return invoke<void>('set_ai_config', { config });
+}
+
+/** Live connectivity test against the configured endpoint. Returns the
+ * model's reply text. Throws on failure so the UI can surface it. */
+export function fireTestAiConfig(config: AiConfigInput): Promise<string> {
+  if (!inTauri()) return Promise.resolve('');
+  return invoke<string>('test_ai_config', { config });
+}
+
+export async function getAccountAiFeatures(accountId: string): Promise<AccountAiFeatures | null> {
+  if (!inTauri()) return null;
+  return invoke<AccountAiFeatures>('get_account_ai_features', { accountId });
+}
+
+export function fireSetAccountAiFeatures(accountId: string, features: AccountAiFeatures): Promise<void> {
+  if (!inTauri()) return Promise.resolve();
+  return invoke<void>('set_account_ai_features', { accountId, features });
 }

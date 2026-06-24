@@ -46,6 +46,8 @@ pub const SETTINGS_CALDAV_SAVED: &str = "settings:caldav-saved";
 pub const SETTINGS_CARDDAV_SAVED: &str = "settings:carddav-saved";
 pub const SETTINGS_DAV_SERVER_CHANGED: &str = "settings:dav-server-changed";
 pub const SETTINGS_DAV_USERS_CHANGED: &str = "settings:dav-users-changed";
+pub const SETTINGS_AI_CONFIG_CHANGED: &str = "settings:ai-config-changed";
+pub const SETTINGS_AI_FEATURES_CHANGED: &str = "settings:ai-features-changed";
 
 // ── Payloads ────────────────────────────────────────────
 
@@ -493,6 +495,45 @@ pub fn emit_settings_offline_download_changed(
     };
     if let Err(e) = app.emit(SETTINGS_OFFLINE_DOWNLOAD_CHANGED, payload) {
         log::error!("Failed to emit {}: {}", SETTINGS_OFFLINE_DOWNLOAD_CHANGED, e);
+    }
+}
+
+/// The global AI config changed. Carries the non-secret fields plus `hasKey`
+/// (never the API key itself); the frontend replaces its cached config.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsAiConfigChangedEvent {
+    pub enabled: bool,
+    pub base_url: String,
+    pub has_key: bool,
+    pub classify_model: String,
+    pub draft_model: String,
+    pub max_tokens: i32,
+    pub temperature: f64,
+    pub seq: u64,
+}
+
+pub fn emit_settings_ai_config_changed(app: &AppHandle, payload: SettingsAiConfigChangedEvent) {
+    if let Err(e) = app.emit(SETTINGS_AI_CONFIG_CHANGED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_AI_CONFIG_CHANGED, e);
+    }
+}
+
+/// A per-account AI feature toggle set changed.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsAiFeaturesChangedEvent {
+    pub account_id: String,
+    pub junk_filter: bool,
+    pub priority_detect: bool,
+    pub auto_draft: bool,
+    pub external_access: bool,
+    pub seq: u64,
+}
+
+pub fn emit_settings_ai_features_changed(app: &AppHandle, payload: SettingsAiFeaturesChangedEvent) {
+    if let Err(e) = app.emit(SETTINGS_AI_FEATURES_CHANGED, payload) {
+        log::error!("Failed to emit {}: {}", SETTINGS_AI_FEATURES_CHANGED, e);
     }
 }
 
