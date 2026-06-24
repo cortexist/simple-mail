@@ -11,6 +11,7 @@ pub mod dav_server;
 mod offline_download;
 mod events;
 mod ai_config;
+mod ai_service;
 mod llm_client;
 mod mail_service;
 
@@ -20,7 +21,7 @@ use std::path::PathBuf;
 use log::LevelFilter;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 // ── Serde models (match the TypeScript types) ───────────
 
@@ -495,6 +496,20 @@ fn set_account_ai_features(
         seq,
     });
     Ok(())
+}
+
+/// Manually classify an account's unclassified inbox mail (backfill). Respects
+/// the same `ai_config.enabled` + per-account `junk_filter`/`priority_detect`
+/// gates as the post-sync hook. Returns the number of verdicts applied. Also
+/// reused by the MCP `mail.classify` tool (Phase 4).
+#[tauri::command]
+async fn classify_inbox(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+) -> Result<usize, String> {
+    let db = state.db.clone();
+    ai_service::classify_new_mail(&db, &app, &account_id).await
 }
 
 // ── Storage quota ───────────────────────────────────────
@@ -1885,6 +1900,24 @@ async fn sync_mail(
         },
     };
     events::emit_mail_sync_completed(&app, event);
+
+    // Fire-and-forget AI classification of newly-synced inbox mail. Gated
+    // inside classify_new_mail on ai_config.enabled + the account's
+    // junk_filter/priority_detect toggles, so this is a cheap no-op when off.
+    // It applies verdicts through the same echo layer the UI already listens to.
+    if result.is_ok() {
+        let db = state.db.clone();
+        let app_for_ai = app.clone();
+        let acct = event_account_id.clone();
+        tauri::async_runtime::spawn(async move {
+            match ai_service::classify_new_mail(&db, &app_for_ai, &acct).await {
+                Ok(n) if n > 0 => log::info!("ai classify [{}]: applied {} verdict(s)", acct, n),
+                Ok(_) => {}
+                Err(e) => log::error!("ai classify [{}] failed: {}", acct, e),
+            }
+        });
+    }
+
     result
 }
 
@@ -2492,103 +2525,7 @@ async fn send_email(
     email: smtp_client::OutboundEmail,
 ) -> Result<(), String> {
     let seq = state.next_seq();
-    let (settings, from_email, from_name) = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
-            .map_err(|e| e.to_string())?
-            .ok_or("No mail settings configured")?;
-
-        let (name, email_addr): (String, String) = conn
-            .query_row(
-                "SELECT name, email FROM accounts WHERE id = ?1",
-                rusqlite::params![account_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|e| e.to_string())?;
-
-        (settings, email_addr, name)
-    };
-
-    // Always queue first so there's a persisted record with a stable Message-ID.
-    // If we crash between SMTP submission and the status update, reconcile_sending
-    // can verify against the Sent folder on the next startup.
-    let (outbox_id, message_id) = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        smtp_client::queue_email(&conn, &account_id, &email, &from_email)
-            .map_err(|e| e.to_string())?
-    };
-    {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE outbox_queue SET status = 'sending' WHERE id = ?1",
-            rusqlite::params![outbox_id],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-
-    let raw_message = match smtp_client::send_email(&settings, &from_email, &from_name, &email, Some(&message_id)).await {
-        Ok(raw) => {
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
-            conn.execute(
-                "UPDATE outbox_queue SET status = 'sent' WHERE id = ?1",
-                rusqlite::params![outbox_id],
-            )
-            .map_err(|e| e.to_string())?;
-            raw
-        }
-        Err(e) => {
-            log::error!("SMTP send failed for account {}: {}", account_id, e);
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
-            conn.execute(
-                "UPDATE outbox_queue SET status = 'pending', error = ?2, retry_count = retry_count + 1 WHERE id = ?1",
-                rusqlite::params![outbox_id, e.to_string()],
-            )
-            .map_err(|e| e.to_string())?;
-            let err_msg = format!("Send failed, queued for retry: {}", e);
-            events::emit_mail_send_failed(&app, &account_id, &err_msg, seq);
-            return Err(err_msg);
-        }
-    };
-
-    // Save to Sent folder via IMAP APPEND
-    match imap_client::connect(&settings).await {
-        Ok(mut session) => {
-            let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
-            for (name, mapped) in &remote_folders {
-                log::info!("send_email: remote folder '{}' → mapped '{}'", name, mapped);
-            }
-            let sent_imap_name = remote_folders.iter()
-                .find(|(_, mapped)| mapped == "sent")
-                .map(|(name, _)| name.clone());
-
-            // If no Sent folder found, create one
-            let sent_folder = match sent_imap_name {
-                Some(name) => name,
-                None => {
-                    let folder_name = "Sent";
-                    log::info!("No Sent folder found — creating '{}'", folder_name);
-                    if let Err(e) = session.create(folder_name).await {
-                        log::error!("Failed to create Sent folder: {}", e);
-                    }
-                    folder_name.to_string()
-                }
-            };
-
-            if let Err(e) = imap_client::append_to_mailbox(&mut session, &sent_folder, &raw_message).await {
-                log::error!("Failed to save sent message to '{}': {}", sent_folder, e);
-            } else {
-                log::info!("Sent message saved to IMAP folder '{}'", sent_folder);
-                // Notify the frontend to sync immediately
-                let _ = app.emit("mail:sent", &account_id);
-            }
-            let _ = session.logout().await;
-        }
-        Err(e) => {
-            log::error!("IMAP connect failed when saving to Sent for account {}: {}", account_id, e);
-        }
-    }
-
-    Ok(())
+    mail_service::send_email(&state.db, &app, seq, &account_id, &email).await
 }
 
 /// Flush the outbox queue (retry pending sends).
@@ -5586,6 +5523,7 @@ pub fn run() {
             test_ai_config,
             get_account_ai_features,
             set_account_ai_features,
+            classify_inbox,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

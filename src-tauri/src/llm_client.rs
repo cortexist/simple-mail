@@ -9,6 +9,8 @@
 //! be introduced in Phase 2 alongside the classification unit tests.
 
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 /// One chat message. `role` is "system" | "user" | "assistant".
@@ -72,6 +74,28 @@ struct ChatChoice {
 struct ChatChoiceMessage {
     #[serde(default)]
     content: String,
+}
+
+/// Abstraction over a chat-completion backend so callers (e.g. the
+/// classification service) can be unit-tested against a mock without a live
+/// endpoint. Object-safe: the method returns a boxed `Send` future rather than
+/// using `async fn`, so `&dyn LlmClient` works and spawned tasks stay `Send`.
+pub trait LlmClient: Send + Sync {
+    fn complete<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        opts: &'a ChatOptions,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
+}
+
+impl LlmClient for HttpLlmClient {
+    fn complete<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        opts: &'a ChatOptions,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(self.chat(messages, opts))
+    }
 }
 
 /// OpenAI-compatible HTTP client.

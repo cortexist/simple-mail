@@ -93,7 +93,28 @@ pub fn init_ai_tables(conn: &Connection) -> Result<()> {
             external_access INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
         );
+
+        -- One LLM verdict per email. Presence of a row means \"already
+        -- classified\" — the candidate query selects inbox emails NOT in this
+        -- table, so re-sync never reclassifies. Verdicts are advisory: applying
+        -- them (move to junk / flip is_focused) respects user manual overrides.
+        CREATE TABLE IF NOT EXISTS email_ai_classification (
+            email_id      TEXT PRIMARY KEY,
+            account_id    TEXT NOT NULL,
+            is_junk       INTEGER NOT NULL DEFAULT 0,
+            is_priority   INTEGER NOT NULL DEFAULT 0,
+            reason        TEXT NOT NULL DEFAULT '',
+            model         TEXT NOT NULL DEFAULT '',
+            classified_at TEXT NOT NULL DEFAULT '',
+            seq           INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (email_id)   REFERENCES emails(id)   ON DELETE CASCADE,
+            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+        );
         ",
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_email_ai_classification_account ON email_ai_classification(account_id)",
+        [],
     )?;
     // Seed the singleton row if absent (all columns use their defaults).
     conn.execute("INSERT OR IGNORE INTO ai_config (id) VALUES (1)", [])?;

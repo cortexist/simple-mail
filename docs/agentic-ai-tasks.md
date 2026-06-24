@@ -1,6 +1,6 @@
 # Agentic Mail — AI & External-Agent Task Breakdown
 
-> Companion to [`agentic-ai-plan.md`](./agentic-ai-plan.md). Status: **not started.**
+> Companion to [`agentic-ai-plan.md`](./agentic-ai-plan.md). Status: **P0 done · P1 done · P2 backend done** (frontend reuses existing echoes). Next: P2.7 mock-injection tests, then P3 (drafting) / P4 (MCP).
 > Legend — Size: **S** ≤½ day · **M** ~1–2 days · **L** ~3–5 days. Each task is meant to be roughly one PR.
 > File line numbers are anchors from the codebase as of 2026-06-23 and may drift.
 

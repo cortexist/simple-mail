@@ -12,9 +12,9 @@
 
 use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, OptionalExtension};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
-use crate::{events, imap_client, sync_state};
+use crate::{events, imap_client, smtp_client, sync_state};
 
 /// Move an email to `target_folder`. Applies the local DB change up front, then
 /// performs the IMAP move in the background; on failure the folder is rolled
@@ -260,6 +260,119 @@ pub fn delete_email(
             events::emit_email_folder_changed(&app, &account_id, &email_id, "deleted", seq);
         }
     });
+
+    Ok(())
+}
+
+/// Send an email via SMTP, then APPEND it to the Sent folder over IMAP.
+///
+/// Queues the message first (persisted record with a stable Message-ID) so a
+/// crash between SMTP submission and the status update can be reconciled against
+/// the Sent folder on the next startup. On SMTP failure the outbox row is reset
+/// to `pending` for retry and `mail:send-failed` is emitted. This is `async` and
+/// awaits inline (unlike move/delete it has no optimistic-UI spawn).
+pub async fn send_email(
+    db: &Arc<Mutex<Connection>>,
+    app: &AppHandle,
+    seq: u64,
+    account_id: &str,
+    email: &smtp_client::OutboundEmail,
+) -> Result<(), String> {
+    let (settings, from_email, from_name) = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let settings = sync_state::load_mail_settings(&conn, account_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("No mail settings configured")?;
+
+        let (name, email_addr): (String, String) = conn
+            .query_row(
+                "SELECT name, email FROM accounts WHERE id = ?1",
+                rusqlite::params![account_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| e.to_string())?;
+
+        (settings, email_addr, name)
+    };
+
+    // Always queue first so there's a persisted record with a stable Message-ID.
+    // If we crash between SMTP submission and the status update, reconcile_sending
+    // can verify against the Sent folder on the next startup.
+    let (outbox_id, message_id) = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        smtp_client::queue_email(&conn, account_id, email, &from_email)
+            .map_err(|e| e.to_string())?
+    };
+    {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE outbox_queue SET status = 'sending' WHERE id = ?1",
+            rusqlite::params![outbox_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    let raw_message = match smtp_client::send_email(&settings, &from_email, &from_name, email, Some(&message_id)).await {
+        Ok(raw) => {
+            let conn = db.lock().map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE outbox_queue SET status = 'sent' WHERE id = ?1",
+                rusqlite::params![outbox_id],
+            )
+            .map_err(|e| e.to_string())?;
+            raw
+        }
+        Err(e) => {
+            log::error!("SMTP send failed for account {}: {}", account_id, e);
+            let conn = db.lock().map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE outbox_queue SET status = 'pending', error = ?2, retry_count = retry_count + 1 WHERE id = ?1",
+                rusqlite::params![outbox_id, e.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+            let err_msg = format!("Send failed, queued for retry: {}", e);
+            events::emit_mail_send_failed(app, account_id, &err_msg, seq);
+            return Err(err_msg);
+        }
+    };
+
+    // Save to Sent folder via IMAP APPEND
+    match imap_client::connect(&settings).await {
+        Ok(mut session) => {
+            let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
+            for (name, mapped) in &remote_folders {
+                log::info!("send_email: remote folder '{}' → mapped '{}'", name, mapped);
+            }
+            let sent_imap_name = remote_folders.iter()
+                .find(|(_, mapped)| mapped == "sent")
+                .map(|(name, _)| name.clone());
+
+            // If no Sent folder found, create one
+            let sent_folder = match sent_imap_name {
+                Some(name) => name,
+                None => {
+                    let folder_name = "Sent";
+                    log::info!("No Sent folder found — creating '{}'", folder_name);
+                    if let Err(e) = session.create(folder_name).await {
+                        log::error!("Failed to create Sent folder: {}", e);
+                    }
+                    folder_name.to_string()
+                }
+            };
+
+            if let Err(e) = imap_client::append_to_mailbox(&mut session, &sent_folder, &raw_message).await {
+                log::error!("Failed to save sent message to '{}': {}", sent_folder, e);
+            } else {
+                log::info!("Sent message saved to IMAP folder '{}'", sent_folder);
+                // Notify the frontend to sync immediately
+                let _ = app.emit("mail:sent", account_id);
+            }
+            let _ = session.logout().await;
+        }
+        Err(e) => {
+            log::error!("IMAP connect failed when saving to Sent for account {}: {}", account_id, e);
+        }
+    }
 
     Ok(())
 }
