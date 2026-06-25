@@ -943,6 +943,12 @@
   let aiFeaturesByAccount = $state<Record<string, AccountAiFeatures>>({});
   let aiFeatureBusy = $state<string | null>(null);
 
+  // Feature flags for the account currently open in the Accounts tab.
+  let selectedAccountAiFeatures = $derived<AccountAiFeatures>(
+    (selectedAccountId ? aiFeaturesByAccount[selectedAccountId] : undefined)
+      ?? { junkFilter: false, priorityDetect: false, autoDraft: false, externalAccess: false }
+  );
+
   async function loadAiSettings() {
     const cfg = await getAiConfig();
     if (cfg) {
@@ -1682,33 +1688,6 @@
           </section>
 
           <section class="settings-section">
-            <h4 class="section-title">{t('settings.aiPerAccount')}</h4>
-            <p class="dav-description">{t('settings.aiPerAccountDesc')}</p>
-            <div class="detail-form">
-              {#if accounts.length === 0}
-                <p class="dav-no-users">{t('settings.aiNoAccounts')}</p>
-              {/if}
-              {#each accounts as account (account.id)}
-                {@const f = aiFeaturesByAccount[account.id] ?? { junkFilter: false, priorityDetect: false, autoDraft: false, externalAccess: false }}
-                <div style="margin-top:14px">
-                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                    <span class="account-avatar-sm" style="background: {account.color}">{account.initials}</span>
-                    <span class="settings-nav-account-name">{account.name}</span>
-                  </div>
-                  {#each AI_FEATURE_ROWS as row}
-                    <div class="form-row toggle-row">
-                      <button type="button" class="toggle-switch" class:on={f[row.key]} disabled={aiFeatureBusy === account.id} aria-pressed={f[row.key]} aria-label={t(row.labelKey)} onclick={() => toggleAiFeature(account.id, row.key)}>
-                        <span class="toggle-knob"></span>
-                      </button>
-                      <span class="form-label toggle-label">{t(row.labelKey)}</span>
-                    </div>
-                  {/each}
-                </div>
-              {/each}
-            </div>
-          </section>
-
-          <section class="settings-section">
             <h4 class="section-title">{t('settings.agentApi')}</h4>
             <p class="dav-description">{t('settings.agentApiDesc')}</p>
             <div class="detail-form">
@@ -2171,6 +2150,30 @@
                   </button>
                 </div>
               </label>
+            </div>
+          </section>
+
+          <!-- AI features (per-account) -->
+          <section class="settings-section">
+            <h4 class="section-title">{t('settings.ai')}</h4>
+            <p class="dav-description">{t('settings.aiAccountFeaturesDesc')}</p>
+            <div class="detail-form">
+              {#each AI_FEATURE_ROWS as row}
+                <div class="form-row toggle-row">
+                  <button
+                    type="button"
+                    class="toggle-switch"
+                    class:on={selectedAccountAiFeatures[row.key]}
+                    disabled={aiFeatureBusy === selectedAccountId}
+                    aria-pressed={selectedAccountAiFeatures[row.key]}
+                    aria-label={t(row.labelKey)}
+                    onclick={() => selectedAccountId && toggleAiFeature(selectedAccountId, row.key)}
+                  >
+                    <span class="toggle-knob"></span>
+                  </button>
+                  <span class="form-label toggle-label">{t(row.labelKey)}</span>
+                </div>
+              {/each}
             </div>
           </section>
 
