@@ -68,6 +68,7 @@ tauri-plugin-single-instance = "2.4.0"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 aes-gcm = "0.10.3"
 rand = "0.10.0"
+sha2 = "0.10"
 
 # Cross-platform disk free-space reader (for the storage-quota feature)
 fs4 = "0.8"

@@ -110,6 +110,16 @@ pub fn init_ai_tables(conn: &Connection) -> Result<()> {
             FOREIGN KEY (email_id)   REFERENCES emails(id)   ON DELETE CASCADE,
             FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
         );
+
+        -- App keys for the external MCP server. Only the SHA-256 of each key is
+        -- stored; the plaintext is shown to the user exactly once at creation.
+        CREATE TABLE IF NOT EXISTS agent_api_keys (
+            id           TEXT PRIMARY KEY,
+            label        TEXT NOT NULL DEFAULT '',
+            key_sha256   TEXT NOT NULL UNIQUE,
+            created_at   TEXT NOT NULL DEFAULT '',
+            last_used_at TEXT
+        );
         ",
     )?;
     conn.execute(

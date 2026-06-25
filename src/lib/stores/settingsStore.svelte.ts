@@ -465,3 +465,46 @@ export function fireSetAccountAiFeatures(accountId: string, features: AccountAiF
   if (!inTauri()) return Promise.resolve();
   return invoke<void>('set_account_ai_features', { accountId, features });
 }
+
+// ── MCP agent server + app keys ─────────────────────────
+
+export interface AgentKeyInfo {
+  id: string;
+  label: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+/** Bound address of the MCP agent server, or null when stopped. */
+export async function getAgentServerStatus(): Promise<string | null> {
+  if (!inTauri()) return null;
+  return invoke<string | null>('get_agent_server_status');
+}
+
+/** Start the MCP agent server; resolves to the bound address. */
+export function fireStartAgentServer(bindAddr: string): Promise<string> {
+  if (!inTauri()) return Promise.resolve('');
+  return invoke<string>('start_agent_server', { bindAddr });
+}
+
+export function fireStopAgentServer(): Promise<void> {
+  if (!inTauri()) return Promise.resolve();
+  return invoke<void>('stop_agent_server');
+}
+
+/** Generate a new app key. Returns `{ id, key }`; the plaintext `key` is only
+ * available here, once. */
+export function generateAgentKey(label: string): Promise<{ id: string; key: string }> {
+  if (!inTauri()) return Promise.resolve({ id: '', key: '' });
+  return invoke<{ id: string; key: string }>('generate_agent_key', { label });
+}
+
+export async function listAgentKeys(): Promise<AgentKeyInfo[]> {
+  if (!inTauri()) return [];
+  return invoke<AgentKeyInfo[]>('list_agent_keys');
+}
+
+export function revokeAgentKey(id: string): Promise<void> {
+  if (!inTauri()) return Promise.resolve();
+  return invoke<void>('revoke_agent_key', { id });
+}

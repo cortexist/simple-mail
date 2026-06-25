@@ -319,6 +319,19 @@ relevant. Output ONLY the email body as simple HTML (<p> paragraphs, optional \
 <ul>/<li>); do not include a subject line, email headers, the quoted original, \
 or a signature block.";
 
+/// The generated draft, returned to programmatic callers (the MCP `mail.draft`
+/// tool). The same content is also pushed to the UI via `mail:draft-generated`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftResult {
+    pub in_reply_to: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub body_html: String,
+    pub references: Vec<String>,
+}
+
 /// A prior email offered as candidate reply context.
 #[derive(Debug, Clone, serde::Serialize)]
 struct ReferenceMail {
@@ -414,14 +427,14 @@ fn parse_picked(raw: &str) -> Vec<String> {
 /// Generate a reply draft for `email_id` and emit `mail:draft-generated`.
 /// Runs an agentic reference-retrieval step (DB heuristic → LLM pick) before
 /// drafting, so relevant prior mail is folded into the prompt. Returns the
-/// reference ids that were used.
+/// generated draft (also pushed to the UI via the event).
 pub async fn draft_reply(
     db: &Arc<Mutex<Connection>>,
     app: &AppHandle,
     account_id: &str,
     email_id: &str,
     instructions: Option<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<DraftResult, String> {
     let cfg = {
         let conn = db.lock().map_err(|e| e.to_string())?;
         ai_config::load_ai_config(&conn).map_err(|e| e.to_string())?
@@ -488,19 +501,28 @@ pub async fn draft_reply(
         account_id, cfg.draft_model, references.len(), started.elapsed().as_millis()
     );
 
-    let seq = app.state::<crate::AppState>().next_seq();
-    events::emit_mail_draft_generated(app, events::MailDraftGeneratedEvent {
-        account_id: account_id.to_string(),
-        in_reply_to: Some(seed.id.clone()),
+    let result = DraftResult {
+        in_reply_to: seed.id.clone(),
         to: vec![seed.from_email.clone()],
         cc: Vec::new(),
         subject: reply_subject(&seed.subject),
         body_html,
-        references: chosen_ids.clone(),
+        references: chosen_ids,
+    };
+
+    let seq = app.state::<crate::AppState>().next_seq();
+    events::emit_mail_draft_generated(app, events::MailDraftGeneratedEvent {
+        account_id: account_id.to_string(),
+        in_reply_to: Some(result.in_reply_to.clone()),
+        to: result.to.clone(),
+        cc: result.cc.clone(),
+        subject: result.subject.clone(),
+        body_html: result.body_html.clone(),
+        references: result.references.clone(),
         seq,
     });
 
-    Ok(chosen_ids)
+    Ok(result)
 }
 
 /// Build messages for the reference-selection step.

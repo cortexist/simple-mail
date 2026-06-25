@@ -16,6 +16,13 @@
     fireTestAiConfig,
     getAccountAiFeatures,
     fireSetAccountAiFeatures,
+    getAgentServerStatus,
+    fireStartAgentServer,
+    fireStopAgentServer,
+    generateAgentKey,
+    listAgentKeys,
+    revokeAgentKey,
+    type AgentKeyInfo,
   } from '$lib/stores/settingsStore.svelte';
   import { t } from '$lib/i18n/index.svelte';
   import { isLikelyEmail } from '$lib/utils';
@@ -1012,6 +1019,66 @@
     }
   }
 
+  // ── MCP agent server + app keys ──
+  const DEFAULT_AGENT_BIND = '127.0.0.1:8765';
+  let agentServerAddr = $state<string | null>(null);
+  let agentBindAddr = $state(DEFAULT_AGENT_BIND);
+  let agentBusy = $state(false);
+  let agentError = $state<string | null>(null);
+  let agentKeys = $state<AgentKeyInfo[]>([]);
+  let newKeyLabel = $state('');
+  // Plaintext of a just-generated key, shown once until dismissed.
+  let revealedKey = $state<string | null>(null);
+
+  async function loadAgentSettings() {
+    agentServerAddr = await getAgentServerStatus();
+    if (agentServerAddr) agentBindAddr = agentServerAddr;
+    agentKeys = await listAgentKeys();
+  }
+
+  async function toggleAgentServer() {
+    agentBusy = true; agentError = null;
+    try {
+      if (agentServerAddr) {
+        await fireStopAgentServer();
+        agentServerAddr = null;
+      } else {
+        agentServerAddr = await fireStartAgentServer(agentBindAddr.trim() || DEFAULT_AGENT_BIND);
+        agentBindAddr = agentServerAddr;
+      }
+    } catch (e) {
+      agentError = String(e);
+    } finally {
+      agentBusy = false;
+    }
+  }
+
+  async function createAgentKey() {
+    agentBusy = true; agentError = null;
+    try {
+      const { key } = await generateAgentKey(newKeyLabel.trim());
+      revealedKey = key;
+      newKeyLabel = '';
+      agentKeys = await listAgentKeys();
+    } catch (e) {
+      agentError = String(e);
+    } finally {
+      agentBusy = false;
+    }
+  }
+
+  async function removeAgentKey(id: string) {
+    agentBusy = true; agentError = null;
+    try {
+      await revokeAgentKey(id);
+      agentKeys = await listAgentKeys();
+    } catch (e) {
+      agentError = String(e);
+    } finally {
+      agentBusy = false;
+    }
+  }
+
   let appVersion = $state('');
 
   onMount(() => {
@@ -1019,6 +1086,7 @@
       console.error('Failed to read app version:', err);
     });
     loadAiSettings().catch((err) => console.error('Failed to load AI settings:', err));
+    loadAgentSettings().catch((err) => console.error('Failed to load agent settings:', err));
     // Focus first nav item (General, or Accounts in requireAccount mode)
     setTimeout(() => {
       settingsPanelEl?.querySelector<HTMLButtonElement>('.settings-nav-item')?.focus();
@@ -1637,6 +1705,62 @@
                   {/each}
                 </div>
               {/each}
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h4 class="section-title">{t('settings.agentApi')}</h4>
+            <p class="dav-description">{t('settings.agentApiDesc')}</p>
+            <div class="detail-form">
+              <div class="form-row-inline" style="align-items:flex-end">
+                <label class="form-row" style="flex:1">
+                  <span class="form-label">{t('settings.agentBindAddr')}</span>
+                  <input autocomplete="off" class="form-input" type="text" bind:value={agentBindAddr} placeholder={DEFAULT_AGENT_BIND} disabled={!!agentServerAddr} />
+                </label>
+                <button class="btn btn-sm" class:btn-secondary={!agentServerAddr} class:btn-danger={!!agentServerAddr} onclick={toggleAgentServer} disabled={agentBusy}>
+                  {agentServerAddr ? t('settings.agentStop') : t('settings.agentStart')}
+                </button>
+              </div>
+              {#if agentServerAddr}
+                <div class="autodiscover-note">{t('settings.agentRunning')} <code>http://{agentServerAddr}</code></div>
+              {:else}
+                <p class="dav-description">{t('settings.agentStopped')}</p>
+              {/if}
+              {#if agentError}<div class="autodiscover-note error">{agentError}</div>{/if}
+
+              <h4 class="section-title" style="margin-top:18px">{t('settings.agentKeys')}</h4>
+              <p class="dav-description">{t('settings.agentKeysDesc')}</p>
+
+              {#if revealedKey}
+                <div class="autodiscover-note">
+                  <strong>{t('settings.agentKeyOnce')}</strong>
+                  <div style="word-break:break-all;margin-top:4px"><code>{revealedKey}</code></div>
+                  <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick={() => revealedKey = null}>{t('common.done')}</button>
+                </div>
+              {/if}
+
+              <div class="form-row-inline" style="align-items:flex-end">
+                <label class="form-row" style="flex:1">
+                  <span class="form-label">{t('settings.agentKeyLabel')}</span>
+                  <input autocomplete="off" class="form-input" type="text" bind:value={newKeyLabel} placeholder={t('settings.agentKeyLabelPlaceholder')} />
+                </label>
+                <button class="btn btn-primary btn-sm" onclick={createAgentKey} disabled={agentBusy}>{t('settings.agentKeyGenerate')}</button>
+              </div>
+
+              {#if agentKeys.length === 0}
+                <p class="dav-no-users">{t('settings.agentNoKeys')}</p>
+              {:else}
+                {#each agentKeys as key (key.id)}
+                  <div class="dav-user-row">
+                    <div class="dav-user-info">
+                      <span class="dav-user-email">{key.label || t('settings.agentKeyUnlabeled')}</span>
+                      <span class="dav-user-account">{key.lastUsedAt ? `${t('settings.agentKeyLastUsed')} ${key.lastUsedAt}` : t('settings.agentKeyNeverUsed')}</span>
+                    </div>
+                    <button class="btn btn-danger btn-sm" onclick={() => removeAgentKey(key.id)} disabled={agentBusy}>{t('settings.agentKeyRevoke')}</button>
+                  </div>
+                {/each}
+              {/if}
+              <p class="dav-description" style="margin-top:8px">{t('settings.agentAccessNote')}</p>
             </div>
           </section>
 

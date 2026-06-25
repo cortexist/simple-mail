@@ -12,6 +12,7 @@ mod offline_download;
 mod events;
 mod ai_config;
 mod ai_service;
+mod agent_mcp;
 mod llm_client;
 mod mail_service;
 
@@ -266,6 +267,9 @@ pub struct Account {
 pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
     pub dav_handle: Mutex<Option<dav_server::DavServerHandle>>,
+    /// Handle for the running MCP agent server (None when stopped). Mirrors
+    /// `dav_handle`.
+    pub mcp_handle: Mutex<Option<agent_mcp::McpServerHandle>>,
     /// Directory where the SQLite DB file lives. Used by the storage-quota
     /// feature to query free disk space on the same volume.
     pub storage_dir: std::path::PathBuf,
@@ -5347,6 +5351,74 @@ fn get_dav_server_status(state: tauri::State<'_, AppState>) -> Result<Option<Str
     Ok(handle.as_ref().map(|h| h.addr().to_string()))
 }
 
+// ── MCP agent server commands ───────────────────────────
+
+/// Start the local MCP agent server on `bind_addr` (loopback only). Returns the
+/// bound address. Stops any already-running instance first.
+#[tauri::command]
+async fn start_agent_server(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    bind_addr: String,
+) -> Result<String, String> {
+    let addr: std::net::SocketAddr = bind_addr.parse().map_err(|e| format!("Invalid address: {}", e))?;
+    if !addr.ip().is_loopback() {
+        return Err("MCP server may only bind to a loopback address".to_string());
+    }
+    let db = state.db.clone();
+
+    {
+        let mut handle = state.mcp_handle.lock().map_err(|e| e.to_string())?;
+        if let Some(h) = handle.take() {
+            h.stop();
+        }
+    }
+
+    let server_handle = agent_mcp::start_server(db, app.clone(), addr).await?;
+    let actual_addr = server_handle.addr().to_string();
+    {
+        let mut handle = state.mcp_handle.lock().map_err(|e| e.to_string())?;
+        *handle = Some(server_handle);
+    }
+    Ok(actual_addr)
+}
+
+#[tauri::command]
+fn stop_agent_server(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut handle = state.mcp_handle.lock().map_err(|e| e.to_string())?;
+    if let Some(h) = handle.take() {
+        h.stop();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_agent_server_status(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
+    let handle = state.mcp_handle.lock().map_err(|e| e.to_string())?;
+    Ok(handle.as_ref().map(|h| h.addr().to_string()))
+}
+
+/// Generate a new agent app key. Returns the plaintext **once** — it is not
+/// recoverable afterwards (only its SHA-256 is stored).
+#[tauri::command]
+fn generate_agent_key(state: tauri::State<'_, AppState>, label: String) -> Result<serde_json::Value, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let (id, plaintext) = agent_mcp::generate_key(&conn, &label)?;
+    Ok(serde_json::json!({ "id": id, "key": plaintext }))
+}
+
+#[tauri::command]
+fn list_agent_keys(state: tauri::State<'_, AppState>) -> Result<Vec<agent_mcp::AgentKeyInfo>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    agent_mcp::list_keys(&conn)
+}
+
+#[tauri::command]
+fn revoke_agent_key(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    agent_mcp::revoke_key(&conn, &id)
+}
+
 #[tauri::command]
 fn add_dav_user(
     app: tauri::AppHandle,
@@ -5461,6 +5533,7 @@ pub fn run() {
             app.manage(AppState {
                 db: db.clone(),
                 dav_handle: Mutex::new(None),
+                mcp_handle: Mutex::new(None),
                 storage_dir: storage_dir.clone(),
                 offline_workers: Mutex::new(std::collections::HashMap::new()),
                 event_seq: AtomicU64::new(0),
@@ -5520,6 +5593,12 @@ pub fn run() {
             start_dav_server,
             stop_dav_server,
             get_dav_server_status,
+            start_agent_server,
+            stop_agent_server,
+            get_agent_server_status,
+            generate_agent_key,
+            list_agent_keys,
+            revoke_agent_key,
             add_dav_user,
             remove_dav_user,
             list_dav_users,
