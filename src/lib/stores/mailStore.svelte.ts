@@ -88,6 +88,18 @@ export interface EmailPreviewsFetchedEvent {
   seq: number;
 }
 
+/** An AI-generated reply draft is ready (from `ai_draft_reply`). */
+export interface MailDraftGeneratedEvent {
+  accountId: string;
+  inReplyTo: string | null;
+  to: string[];
+  cc: string[];
+  subject: string;
+  bodyHtml: string;
+  references: string[];
+  seq: number;
+}
+
 export interface OutboundEmailPayload {
   to: string[];
   cc: string[];
@@ -404,6 +416,16 @@ export async function subscribePreviewsFetched(handler: PreviewsFetchedHandler):
   });
 }
 
+export type DraftGeneratedHandler = (ev: MailDraftGeneratedEvent) => void;
+
+/** Fired when `ai_draft_reply` produces a draft. The frontend turns it into an
+ * ephemeral Drafts entry and opens the composer. */
+export async function subscribeDraftGenerated(handler: DraftGeneratedHandler): Promise<UnlistenFn> {
+  return listen<MailDraftGeneratedEvent>('mail:draft-generated', (event) => {
+    handler(event.payload);
+  });
+}
+
 function incOp(key: string) {
   inFlightCounts.set(key, (inFlightCounts.get(key) ?? 0) + 1);
   incNetwork();
@@ -436,6 +458,18 @@ export function fireSyncMail(accountId: string): void {
     console.error('sync_mail rejected at invoke-time:', err);
     decOp(opKey);
   });
+}
+
+/** Request an AI reply draft for an email. The backend runs reference retrieval
+ * + drafting and emits `mail:draft-generated` (see `subscribeDraftGenerated`).
+ * Returns the invoke promise so callers can show a loading state and surface
+ * errors; the draft itself arrives via the event. */
+export function fireAiDraftReply(
+  accountId: string,
+  emailId: string,
+  instructions?: string,
+): Promise<void> {
+  return invoke('ai_draft_reply', { accountId, emailId, instructions: instructions ?? null });
 }
 
 /** Fetch a single email body. Completion via `subscribeBodyFetched`. */

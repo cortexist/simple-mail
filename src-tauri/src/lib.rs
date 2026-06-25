@@ -512,6 +512,22 @@ async fn classify_inbox(
     ai_service::classify_new_mail(&db, &app, &account_id).await
 }
 
+/// Generate an AI reply draft for an email. Runs reference retrieval + drafting,
+/// then emits `mail:draft-generated`, which the frontend turns into an open
+/// composer. Awaits the generation so the caller can surface errors / a loading
+/// state. Reused by the MCP `mail.draft` tool (Phase 4).
+#[tauri::command]
+async fn ai_draft_reply(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    email_id: String,
+    instructions: Option<String>,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    ai_service::draft_reply(&db, &app, &account_id, &email_id, instructions).await.map(|_| ())
+}
+
 // ── Storage quota ───────────────────────────────────────
 //
 // App-wide: a single quota governs total body bytes stored in the one SQLite
@@ -5524,6 +5540,7 @@ pub fn run() {
             get_account_ai_features,
             set_account_ai_features,
             classify_inbox,
+            ai_draft_reply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

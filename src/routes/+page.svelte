@@ -52,12 +52,15 @@
     subscribeBodyFetched,
     subscribePreviewsFetched,
     subscribeSendFailed,
+    subscribeDraftGenerated,
+    fireAiDraftReply,
     type EmailFlagChangedEvent,
     type EmailFolderChangedEvent,
     type EmailRemovedEvent,
     type EmailBodyFetchedEvent,
     type EmailPreviewsFetchedEvent,
     type MailSendFailedEvent,
+    type MailDraftGeneratedEvent,
   } from '$lib/stores/mailStore.svelte';
   import {
     fireSaveCalendarEvent,
@@ -103,6 +106,8 @@
     subscribeSettingsCardDavSaved,
     subscribeSettingsDavServerChanged,
     subscribeSettingsDavUsersChanged,
+    subscribeSettingsAiConfigChanged,
+    getAiConfig,
     type SettingsAccountUpsertedEvent,
     type SettingsAccountRemovedEvent,
     type SettingsAccountsReorderedEvent,
@@ -196,6 +201,12 @@
   let unlistenSettingsCardDav: (() => void) | null = null;
   let unlistenSettingsDavServer: (() => void) | null = null;
   let unlistenSettingsDavUsers: (() => void) | null = null;
+  let unlistenDraftGenerated: (() => void) | null = null;
+  let unlistenSettingsAiConfig: (() => void) | null = null;
+  // Whether AI features are globally enabled — gates the "AI draft" button.
+  let aiEnabled = $state(false);
+  // True while an AI draft is being generated (button shows a busy state).
+  let aiDraftLoading = $state(false);
 
   // Settings state pushed to SettingsView via props. Initial values are
   // loaded once in onMount; subsequent changes arrive over settings:* events.
@@ -892,6 +903,7 @@
         subscribeBodyFetched(applyBodyEcho).then((unlisten) => { unlistenBodyFetched = unlisten; });
         subscribePreviewsFetched(applyPreviewsEcho).then((unlisten) => { unlistenPreviewsFetched = unlisten; });
         subscribeSendFailed(applySendFailedEcho).then((unlisten) => { unlistenSendFailed = unlisten; });
+        subscribeDraftGenerated(applyDraftGeneratedEcho).then((unlisten) => { unlistenDraftGenerated = unlisten; });
         // Phase 2: calendar event echoes.
         subscribeEventUpserted(applyEventUpsertedEcho).then((unlisten) => { unlistenEventUpserted = unlisten; });
         subscribeEventRemoved(applyEventRemovedEcho).then((unlisten) => { unlistenEventRemoved = unlisten; });
@@ -917,6 +929,10 @@
       subscribeSettingsCardDavSaved(applySettingsCardDavSavedEcho).then((u) => { unlistenSettingsCardDav = u; });
       subscribeSettingsDavServerChanged(applySettingsDavServerEcho).then((u) => { unlistenSettingsDavServer = u; });
       subscribeSettingsDavUsersChanged(applySettingsDavUsersEcho).then((u) => { unlistenSettingsDavUsers = u; });
+      // AI config: track the global `enabled` flag so the "AI draft" button can
+      // gate itself. Initial read + live updates via the settings echo.
+      getAiConfig().then((c) => { if (c) aiEnabled = c.enabled; }).catch(() => {});
+      subscribeSettingsAiConfigChanged((ev) => { aiEnabled = ev.enabled; }).then((u) => { unlistenSettingsAiConfig = u; });
 
       // Initial settings reads — subsequent changes arrive via the echoes above.
       refreshStorageInfo();
@@ -960,6 +976,8 @@
     if (unlistenBodyFetched) unlistenBodyFetched();
     if (unlistenPreviewsFetched) unlistenPreviewsFetched();
     if (unlistenSendFailed) unlistenSendFailed();
+    if (unlistenDraftGenerated) unlistenDraftGenerated();
+    if (unlistenSettingsAiConfig) unlistenSettingsAiConfig();
     if (unlistenEventUpserted) unlistenEventUpserted();
     if (unlistenEventRemoved) unlistenEventRemoved();
     if (unlistenContactUpserted) unlistenContactUpserted();
@@ -2006,6 +2024,65 @@
     composeDraft = email.draftData ?? buildDraftFromEmail(email);
   }
 
+  /** Request an AI-generated reply for the selected email. The draft arrives
+   * asynchronously via `mail:draft-generated` (applyDraftGeneratedEcho). */
+  function handleAiDraft() {
+    const acct = activeAccount;
+    const email = selectedEmail;
+    if (!acct || !email || aiDraftLoading) return;
+    aiDraftLoading = true;
+    fireAiDraftReply(acct.id, email.id).catch((err) => {
+      aiDraftLoading = false;
+      syncErrors = [...syncErrors, `${t('compose.aiDraftFailed')}: ${err}`];
+    });
+  }
+
+  /** Insert an AI-generated draft as an ephemeral Drafts entry and open it in
+   * the composer. Applied only for the active account (the request originated
+   * there); a mid-flight account switch silently drops the draft. */
+  function applyDraftGeneratedEcho(ev: MailDraftGeneratedEvent) {
+    aiDraftLoading = false;
+    if (ev.accountId !== activeAccountId) return;
+    const acct = activeAccount;
+    if (!acct) return;
+
+    const draftId = crypto.randomUUID();
+    const draftData: ComposeDraft = {
+      to: ev.to.join('; '),
+      cc: ev.cc.join('; '),
+      bcc: '',
+      subject: ev.subject,
+      body: ev.bodyHtml,
+      showCc: ev.cc.length > 0,
+      showBcc: false,
+      attachments: [],
+    };
+    const draftEmail: Email = {
+      id: draftId,
+      from: { name: acct.alias || acct.name, email: acct.email, initials: acct.initials, color: acct.color },
+      to: ev.to.map((e) => ({ name: e, email: e, initials: (e[0] ?? '?').toUpperCase(), color: '#666' })),
+      subject: ev.subject || '(No subject)',
+      preview: stripHtmlPreview(ev.bodyHtml),
+      body: ev.bodyHtml,
+      date: new Date(),
+      isRead: true,
+      isStarred: false,
+      isPinned: false,
+      hasAttachment: false,
+      folder: 'drafts',
+      isFocused: true,
+      draftData,
+    };
+    emails = [...emails, draftEmail];
+
+    activeNav = 'mail';
+    activeDraftId = draftId;
+    composeMode = 'new';
+    composeReplyTo = null;
+    composeDraft = draftData;
+    focusedPane = 'compose';
+  }
+
   /** Update the draft email in the emails array from compose state */
   function handleDraftChange(d: ComposeDraft) {
     composeDraft = d;
@@ -2706,6 +2783,9 @@
         bind:showMoveMenu
         {multiSelectCount}
         {multiSelectHasUnread}
+        onAiDraft={handleAiDraft}
+        aiDraftEnabled={activeNav === 'mail' && aiEnabled && !!selectedEmail && activeFolder !== 'drafts'}
+        {aiDraftLoading}
       />
 
       <div class="network-indicator" class:active={networkActivity.count > 0} aria-hidden="true"></div>

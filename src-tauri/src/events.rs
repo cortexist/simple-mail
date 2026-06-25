@@ -23,6 +23,7 @@ pub const MAIL_SYNC_COMPLETED: &str = "mail:sync-completed";
 pub const MAIL_SEND_FAILED: &str = "mail:send-failed";
 pub const MAIL_EMAIL_BODY_FETCHED: &str = "mail:email-body-fetched";
 pub const MAIL_EMAIL_PREVIEWS_FETCHED: &str = "mail:email-previews-fetched";
+pub const MAIL_DRAFT_GENERATED: &str = "mail:draft-generated";
 
 pub const CALENDAR_EVENT_UPSERTED: &str = "calendar:event-upserted";
 pub const CALENDAR_EVENT_REMOVED: &str = "calendar:event-removed";
@@ -226,6 +227,29 @@ pub fn emit_email_previews_fetched(
 ) {
     if let Err(e) = app.emit(MAIL_EMAIL_PREVIEWS_FETCHED, payload) {
         log::error!("Failed to emit {}: {}", MAIL_EMAIL_PREVIEWS_FETCHED, e);
+    }
+}
+
+/// An AI-generated reply draft is ready. The frontend inserts it as an
+/// ephemeral Drafts entry and opens it in the composer. `in_reply_to` is the
+/// seed email's id; `references` are the prior-mail ids folded into the prompt
+/// (surfaced for transparency). Body is rendered HTML.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MailDraftGeneratedEvent {
+    pub account_id: String,
+    pub in_reply_to: Option<String>,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub body_html: String,
+    pub references: Vec<String>,
+    pub seq: u64,
+}
+
+pub fn emit_mail_draft_generated(app: &AppHandle, payload: MailDraftGeneratedEvent) {
+    if let Err(e) = app.emit(MAIL_DRAFT_GENERATED, payload) {
+        log::error!("Failed to emit {}: {}", MAIL_DRAFT_GENERATED, e);
     }
 }
 

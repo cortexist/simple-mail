@@ -1,6 +1,6 @@
 # Agentic Mail — AI & External-Agent Task Breakdown
 
-> Companion to [`agentic-ai-plan.md`](./agentic-ai-plan.md). Status: **P0 done · P1 done · P2 backend done** (frontend reuses existing echoes). Next: P2.7 mock-injection tests, then P3 (drafting) / P4 (MCP).
+> Companion to [`agentic-ai-plan.md`](./agentic-ai-plan.md). Status: **P0 done · P1 done · P2 done · P3 done** (incl. frontend "AI draft" button + draft-generated wiring). Next: **P4 (MCP server)**. Notes: no `accounts.signature` column exists, so v1 drafts omit a signature; reference retrieval uses a simple JSON "pick ids" call (not OpenAI tool-calling); the manual `classify_inbox` backend command has no UI yet (reserved for MCP `mail.classify`).
 > Legend — Size: **S** ≤½ day · **M** ~1–2 days · **L** ~3–5 days. Each task is meant to be roughly one PR.
 > File line numbers are anchors from the codebase as of 2026-06-23 and may drift.
 
