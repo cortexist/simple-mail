@@ -11,7 +11,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn } from './safeListen';
 import { incNetwork, decNetwork } from '$lib/networkActivity.svelte';
 import type { Account, AiConfigView, AiConfigInput, AccountAiFeatures } from '$lib/types';
 import type { MailServerSettings, DavSettings } from '$lib/data/dataService';

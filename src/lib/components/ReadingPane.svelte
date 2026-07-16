@@ -150,7 +150,21 @@
     // resizeIframe can only trust document geometry if these rules win.
     // Only the geometry subset: theming (fonts, link color) stays first so
     // emails can still override it.
-    const geometryCss = 'html,body{height:auto!important;min-height:0!important;overflow:visible!important;}';
+    //
+    // .__mailSqueeze: fixed-width mail (`<table width="640">`, images with
+    // inline `width: 640px`) refuses to shrink below its min-content floor,
+    // and the iframe is scrolling="no" — so in a pane narrower than the mail,
+    // the right edge was silently clipped mid-word. When resizeIframe detects
+    // horizontal overflow it stamps this class on <html>, and these rules
+    // relax the fixed widths so the layout adapts the way Gmail/Outlook web
+    // render the same mail. Conditional on purpose: `img{width:auto}` is the
+    // piece that actually breaks the floor (nothing else beats an inline
+    // pixel width during table min-content sizing), but globally it would
+    // blow retina images (1280px assets declared width=640) up to their
+    // natural size — mail that fits must keep author-exact rendering.
+    const geometryCss = 'html,body{height:auto!important;min-height:0!important;overflow:visible!important;}' +
+      'html.__mailSqueeze table{width:auto!important;max-width:100%!important;}' +
+      'html.__mailSqueeze img{width:auto!important;max-width:100vw!important;height:auto!important;}';
     return '<!DOCTYPE html><html><head><meta charset="utf-8">' + cspMeta +
       '<' + 'style>' + css + '<' + '/style><' + '/head>' +
       '<body>' + content +
@@ -190,6 +204,16 @@
     try {
       const doc = iframe.contentDocument;
       if (!doc?.body) return;
+
+      // Fixed-width mail wider than the pane would be clipped on the right
+      // (scrolling="no"). Engage squeeze mode (see geometryCss) to relax the
+      // fixed widths. Engage-only: removing it when the overflow disappears
+      // would re-create the overflow and oscillate; a fresh document (next
+      // message, or re-selecting this one) starts un-squeezed anyway.
+      const de = doc.documentElement;
+      if (de.scrollWidth > de.clientWidth + 1 && !de.classList.contains('__mailSqueeze')) {
+        de.classList.add('__mailSqueeze');
+      }
 
       const h = Math.ceil(Math.max(
         doc.documentElement.getBoundingClientRect().height,

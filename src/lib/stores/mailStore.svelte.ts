@@ -13,7 +13,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn } from './safeListen';
 import { incNetwork, decNetwork } from '$lib/networkActivity.svelte';
 
 export type EmailFlagField = 'read' | 'starred' | 'replied' | 'pinned' | 'focused';

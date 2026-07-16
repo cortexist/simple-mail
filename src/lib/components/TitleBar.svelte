@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { listen } from '@tauri-apps/api/event';
+  import { listen } from '$lib/stores/safeListen';
   import { onMount } from 'svelte';
   import type { Account, NavItem } from '$lib/types';
   import { t } from '$lib/i18n/index.svelte';
@@ -38,10 +38,14 @@
   let isMaximized = $state(false);
   const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.userAgent);
 
-  const appWindow = getCurrentWindow();
+  // Lazy: getCurrentWindow() dereferences __TAURI_INTERNALS__.metadata, which
+  // doesn't exist in a plain browser (`npm run dev`) — calling it at component
+  // init throws during mount and wedges the whole page on "Loading Mail…".
+  const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  const appWindow = inTauri ? getCurrentWindow() : null;
 
   async function checkMaximized() {
-    isMaximized = await appWindow.isMaximized();
+    if (appWindow) isMaximized = await appWindow.isMaximized();
   }
 
   onMount(() => {
@@ -57,7 +61,7 @@
   // Update OS window title (taskbar, Alt+Tab, task manager) when active account changes
   $effect(() => {
     const suffix = activeAccountName ? `: ${activeAccountName}` : '';
-    appWindow.setTitle(`Mail${suffix}`).catch(() => {});
+    appWindow?.setTitle(`Mail${suffix}`).catch(() => {});
   });
 </script>
 
@@ -193,12 +197,12 @@
 
     {#if !isMac}
       <div class="window-controls">
-        <button class="win-btn" tabindex="-1" data-tooltip={t('titleBar.minimize')} data-tooltip-position="bottom" aria-label={t('titleBar.minimize')} onclick={() => appWindow.minimize()}>
+        <button class="win-btn" tabindex="-1" data-tooltip={t('titleBar.minimize')} data-tooltip-position="bottom" aria-label={t('titleBar.minimize')} onclick={() => appWindow?.minimize()}>
           <svg width="10" height="10" viewBox="0 0 10 10">
             <line x1="0" y1="5" x2="10" y2="5" stroke="currentColor" stroke-width="1" />
           </svg>
         </button>
-        <button class="win-btn" tabindex="-1" data-tooltip={isMaximized ? t('titleBar.restore') : t('titleBar.maximize')} data-tooltip-position="bottom" aria-label={isMaximized ? t('titleBar.restore') : t('titleBar.maximize')} onclick={() => appWindow.toggleMaximize()}>
+        <button class="win-btn" tabindex="-1" data-tooltip={isMaximized ? t('titleBar.restore') : t('titleBar.maximize')} data-tooltip-position="bottom" aria-label={isMaximized ? t('titleBar.restore') : t('titleBar.maximize')} onclick={() => appWindow?.toggleMaximize()}>
           {#if isMaximized}
             <svg width="10" height="10" viewBox="0 0 10 10">
               <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1">
@@ -212,7 +216,7 @@
             </svg>
           {/if}
         </button>
-        <button class="win-btn win-close" tabindex="-1" data-tooltip={t('titleBar.close')} data-tooltip-position="bottom" aria-label={t('titleBar.close')} onclick={() => appWindow.close()}>
+        <button class="win-btn win-close" tabindex="-1" data-tooltip={t('titleBar.close')} data-tooltip-position="bottom" aria-label={t('titleBar.close')} onclick={() => appWindow?.close()}>
           <svg width="10" height="10" viewBox="0 0 10 10">
             <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.2" />
             <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.2" />
