@@ -144,9 +144,18 @@
     const css = 'html,body{margin:0;padding:0;height:auto!important;overflow:visible!important;min-height:0!important;}' +
       'body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.65;color:#242424;overflow-wrap:break-word;}' +
       'img{max-width:100%;height:auto;}a{color:#0078d4;}' + darkCss;
+    // The geometry rules repeat AFTER the content. The email's own stylesheets
+    // land between the two, so on equal-specificity ties (`body{height:100%
+    // !important}` is boilerplate in real mail) source order decides — and
+    // resizeIframe can only trust document geometry if these rules win.
+    // Only the geometry subset: theming (fonts, link color) stays first so
+    // emails can still override it.
+    const geometryCss = 'html,body{height:auto!important;min-height:0!important;overflow:visible!important;}';
     return '<!DOCTYPE html><html><head><meta charset="utf-8">' + cspMeta +
       '<' + 'style>' + css + '<' + '/style><' + '/head>' +
-      '<body>' + content + '<' + '/body><' + '/html>';
+      '<body>' + content +
+      '<' + 'style>' + geometryCss + '<' + '/style>' +
+      '<' + '/body><' + '/html>';
   }
 
   /** Extract just the body content for the print-only div.
@@ -157,7 +166,24 @@
   }
 
   /** Resize the iframe to match its content.  Only grows (never shrinks)
-   *  after the initial sizing to avoid scroll-jump while reading. */
+   *  after the initial sizing to avoid scroll-jump while reading.
+   *
+   *  Measures the document's own geometry rather than an injected sentinel
+   *  element, for two reasons learned the hard way:
+   *
+   *  1. `doc.close()` can return while the parser is still streaming the
+   *     document (a render-blocking `@import` does this), so an element
+   *     appended "at the end of body" freezes mid-document and everything
+   *     the parser adds after it goes unmeasured — the mail shows only its
+   *     top part, forever.
+   *  2. The email's own CSS applies to anything we inject: a stock Gmail
+   *     dark-mode hack (`img+div{display:none}`) hid the sentinel outright.
+   *
+   *  Trusting document geometry instead requires our `height:auto` reset to
+   *  win the cascade against email boilerplate like `body{height:100%
+   *  !important}` — bodySrcdoc guarantees that by repeating the geometry
+   *  rules after the content, winning equal-specificity ties on source
+   *  order. */
   let iframeInitialized = false;
 
   function resizeIframe(iframe: HTMLIFrameElement) {
@@ -165,20 +191,17 @@
       const doc = iframe.contentDocument;
       if (!doc?.body) return;
 
-      let sentinel = doc.getElementById('__sentinel');
-      if (!sentinel) {
-        sentinel = doc.createElement('div');
-        sentinel.id = '__sentinel';
-        sentinel.style.cssText = 'clear:both;height:1px;';
-        doc.body.appendChild(sentinel);
-      }
-
-      const h = sentinel.offsetTop + sentinel.offsetHeight;
+      const h = Math.ceil(Math.max(
+        doc.documentElement.getBoundingClientRect().height,
+        doc.body.scrollHeight,
+      ));
       const cur = parseInt(iframe.style.height) || 0;
 
       // First sizing: allow shrink. After that only grow.
+      // `> 1`, not `> 0`: a render-blocked document (stylesheet import still
+      // loading) reports ~1px — initializing on that locks the pane collapsed.
       if (!iframeInitialized) {
-        if (h > 0) { iframe.style.height = h + 'px'; iframeInitialized = true; }
+        if (h > 1) { iframe.style.height = h + 'px'; iframeInitialized = true; }
       } else if (h > cur) {
         iframe.style.height = h + 'px';
       }
@@ -207,7 +230,14 @@
         const ro = new ResizeObserver(() => resizeIframe(iframe));
         ro.observe(doc.body);
 
-        // Watch all images
+        // Parsing + subresources done. When the parser finishes async (see
+        // resizeIframe's doc comment) this is the moment the content exists —
+        // and the img listeners below saw none of it, since the imgs weren't
+        // in the DOM yet when we queried.
+        doc.defaultView?.addEventListener('load', () => resizeIframe(iframe), { once: true });
+
+        // Watch all images (only those the parser has emitted so far — the
+        // load event above covers the rest)
         doc.querySelectorAll('img').forEach((img) => {
           if (!img.complete) {
             img.addEventListener('load', () => resizeIframe(iframe), { once: true });
