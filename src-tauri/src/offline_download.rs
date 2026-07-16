@@ -80,9 +80,29 @@ pub fn spawn_worker(
     // setup callback runs before the tokio runtime context is entered, and
     // calling `tokio::spawn` from there panics.
     tauri::async_runtime::spawn(async move {
-        log::info!("offline_worker [{}] started", account_id);
-        run_loop(app, db, storage_dir, account_id.clone(), cancel).await;
-        log::info!("offline_worker [{}] stopped", account_id);
+        // Bodies are cached per LOGIN, not per account: mail is stored once for
+        // a shared login and every view reads the same rows, so one pass serves
+        // them all. Resolve up front — a mailbox account's own id matches no
+        // stored mail, so without this the worker would find nothing to fetch.
+        //
+        // Deliberately NOT mailbox-filtered: the cache is shared, and fetching
+        // only one mailbox's bodies would leave its sibling's bodies empty.
+        let login_id = {
+            let conn = match db.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            match crate::login::resolve(&conn, &account_id) {
+                Ok(l) => l.as_str().to_string(),
+                Err(e) => {
+                    log::error!("offline_worker [{}]: no login: {}", account_id, e);
+                    return;
+                }
+            }
+        };
+        log::info!("offline_worker [{}] started (login {})", account_id, login_id);
+        run_loop(app, db, storage_dir, login_id.clone(), cancel).await;
+        log::info!("offline_worker [{}] stopped", login_id);
     });
 }
 
@@ -291,7 +311,7 @@ fn pick_batch(
 ) -> Result<Option<(sync_state::MailServerSettings, String, Vec<(String, u32)>)>, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
 
-    let settings = sync_state::load_mail_settings(&conn, account_id)
+    let settings = sync_state::load_mail_settings(&conn, &crate::login::LoginId::new_unchecked(account_id))
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "No mail settings for account".to_string())?;
 

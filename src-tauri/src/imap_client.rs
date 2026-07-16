@@ -28,6 +28,15 @@ pub struct EnvelopeInfo {
     pub uid: u32,
     pub from_name: String,
     pub from_email: String,
+    /// Address the server actually delivered this message to, from
+    /// `Delivered-To` / `X-Original-To` / `X-Envelope-To`. Empty when the
+    /// server sends none of them.
+    ///
+    /// This is the only signal that identifies the recipient of a **BCC'd** or
+    /// alias-forwarded message, which names the address in no other header —
+    /// so it is what lets several mailboxes share one login and still split
+    /// their mail correctly.
+    pub delivered_to: String,
     pub to_list: Vec<(String, String)>, // (name, email)
     pub cc_list: Vec<(String, String)>, // (name, email)
     pub reply_to: String,
@@ -281,10 +290,13 @@ pub async fn sync_folder(
     // Fetch new message envelopes (body + preview fetched on demand)
     if fetch_from < uid_next || result.full_resync {
         let range = format!("{}:*", fetch_from);
+        // The delivery headers ride along on this existing FETCH — no extra
+        // round trip. See `parse_delivered_to` for why PEEK and why these
+        // three fields specifically.
         let query = if is_gmail {
-            "(UID FLAGS ENVELOPE X-GM-LABELS)"
+            "(UID FLAGS ENVELOPE X-GM-LABELS BODY.PEEK[HEADER.FIELDS (DELIVERED-TO X-ORIGINAL-TO X-ENVELOPE-TO)])"
         } else {
-            "(UID FLAGS ENVELOPE)"
+            "(UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (DELIVERED-TO X-ORIGINAL-TO X-ENVELOPE-TO)])"
         };
 
         log::info!("sync_folder {}/{}: uid_fetch range='{}' query='{}'", account_id, local_folder, range, query);
@@ -299,6 +311,7 @@ pub async fn sync_folder(
                     uid,
                     from_name: envelope.0,
                     from_email: envelope.1,
+                    delivered_to: parse_delivered_to(fetch),
                     to_list: envelope.2,
                     cc_list: envelope.3,
                     reply_to: envelope.4,
@@ -459,6 +472,7 @@ pub async fn sync_folder(
                                         uid,
                                         from_name: envelope.0,
                                         from_email: envelope.1,
+                                        delivered_to: parse_delivered_to(fetch),
                                         to_list: envelope.2,
                                         cc_list: envelope.3,
                                         reply_to: envelope.4,
@@ -792,6 +806,113 @@ fn extract_gmail_labels(fetch: &Fetch) -> Vec<String> {
     fetch.gmail_labels()
         .map(|labels| labels.iter().map(|c| unescape_imap_quoted(c)).collect())
         .unwrap_or_default()
+}
+
+/// The address the MTA delivered this message to, from the FETCH's
+/// `BODY.PEEK[HEADER.FIELDS (DELIVERED-TO X-ORIGINAL-TO X-ENVELOPE-TO)]`.
+/// Empty when the server sends none of them.
+///
+/// Headers are tried in descending trustworthiness: `Delivered-To` is the
+/// standard, the `X-` variants are common Postfix/Exim spellings.
+///
+/// Two things worth knowing:
+///
+/// * `fetch.header()` returns this despite the request naming specific fields,
+///   because `imap-proto` parses `HEADER.FIELDS (…)` into the same
+///   `MessageSection::Header` as a bare `HEADER`, discarding the field list.
+///   The corollary is a trap: **never request both `BODY.PEEK[HEADER]` and
+///   `BODY.PEEK[HEADER.FIELDS (…)]` in one FETCH** — they collapse onto the
+///   same section and `header()` returns whichever arrived first.
+/// * The request uses `.PEEK` so reading the header does not set `\Seen` and
+///   silently mark the user's mail as read.
+///
+/// Only ever used to partition mail between the user's *own* mailboxes. It is
+/// an unauthenticated header and trivially forged, so it must never be treated
+/// as an authentication or authorisation signal.
+fn parse_delivered_to(fetch: &Fetch) -> String {
+    fetch.header().map(|raw| pick_delivered_to(&String::from_utf8_lossy(raw))).unwrap_or_default()
+}
+
+/// The header-picking half of [`parse_delivered_to`], split out so it can be
+/// tested without constructing a `Fetch`.
+fn pick_delivered_to(text: &str) -> String {
+    for want in ["delivered-to", "x-original-to", "x-envelope-to"] {
+        for line in text.lines() {
+            let Some((name, value)) = line.split_once(':') else { continue };
+            if !name.trim().eq_ignore_ascii_case(want) {
+                continue;
+            }
+            // Accept both `foo@bar` and `Name <foo@bar>`.
+            let v = value.trim();
+            let addr = match (v.find('<'), v.find('>')) {
+                (Some(a), Some(b)) if b > a + 1 => &v[a + 1..b],
+                _ => v,
+            };
+            let addr = addr.trim().trim_matches('"').trim();
+            if !addr.is_empty() {
+                return addr.to_lowercase();
+            }
+        }
+    }
+    String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_delivered_to;
+
+    #[test]
+    fn reads_a_plain_delivered_to() {
+        let h = "Delivered-To: engineering@cortexist.com\r\nSubject: hi\r\n";
+        assert_eq!(pick_delivered_to(h), "engineering@cortexist.com");
+    }
+
+    #[test]
+    fn normalizes_case_so_it_can_be_compared_directly() {
+        let h = "Delivered-To: Engineering@Cortexist.COM\r\n";
+        assert_eq!(pick_delivered_to(h), "engineering@cortexist.com");
+    }
+
+    #[test]
+    fn unwraps_an_angle_bracketed_address() {
+        let h = "Delivered-To: Engineering Team <engineering@cortexist.com>\r\n";
+        assert_eq!(pick_delivered_to(h), "engineering@cortexist.com");
+    }
+
+    #[test]
+    fn falls_back_through_the_x_variants() {
+        assert_eq!(
+            pick_delivered_to("X-Original-To: engineering@cortexist.com\r\n"),
+            "engineering@cortexist.com"
+        );
+        assert_eq!(
+            pick_delivered_to("X-Envelope-To: engineering@cortexist.com\r\n"),
+            "engineering@cortexist.com"
+        );
+    }
+
+    #[test]
+    fn prefers_delivered_to_over_the_x_variants() {
+        let h = "X-Original-To: old@cortexist.com\r\nDelivered-To: engineering@cortexist.com\r\n";
+        assert_eq!(pick_delivered_to(h), "engineering@cortexist.com");
+    }
+
+    #[test]
+    fn header_name_matching_is_not_a_substring_match() {
+        // Must not be mistaken for Delivered-To.
+        let h = "X-Not-Delivered-To-Anyone: nobody@x.com\r\n";
+        assert_eq!(pick_delivered_to(h), "");
+    }
+
+    /// Absent or unparsable ⇒ empty, which the caller stores as NULL. That's
+    /// what makes the mailbox filter fail *open* rather than hiding the message.
+    #[test]
+    fn missing_or_empty_header_yields_nothing() {
+        assert_eq!(pick_delivered_to(""), "");
+        assert_eq!(pick_delivered_to("Subject: hi\r\nFrom: a@b.com\r\n"), "");
+        assert_eq!(pick_delivered_to("Delivered-To:   \r\n"), "");
+        assert_eq!(pick_delivered_to("garbage without a colon\r\n"), "");
+    }
 }
 
 /// Reverse IMAP quoted-string escaping: `\\` → `\`, `\"` → `"`. Leaves

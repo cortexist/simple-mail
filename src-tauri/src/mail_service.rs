@@ -34,6 +34,15 @@ pub fn move_email(
     let (current_folder, uid, message_id, settings) = {
         let conn = db.lock().map_err(|e| e.to_string())?;
 
+        // Scope the lookup to what this account can actually see. The row is
+        // fetched by id alone otherwise, which lets any caller holding an id
+        // mutate any message — reachable across mailboxes now that a shared
+        // login puts siblings in one id space, and reachable from MCP, where
+        // the caller is an external agent granted access to one account only.
+        if !is_visible(&conn, &account_id, &email_id)? {
+            return Err("Email not found".to_string());
+        }
+
         let (current_folder, message_id): (String, String) = conn
             .query_row(
                 "SELECT folder, COALESCE(message_id, '') FROM emails WHERE id = ?1",
@@ -50,7 +59,7 @@ pub fn move_email(
             )
             .ok();
 
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
+        let settings = sync_state::load_mail_settings(&conn, &crate::login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
 
         (current_folder, uid, message_id, settings)
@@ -142,6 +151,12 @@ pub fn delete_email(
     let (folder, uid, message_id, settings) = {
         let conn = db.lock().map_err(|e| e.to_string())?;
 
+        // Same scope guard as move_email — deleting is the more destructive of
+        // the two, so an unscoped id lookup here is the worse hole.
+        if !is_visible(&conn, &account_id, &email_id)? {
+            return Err("Email not found".to_string());
+        }
+
         let (folder, message_id): (String, String) = conn
             .query_row(
                 "SELECT folder, COALESCE(message_id, '') FROM emails WHERE id = ?1",
@@ -158,7 +173,7 @@ pub fn delete_email(
             )
             .ok();
 
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
+        let settings = sync_state::load_mail_settings(&conn, &crate::login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
 
         (folder, uid, message_id, settings)
@@ -280,7 +295,11 @@ pub async fn send_email(
 ) -> Result<(), String> {
     let (settings, from_email, from_name) = {
         let conn = db.lock().map_err(|e| e.to_string())?;
-        let settings = sync_state::load_mail_settings(&conn, account_id)
+        // SMTP credentials belong to the login; the From address below comes
+        // from the account. That split is what lets a mailbox send as its own
+        // address over a login it shares with a sibling.
+        let login = crate::login::resolve(&conn, account_id).map_err(|e| e.to_string())?;
+        let settings = sync_state::load_mail_settings(&conn, &login)
             .map_err(|e| e.to_string())?
             .ok_or("No mail settings configured")?;
 
@@ -410,8 +429,41 @@ pub struct EmailFull {
     pub is_read: bool,
 }
 
-/// Search an account's emails by a free-text query over subject/sender/preview/
-/// body. Returns up to `limit` most-recent matches as compact summaries.
+/// Whether `email_id` is within `account_id`'s view — same scope as [`get`],
+/// but against an already-held connection, so a caller holding the `db` lock
+/// can check without deadlocking on it.
+///
+/// Guards the mutating operations. They look their row up by id alone, and ids
+/// are UUIDs from a shared space: every account on one login draws from the
+/// same `emails` table, so an id belonging to a sibling mailbox would otherwise
+/// be perfectly usable.
+fn is_visible(conn: &Connection, account_id: &str, email_id: &str) -> Result<bool, String> {
+    let view = crate::login::view_of(conn, account_id).map_err(|e| e.to_string())?;
+    let login_id = view.login.as_str().to_string();
+
+    let sql = format!(
+        "SELECT 1 FROM emails WHERE id = ?1 AND account_id = ?2{}",
+        crate::login::mailbox_clause(view.mailbox.as_deref(), 3),
+    );
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&email_id, &login_id];
+    if let Some(addr) = view.mailbox.as_ref() {
+        params.push(addr);
+    }
+    Ok(conn
+        .query_row(&sql, params.as_slice(), |_| Ok(()))
+        .optional()
+        .map_err(|e| e.to_string())?
+        .is_some())
+}
+
+/// Search the emails **visible to an account** by a free-text query over
+/// subject/sender/preview/body. Returns up to `limit` most-recent matches.
+///
+/// Scoped exactly like the account's own message list: the login owns the data,
+/// and a mailbox account sees only mail for its address. External agents reach
+/// this through MCP, so without the scope a mailbox's agent could read its
+/// sibling's mail — and a mailbox account would find nothing at all, since its
+/// mail is keyed to the login rather than to it.
 #[allow(dead_code)]
 pub fn search(
     db: &Arc<Mutex<Connection>>,
@@ -420,16 +472,26 @@ pub fn search(
     limit: i64,
 ) -> Result<Vec<EmailSummary>, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
+    let view = crate::login::view_of(&conn, account_id).map_err(|e| e.to_string())?;
+    let login_id = view.login.as_str().to_string();
     let like = format!("%{}%", query.trim());
-    let mut stmt = conn.prepare(
+
+    let sql = format!(
         "SELECT id, from_name, from_email, subject, date, folder, substr(preview, 1, 200)
          FROM emails
          WHERE account_id = ?1
-           AND (subject LIKE ?2 OR from_name LIKE ?2 OR from_email LIKE ?2 OR preview LIKE ?2 OR body LIKE ?2)
+           AND (subject LIKE ?2 OR from_name LIKE ?2 OR from_email LIKE ?2 OR preview LIKE ?2 OR body LIKE ?2){}
          ORDER BY date DESC
          LIMIT ?3",
-    ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(rusqlite::params![account_id, like, limit], |row| {
+        crate::login::mailbox_clause(view.mailbox.as_deref(), 4),
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&login_id, &like, &limit];
+    if let Some(addr) = view.mailbox.as_ref() {
+        params.push(addr);
+    }
+    let rows = stmt.query_map(params.as_slice(), |row| {
         Ok(EmailSummary {
             id: row.get(0)?,
             from_name: row.get(1)?,
@@ -447,7 +509,12 @@ pub fn search(
     Ok(out)
 }
 
-/// Load a single email's full content for an account.
+/// Load a single email's full content, if it is visible to this account.
+///
+/// Scoped like [`search`]: `None` for a message that belongs to a sibling
+/// mailbox on the same login. Email ids are guessable UUIDs from a shared id
+/// space, so this check is what stops an external agent reading across
+/// mailboxes by id.
 #[allow(dead_code)]
 pub fn get(
     db: &Arc<Mutex<Connection>>,
@@ -455,10 +522,21 @@ pub fn get(
     email_id: &str,
 ) -> Result<Option<EmailFull>, String> {
     let conn = db.lock().map_err(|e| e.to_string())?;
-    conn.query_row(
+    let view = crate::login::view_of(&conn, account_id).map_err(|e| e.to_string())?;
+    let login_id = view.login.as_str().to_string();
+
+    let sql = format!(
         "SELECT id, from_name, from_email, subject, preview, body, folder, date, COALESCE(message_id,''), is_read
-         FROM emails WHERE id = ?1 AND account_id = ?2",
-        rusqlite::params![email_id, account_id],
+         FROM emails WHERE id = ?1 AND account_id = ?2{}",
+        crate::login::mailbox_clause(view.mailbox.as_deref(), 3),
+    );
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&email_id, &login_id];
+    if let Some(addr) = view.mailbox.as_ref() {
+        params.push(addr);
+    }
+    conn.query_row(
+        &sql,
+        params.as_slice(),
         |row| Ok(EmailFull {
             id: row.get(0)?,
             from_name: row.get(1)?,

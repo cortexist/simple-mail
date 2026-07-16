@@ -132,22 +132,40 @@ async fn classify_with(
     Ok(applied)
 }
 
-/// Select inbox emails for `account_id` that have no verdict yet, newest first.
+/// Select inbox emails **visible to `account_id`** that have no verdict yet,
+/// newest first.
+///
+/// Scoped to the account's view: classification is a per-account feature, so a
+/// mailbox's AI must judge only its own mail — not the whole login's. Without
+/// the scope this would also select nothing at all for a mailbox account, since
+/// mail is keyed to the login.
 fn select_candidates(conn: &Connection, account_id: &str, limit: i64) -> Result<Vec<Candidate>, String> {
-    let mut stmt = conn.prepare(
+    let view = crate::login::view_of(conn, account_id).map_err(|e| e.to_string())?;
+    let login_id = view.login.as_str().to_string();
+    let snippet = SNIPPET_CHARS as i64;
+
+    // No `emails e` alias: the mailbox predicate qualifies its columns as
+    // `emails.*`, which an alias would put out of scope.
+    let sql = format!(
         "SELECT id, from_name, from_email, subject,
                 substr(COALESCE(NULLIF(preview, ''), body), 1, ?3)
-         FROM emails e
+         FROM emails
          WHERE account_id = ?1
            AND folder = 'inbox'
            AND NOT EXISTS (
-               SELECT 1 FROM email_ai_classification c WHERE c.email_id = e.id
-           )
+               SELECT 1 FROM email_ai_classification c WHERE c.email_id = emails.id
+           ){}
          ORDER BY date DESC
          LIMIT ?2",
-    ).map_err(|e| e.to_string())?;
+        crate::login::mailbox_clause(view.mailbox.as_deref(), 4),
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&login_id, &limit, &snippet];
+    if let Some(addr) = view.mailbox.as_ref() {
+        params.push(addr);
+    }
     let rows = stmt.query_map(
-        rusqlite::params![account_id, limit, SNIPPET_CHARS as i64],
+        params.as_slice(),
         |row| Ok(Candidate {
             id: row.get(0)?,
             from_name: row.get(1)?,
@@ -384,18 +402,32 @@ fn find_reference_mail(
     seed_subject: &str,
 ) -> Result<Vec<ReferenceMail>, String> {
     let subject_like = format!("%{}%", normalize_subject(seed_subject));
-    let mut stmt = conn.prepare(
+    // Scoped to the account's view: a drafted reply must not quote context from
+    // a sibling mailbox that happens to share this login.
+    let view = crate::login::view_of(conn, account_id).map_err(|e| e.to_string())?;
+    let login_id = view.login.as_str().to_string();
+    let snippet = REFERENCE_SNIPPET as i64;
+    let cap = REFERENCE_CAP;
+
+    let sql = format!(
         "SELECT id, from_name, from_email, subject, date,
                 substr(COALESCE(NULLIF(preview, ''), body), 1, ?5)
          FROM emails
          WHERE account_id = ?1
            AND id != ?2
-           AND (from_email = ?3 OR subject LIKE ?4)
+           AND (from_email = ?3 OR subject LIKE ?4){}
          ORDER BY date DESC
          LIMIT ?6",
-    ).map_err(|e| e.to_string())?;
+        crate::login::mailbox_clause(view.mailbox.as_deref(), 7),
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut params: Vec<&dyn rusqlite::ToSql> =
+        vec![&login_id, &seed_id, &seed_from, &subject_like, &snippet, &cap];
+    if let Some(addr) = view.mailbox.as_ref() {
+        params.push(addr);
+    }
     let rows = stmt.query_map(
-        rusqlite::params![account_id, seed_id, seed_from, subject_like, REFERENCE_SNIPPET as i64, REFERENCE_CAP],
+        params.as_slice(),
         |row| {
             let from_name: String = row.get(1)?;
             let from_email: String = row.get(2)?;
@@ -707,7 +739,13 @@ mod tests {
     fn find_references_matches_sender_or_subject() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE emails (id TEXT PRIMARY KEY, account_id TEXT, from_name TEXT,
+            // Reads resolve account → login now, so the account must exist.
+            // is_mailbox = 0 keeps this test's original scope: the whole login.
+            "CREATE TABLE accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL,
+                 login_id TEXT NOT NULL, is_mailbox INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO accounts VALUES ('a','a@x','a',0);
+             INSERT INTO accounts VALUES ('b','b@x','b',0);
+             CREATE TABLE emails (id TEXT PRIMARY KEY, account_id TEXT, from_name TEXT,
                  from_email TEXT, subject TEXT, preview TEXT, body TEXT, date TEXT);
              -- same sender, different subject → matches via sender
              INSERT INTO emails VALUES ('r1','a','Bob','bob@x','Lunch?','p','b','2026-01-01');
@@ -734,7 +772,10 @@ mod tests {
     fn candidate_selection_skips_classified() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE emails (id TEXT PRIMARY KEY, account_id TEXT, from_name TEXT,
+            "CREATE TABLE accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL,
+                 login_id TEXT NOT NULL, is_mailbox INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO accounts VALUES ('a','a@x','a',0);
+             CREATE TABLE emails (id TEXT PRIMARY KEY, account_id TEXT, from_name TEXT,
                  from_email TEXT, subject TEXT, preview TEXT, body TEXT, folder TEXT, date TEXT);
              CREATE TABLE email_ai_classification (email_id TEXT PRIMARY KEY);
              INSERT INTO emails VALUES ('e1','a','N','n@x','s','p','b','inbox','2026-01-02');
@@ -746,5 +787,36 @@ mod tests {
         // e1 already classified, e3 not in inbox → only e2 remains.
         assert_eq!(cands.len(), 1);
         assert_eq!(cands[0].id, "e2");
+    }
+
+    /// A mailbox account's AI must classify only its own mail, not everything
+    /// on a login it shares with a sibling.
+    #[test]
+    fn candidate_selection_is_scoped_to_the_mailbox() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL,
+                 login_id TEXT NOT NULL, is_mailbox INTEGER NOT NULL DEFAULT 0);
+             -- two mailboxes sharing login 'work'
+             INSERT INTO accounts VALUES ('work','takashi@x','work',1);
+             INSERT INTO accounts VALUES ('eng','engineering@x','work',1);
+             CREATE TABLE emails (id TEXT PRIMARY KEY, account_id TEXT, from_name TEXT,
+                 from_email TEXT, subject TEXT, preview TEXT, body TEXT, folder TEXT,
+                 date TEXT, delivered_to TEXT);
+             CREATE TABLE email_recipients (email_id TEXT, name TEXT, email TEXT,
+                 initials TEXT, color TEXT, type TEXT);
+             CREATE TABLE email_ai_classification (email_id TEXT PRIMARY KEY);
+             -- one dataset under the login, addressed to different mailboxes
+             INSERT INTO emails VALUES ('m1','work','N','n@x','s','p','b','inbox','2026-01-01','takashi@x');
+             INSERT INTO emails VALUES ('m2','work','N','n@x','s','p','b','inbox','2026-01-02','engineering@x');",
+        ).unwrap();
+
+        let eng: Vec<String> = select_candidates(&conn, "eng", 10).unwrap()
+            .into_iter().map(|c| c.id).collect();
+        assert_eq!(eng, vec!["m2"], "engineering's AI saw a sibling's mail");
+
+        let work: Vec<String> = select_candidates(&conn, "work", 10).unwrap()
+            .into_iter().map(|c| c.id).collect();
+        assert_eq!(work, vec!["m1"], "takashi's AI saw a sibling's mail");
     }
 }

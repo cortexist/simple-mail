@@ -11,6 +11,11 @@
     fireRemoveDavUser,
     fireSetStorageQuota,
     fireSetAccountOfflineDownload,
+    fireSetAccountIsMailbox,
+    getLoginSiblings,
+    getAccountCollections,
+    fireSetAccountCollection,
+    type AssignableCollection,
     getAiConfig,
     fireSetAiConfig,
     fireTestAiConfig,
@@ -913,6 +918,74 @@
     } finally {
       offlineDownloadBusy = false;
     }
+  }
+
+  // ── Per-account mailbox filter ──
+  //
+  // Read straight off the account rather than a local copy: the backend echoes
+  // `settings:account-upserted` for every account on the login when this flips
+  // (one mailbox claiming an address changes what its siblings show), and the
+  // page routes those echoes back into `accounts`. Mirroring the flag locally
+  // would fight that.
+  let isMailboxEnabled = $derived(
+    accounts.find((a) => a.id === selectedAccountId)?.isMailbox ?? false
+  );
+
+  /** Addresses of other accounts on the same login — drives the shared-login notes. */
+  let loginSiblings = $state<string[]>([]);
+
+  $effect(() => {
+    const id = selectedAccountId;
+    if (!id) {
+      loginSiblings = [];
+      return;
+    }
+    let stale = false;
+    getLoginSiblings(id).then((s) => { if (!stale) loginSiblings = s; });
+    return () => { stale = true; };
+  });
+
+  async function toggleIsMailbox(accountId: string, next: boolean) {
+    fireSetAccountIsMailbox(accountId, next);
+  }
+
+  // ── Collection assignment (mailbox accounts only) ──
+  //
+  // Calendars and address books carry no address, so unlike mail they can't be
+  // split automatically — two mailboxes on one login discover the same ones.
+  // The user assigns them. Assigning nothing means "show them all", so this
+  // only ever narrows.
+  let calCollections = $state<AssignableCollection[]>([]);
+  let cardCollections = $state<AssignableCollection[]>([]);
+
+  $effect(() => {
+    const id = selectedAccountId;
+    // Re-read whenever the account's own state changes, so the ticks reflect
+    // the echo that set_account_collection just pushed back.
+    void accounts.find((a) => a.id === id)?.isMailbox;
+    if (!id) {
+      calCollections = [];
+      cardCollections = [];
+      return;
+    }
+    let stale = false;
+    getAccountCollections(id, 'caldav').then((c) => { if (!stale) calCollections = c; });
+    getAccountCollections(id, 'carddav').then((c) => { if (!stale) cardCollections = c; });
+    return () => { stale = true; };
+  });
+
+  function toggleCollection(
+    accountId: string,
+    kind: 'caldav' | 'carddav',
+    url: string,
+    next: boolean,
+  ) {
+    fireSetAccountCollection(accountId, kind, url, next);
+    // Reflect immediately; the echo re-reads the authoritative list.
+    const list = kind === 'caldav' ? calCollections : cardCollections;
+    const updated = list.map((c) => (c.url === url ? { ...c, assigned: next } : c));
+    if (kind === 'caldav') calCollections = updated;
+    else cardCollections = updated;
   }
 
   // ── AI settings (global config + per-account feature toggles) ──
@@ -1924,9 +1997,45 @@
             </div>
           </section>
 
+          <!-- Mailbox filter (per-account). Sits with identity rather than the
+               server sections: it answers "whose mail is this account?", not
+               "how do we connect?". Applied when mail is read, so toggling is
+               instant and needs no re-sync. -->
+          <section class="settings-section">
+            <h4 class="section-title">{t('settings.mailbox')}</h4>
+            <p class="dav-description">{t('settings.isMailboxDesc')}</p>
+            <div class="detail-form">
+              <div class="form-row toggle-row">
+                <button
+                  type="button"
+                  class="toggle-switch"
+                  class:on={isMailboxEnabled}
+                  aria-pressed={isMailboxEnabled}
+                  aria-label={t('settings.isMailbox')}
+                  onclick={() => selectedAccountId && toggleIsMailbox(selectedAccountId, !isMailboxEnabled)}
+                >
+                  <span class="toggle-knob"></span>
+                </button>
+                <span class="form-label toggle-label">{t('settings.isMailbox')}</span>
+              </div>
+              {#if loginSiblings.length > 0}
+                <div class="autodiscover-note">
+                  {t('settings.isMailboxSharedLogin', { emails: loginSiblings.join(', ') })}
+                </div>
+              {:else}
+                <div class="autodiscover-note">{t('settings.isMailboxOwnLogin')}</div>
+              {/if}
+            </div>
+          </section>
+
           <!-- Incoming Mail Server -->
           <section class="settings-section">
             <h4 class="section-title">{t('settings.incomingMailServer')}</h4>
+            {#if loginSiblings.length > 0}
+              <p class="dav-description">
+                {t('settings.sharedLoginWarning', { count: loginSiblings.length })}
+              </p>
+            {/if}
             <div class="detail-form">
               <label class="form-row">
                 <span class="form-label">{t('settings.protocol')}</span>
@@ -2113,6 +2222,31 @@
                   </button>
                 </div>
               </label>
+              {#if isMailboxEnabled && calCollections.length > 0}
+                <!-- Assigning none leaves the mailbox seeing all of them, so
+                     the ticks only ever narrow. -->
+                <div class="collection-assign">
+                  <span class="form-label">{t('settings.mailboxCalendars')}</span>
+                  {#each calCollections as col (col.url)}
+                    <div class="form-row toggle-row">
+                      <button
+                        type="button"
+                        class="toggle-switch"
+                        class:on={col.assigned}
+                        aria-pressed={col.assigned}
+                        aria-label={col.displayName || col.url}
+                        onclick={() => selectedAccountId && toggleCollection(selectedAccountId, 'caldav', col.url, !col.assigned)}
+                      >
+                        <span class="toggle-knob"></span>
+                      </button>
+                      <span class="form-label toggle-label">{col.displayName || col.url}</span>
+                    </div>
+                  {/each}
+                  {#if calCollections.every((c) => !c.assigned)}
+                    <div class="autodiscover-note">{t('settings.mailboxCollectionsNoneAssigned')}</div>
+                  {/if}
+                </div>
+              {/if}
             </div>
           </section>
 
@@ -2150,6 +2284,29 @@
                   </button>
                 </div>
               </label>
+              {#if isMailboxEnabled && cardCollections.length > 0}
+                <div class="collection-assign">
+                  <span class="form-label">{t('settings.mailboxAddressBooks')}</span>
+                  {#each cardCollections as col (col.url)}
+                    <div class="form-row toggle-row">
+                      <button
+                        type="button"
+                        class="toggle-switch"
+                        class:on={col.assigned}
+                        aria-pressed={col.assigned}
+                        aria-label={col.displayName || col.url}
+                        onclick={() => selectedAccountId && toggleCollection(selectedAccountId, 'carddav', col.url, !col.assigned)}
+                      >
+                        <span class="toggle-knob"></span>
+                      </button>
+                      <span class="form-label toggle-label">{col.displayName || col.url}</span>
+                    </div>
+                  {/each}
+                  {#if cardCollections.every((c) => !c.assigned)}
+                    <div class="autodiscover-note">{t('settings.mailboxCollectionsNoneAssigned')}</div>
+                  {/if}
+                </div>
+              {/if}
             </div>
           </section>
 
@@ -3154,6 +3311,15 @@
     color: var(--text-secondary);
     margin: 0 0 8px 0;
     line-height: 1.4;
+  }
+  /* Mailbox collection ticks — set off from the server fields above them. */
+  .collection-assign {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 4px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
   }
   .dav-status-row {
     display: flex;

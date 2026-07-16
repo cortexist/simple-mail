@@ -1041,7 +1041,13 @@ fn load_contacts_as_vcards(
     account_id: &str,
     filter_ids: Option<&[String]>,
 ) -> Vec<(String, String, String)> {
-    let contacts = crate::query_contacts(conn, account_id);
+    // The URL segment is a real account id, so an external client sees exactly
+    // the slice that account's own UI shows — a mailbox account's DAV endpoint
+    // must not expose its siblings' data.
+    let Ok(view) = crate::login::view_of(conn, account_id) else {
+        return Vec::new();
+    };
+    let contacts = crate::query_contacts(conn, &view);
     let mut results = Vec::new();
 
     for c in contacts {
@@ -1104,7 +1110,10 @@ fn load_events_as_ical(
     account_id: &str,
     filter_ids: Option<&[String]>,
 ) -> Vec<(String, String, String)> {
-    let events = crate::query_events(conn, account_id);
+    let Ok(view) = crate::login::view_of(conn, account_id) else {
+        return Vec::new();
+    };
+    let events = crate::query_events(conn, &view);
     let mut results = Vec::new();
 
     for e in events {

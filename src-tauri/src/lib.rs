@@ -1,4 +1,5 @@
 mod db;
+mod login;
 mod sync_state;
 mod crypto;
 mod identity;
@@ -255,6 +256,11 @@ pub struct Account {
     pub avatar_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+    /// The login this account is a view onto. The frontend groups its sync
+    /// loops by this so accounts sharing credentials fetch once, not once each.
+    pub login_id: String,
+    /// Whether this account filters to mail addressed to `email`.
+    pub is_mailbox: bool,
     pub folders: Vec<Folder>,
     pub emails: Vec<Email>,
     pub calendar_events: Vec<CalendarEvent>,
@@ -281,11 +287,41 @@ pub struct AppState {
     /// arrive out of order — e.g. quick star → unstar where the IMAP round
     /// trips complete in reverse.
     pub event_seq: AtomicU64,
+    /// Logins with a sync pass in flight. Two accounts sharing a login must
+    /// not fetch the same mailbox twice; presence of a key ⇒ a pass is running.
+    /// Mirrors the `offline_workers` pattern.
+    pub syncing_logins: Mutex<std::collections::HashSet<String>>,
 }
 
 impl AppState {
     pub fn next_seq(&self) -> u64 {
         self.event_seq.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
+/// Marks a login as syncing for as long as it is held, and clears it on drop
+/// so an early return or a `?` can't leave the login wedged.
+struct SyncGuard<'a> {
+    set: &'a Mutex<std::collections::HashSet<String>>,
+    login_id: String,
+}
+
+impl<'a> SyncGuard<'a> {
+    /// `None` when a pass over this login is already running.
+    fn acquire(set: &'a Mutex<std::collections::HashSet<String>>, login_id: &str) -> Option<Self> {
+        let mut guard = set.lock().ok()?;
+        if !guard.insert(login_id.to_string()) {
+            return None;
+        }
+        Some(SyncGuard { set, login_id: login_id.to_string() })
+    }
+}
+
+impl Drop for SyncGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.set.lock() {
+            guard.remove(&self.login_id);
+        }
     }
 }
 
@@ -324,15 +360,20 @@ fn get_all_accounts(state: tauri::State<'_, AppState>) -> Result<Vec<Account>, S
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
-        .map(|(id, name, email, initials, color, avatar_url, alias_raw)| {
+        .filter_map(|(id, name, email, initials, color, avatar_url, alias_raw)| {
             let alias = alias_raw.filter(|s| !s.is_empty());
-            let folders = query_folders(&conn, &id);
-            let emails = query_emails(&conn, &id);
-            let calendar_events = query_events(&conn, &id);
-            let calendar_categories = query_cal_categories(&conn, &id);
-            let contacts = query_contacts(&conn, &id);
+            // Each account is a view onto its login: same data underneath,
+            // narrowed to this address when it is a mailbox.
+            let view = login::view_of(&conn, &id)
+                .map_err(|e| log::error!("account {} has no resolvable login: {}", id, e))
+                .ok()?;
+            let folders = query_folders(&conn, &view.login);
+            let emails = query_emails(&conn, &view);
+            let calendar_events = query_events(&conn, &view);
+            let calendar_categories = query_cal_categories(&conn, &view);
+            let contacts = query_contacts(&conn, &view);
 
-            Account {
+            Some(Account {
                 id,
                 name,
                 email,
@@ -340,12 +381,14 @@ fn get_all_accounts(state: tauri::State<'_, AppState>) -> Result<Vec<Account>, S
                 color,
                 avatar_url,
                 alias,
+                login_id: view.login.to_string(),
+                is_mailbox: view.mailbox.is_some(),
                 folders,
                 emails,
                 calendar_events,
                 calendar_categories,
                 contacts,
-            }
+            })
         })
         .collect();
 
@@ -700,10 +743,17 @@ fn get_offline_download_status(
         .map(|v| v == "1")
         .unwrap_or(false);
 
+    // Counted per LOGIN, matching what the worker actually downloads: the body
+    // cache is shared by every account on the login. Passing the account id
+    // would report 0/0 for a mailbox account, whose mail is keyed to the login.
+    let login_id = login::resolve(&conn, &account_id)
+        .map(|l| l.as_str().to_string())
+        .unwrap_or_else(|_| account_id.clone());
+
     let total: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM emails WHERE account_id = ?1",
-            rusqlite::params![account_id],
+            rusqlite::params![login_id],
             |row| row.get(0),
         )
         .unwrap_or(0);
@@ -711,7 +761,7 @@ fn get_offline_download_status(
     let pending: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM emails WHERE account_id = ?1 AND body = ''",
-            rusqlite::params![account_id],
+            rusqlite::params![login_id],
             |row| row.get(0),
         )
         .unwrap_or(0);
@@ -929,19 +979,24 @@ fn load_account(conn: &Connection, id: &str) -> Option<Account> {
         },
     )
     .ok()
-    .map(|(id, name, email, initials, color, avatar_url, alias_raw)| Account {
-        id: id.clone(),
-        name,
-        email,
-        initials,
-        color,
-        avatar_url,
-        alias: alias_raw.filter(|s| !s.is_empty()),
-        folders: query_folders(conn, &id),
-        emails: query_emails(conn, &id),
-        calendar_events: query_events(conn, &id),
-        calendar_categories: query_cal_categories(conn, &id),
-        contacts: query_contacts(conn, &id),
+    .and_then(|(id, name, email, initials, color, avatar_url, alias_raw)| {
+        let view = login::view_of(conn, &id).ok()?;
+        Some(Account {
+            id: id.clone(),
+            name,
+            email,
+            initials,
+            color,
+            avatar_url,
+            alias: alias_raw.filter(|s| !s.is_empty()),
+            login_id: view.login.to_string(),
+            is_mailbox: view.mailbox.is_some(),
+            folders: query_folders(conn, &view.login),
+            emails: query_emails(conn, &view),
+            calendar_events: query_events(conn, &view),
+            calendar_categories: query_cal_categories(conn, &view),
+            contacts: query_contacts(conn, &view),
+        })
     })
 }
 
@@ -994,6 +1049,166 @@ fn update_account(
     Ok(())
 }
 
+/// Turn an account's mailbox filter on or off.
+///
+/// Cheap by construction: the filter is applied when mail is *read*, so this
+/// writes one flag — nothing re-syncs and no data is re-partitioned.
+///
+/// It does change what this account's **siblings** show, though. Mail that no
+/// mailbox on the login claims appears in all of them (so nothing silently
+/// vanishes), and this account claiming an address takes that mail out of the
+/// others' fail-open set. So the echo fans out to every account on the login;
+/// echoing only the toggled one would leave the siblings rendering stale lists.
+#[tauri::command]
+fn set_account_is_mailbox(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    is_mailbox: bool,
+) -> Result<(), String> {
+    let affected = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE accounts SET is_mailbox = ?2 WHERE id = ?1",
+            rusqlite::params![account_id, is_mailbox as i32],
+        )
+        .map_err(|e| e.to_string())?;
+
+        let lg = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+        let siblings = login::accounts_on(&conn, &lg).map_err(|e| e.to_string())?;
+        siblings.iter().filter_map(|id| load_account(&conn, id)).collect::<Vec<_>>()
+    };
+
+    for account in affected {
+        let seq = state.next_seq();
+        events::emit_settings_account_upserted(&app, events::SettingsAccountUpsertedEvent {
+            requested_id: account.id.clone(),
+            account,
+            seq,
+        });
+    }
+    Ok(())
+}
+
+/// One assignable CalDAV/CardDAV collection on an account's login.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignableCollection {
+    pub url: String,
+    pub display_name: String,
+    /// Whether this mailbox is scoped to it. When an account has assigned
+    /// nothing, everything reads as unassigned and it sees them all.
+    pub assigned: bool,
+}
+
+/// Every collection on the account's login, flagged with whether this account
+/// is scoped to it. Unfiltered on purpose — you can't assign what you can't see.
+#[tauri::command]
+fn get_account_collections(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    kind: String,
+) -> Result<Vec<AssignableCollection>, String> {
+    if kind != "caldav" && kind != "carddav" {
+        return Err(format!("unknown collection kind '{}'", kind));
+    }
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let lg = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+
+    let table = if kind == "caldav" { "caldav_collection_state" } else { "carddav_collection_state" };
+    let sql = format!(
+        "SELECT cs.collection_url, cs.display_name,
+                EXISTS (SELECT 1 FROM account_collections ac
+                        WHERE ac.account_id = ?2 AND ac.kind = ?3
+                          AND ac.collection_url = cs.collection_url)
+         FROM {} cs WHERE cs.account_id = ?1 ORDER BY cs.rowid",
+        table
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![lg.as_str(), account_id, kind], |row| {
+            Ok(AssignableCollection {
+                url: row.get(0)?,
+                display_name: row.get(1)?,
+                assigned: row.get::<_, i32>(2)? != 0,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// Scope a mailbox to a collection, or unscope it.
+///
+/// Assignment is per **account**, not per login — that is the whole point, and
+/// it's why `account_collections.account_id` is a real account id rather than a
+/// login id like most `account_id` columns.
+#[tauri::command]
+fn set_account_collection(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    kind: String,
+    collection_url: String,
+    assigned: bool,
+) -> Result<(), String> {
+    if kind != "caldav" && kind != "carddav" {
+        return Err(format!("unknown collection kind '{}'", kind));
+    }
+    let account = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        if assigned {
+            conn.execute(
+                "INSERT OR IGNORE INTO account_collections (account_id, kind, collection_url)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![account_id, kind, collection_url],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "DELETE FROM account_collections
+                 WHERE account_id = ?1 AND kind = ?2 AND collection_url = ?3",
+                rusqlite::params![account_id, kind, collection_url],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        load_account(&conn, &account_id)
+    };
+
+    if let Some(account) = account {
+        let seq = state.next_seq();
+        events::emit_settings_account_upserted(&app, events::SettingsAccountUpsertedEvent {
+            requested_id: account_id,
+            account,
+            seq,
+        });
+    }
+    Ok(())
+}
+
+/// The other accounts sharing this account's login, so the UI can warn that
+/// credentials are shared before an edit writes through to all of them.
+#[tauri::command]
+fn get_login_siblings(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+) -> Result<Vec<String>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let lg = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+    let ids = login::accounts_on(&conn, &lg).map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    for id in ids.iter().filter(|i| **i != account_id) {
+        if let Ok(email) = conn.query_row(
+            "SELECT email FROM accounts WHERE id = ?1",
+            rusqlite::params![id],
+            |r| r.get::<_, String>(0),
+        ) {
+            out.push(email);
+        }
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 fn add_account(
     app: tauri::AppHandle,
@@ -1010,8 +1225,19 @@ fn add_account(
     let next_position: i64 = conn
         .query_row("SELECT COALESCE(MAX(position), 0) + 1 FROM accounts", [], |r| r.get(0))
         .unwrap_or(1);
+
+    // A new account starts on a private login of its own, id-matched to the
+    // account so the data it syncs keys to the same value either way. If the
+    // user later enters credentials that match an existing login,
+    // `save_mail_settings` merges it in and drops this one.
     conn.execute(
-        "INSERT INTO accounts (id, name, email, initials, color, avatar_url, alias, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT OR IGNORE INTO logins (id, created_at) VALUES (?1, datetime('now'))",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "INSERT INTO accounts (id, name, email, initials, color, avatar_url, alias, position, login_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?1)",
         rusqlite::params![id, name, email, initials, color, avatar_url, alias.unwrap_or_default(), next_position],
     )
     .map_err(|e| e.to_string())?;
@@ -1060,6 +1286,9 @@ fn add_account(
     Ok(())
 }
 
+/// Remove an account (a *view*). Its login's data only goes with it when no
+/// other account is still a view onto that login — otherwise the siblings
+/// would lose the mail they share.
 #[tauri::command]
 fn delete_account(
     app: tauri::AppHandle,
@@ -1067,15 +1296,40 @@ fn delete_account(
     id: String,
 ) -> Result<(), String> {
     {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;").map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM accounts WHERE id = ?1", rusqlite::params![id])
-            .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM folders WHERE account_id = ?1", rusqlite::params![id]).ok();
-        conn.execute("DELETE FROM contacts WHERE account_id = ?1", rusqlite::params![id]).ok();
-        conn.execute("DELETE FROM emails WHERE account_id = ?1", rusqlite::params![id]).ok();
-        conn.execute("DELETE FROM calendar_categories WHERE account_id = ?1", rusqlite::params![id]).ok();
-        conn.execute("DELETE FROM calendar_events WHERE account_id = ?1", rusqlite::params![id]).ok();
+        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let lg = login::resolve(&tx, &id).map_err(|e| e.to_string())?;
+        let heir = login::heir_for(&tx, &lg, &id).map_err(|e| e.to_string())?;
+
+        match heir {
+            // Siblings remain — their data must survive.
+            Some(heir) => {
+                // If this account anchors the login, hand the data over BEFORE
+                // deleting its row. Foreign keys are ON app-wide, so the
+                // cascade from `accounts` would otherwise take every email on
+                // the login with it — and any row left pointing at a deleted
+                // account would fail the FK check on the next sync insert.
+                // After repointing, nothing login-scoped references this id and
+                // the cascade can only reach account-scoped rows, which is
+                // exactly what should go.
+                if lg.as_str() == id {
+                    login::repoint(&tx, &lg, &login::LoginId::new_unchecked(heir.clone()))
+                        .map_err(|e| e.to_string())?;
+                    log::info!("login {} re-anchored on {} before removing {}", lg, heir, id);
+                }
+                tx.execute("DELETE FROM accounts WHERE id = ?1", rusqlite::params![id])
+                    .map_err(|e| e.to_string())?;
+            }
+            // Last account on the login — the data goes with it. login.id == id
+            // here, so the cascade reaches every login-scoped table for us.
+            None => {
+                tx.execute("DELETE FROM logins WHERE id = ?1", rusqlite::params![lg.as_str()]).ok();
+                tx.execute("DELETE FROM accounts WHERE id = ?1", rusqlite::params![id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
     }
     let seq = state.next_seq();
     events::emit_settings_account_removed(&app, &id, seq);
@@ -1131,7 +1385,7 @@ fn update_email_read(
             rusqlite::params![email_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).ok();
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
+        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         (uid_folder.as_ref().map(|(u, _)| *u), uid_folder.map(|(_, f)| f), settings)
     };
@@ -1207,7 +1461,7 @@ fn update_email_starred(
             rusqlite::params![email_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).ok();
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
+        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         (uid_folder.as_ref().map(|(u, _)| *u), uid_folder.map(|(_, f)| f), settings)
     };
@@ -1296,7 +1550,7 @@ fn update_email_replied(
             rusqlite::params![email_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).ok();
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
+        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         (uid_folder.as_ref().map(|(u, _)| *u), uid_folder.map(|(_, f)| f), settings)
     };
@@ -1402,6 +1656,15 @@ fn update_email_focused(
 // ── Server settings commands ────────────────────────────
 
 #[tauri::command]
+/// Save incoming/outgoing server settings for the account's **login**.
+///
+/// Credentials belong to the login, not the account, so this writes through to
+/// every account sharing it — the UI warns when more than one does.
+///
+/// If the saved credentials turn out to match a *different* login, the account
+/// is merged onto that login rather than syncing a second copy of the same
+/// server account. That is how a mailbox gets added: create an account for
+/// `engineering@`, enter the same credentials as `takashi@`, and it attaches.
 fn save_mail_settings(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -1410,7 +1673,17 @@ fn save_mail_settings(
 ) -> Result<(), String> {
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::save_mail_settings(&conn, &account_id, &settings).map_err(|e| e.to_string())?;
+        let login = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+        sync_state::save_mail_settings(&conn, &login, &settings).map_err(|e| e.to_string())?;
+
+        let (attached, moved) = login::attach_to_matching(&conn, &account_id, &settings)
+            .map_err(|e| e.to_string())?;
+        if moved {
+            log::info!(
+                "account {} attached to existing login {} — sharing its synced data",
+                account_id, attached
+            );
+        }
     }
     let seq = state.next_seq();
     events::emit_settings_mail_server_saved(&app, events::SettingsMailServerSavedEvent {
@@ -1427,7 +1700,8 @@ fn load_mail_settings(
     account_id: String,
 ) -> Result<Option<sync_state::MailServerSettings>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    sync_state::load_mail_settings(&conn, &account_id).map_err(|e| e.to_string())
+    let login = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+    sync_state::load_mail_settings(&conn, &login).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1439,7 +1713,8 @@ fn save_caldav_settings(
 ) -> Result<(), String> {
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::save_caldav_settings(&conn, &account_id, &settings).map_err(|e| e.to_string())?;
+        let login = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+        sync_state::save_caldav_settings(&conn, &login, &settings).map_err(|e| e.to_string())?;
     }
     let seq = state.next_seq();
     events::emit_settings_caldav_saved(&app, events::SettingsDavSavedEvent {
@@ -1456,7 +1731,8 @@ fn load_caldav_settings(
     account_id: String,
 ) -> Result<Option<sync_state::DavSettings>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    sync_state::load_caldav_settings(&conn, &account_id).map_err(|e| e.to_string())
+    let login = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+    sync_state::load_caldav_settings(&conn, &login).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1468,7 +1744,8 @@ fn save_carddav_settings(
 ) -> Result<(), String> {
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::save_carddav_settings(&conn, &account_id, &settings).map_err(|e| e.to_string())?;
+        let login = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+        sync_state::save_carddav_settings(&conn, &login, &settings).map_err(|e| e.to_string())?;
     }
     let seq = state.next_seq();
     events::emit_settings_carddav_saved(&app, events::SettingsDavSavedEvent {
@@ -1485,7 +1762,8 @@ fn load_carddav_settings(
     account_id: String,
 ) -> Result<Option<sync_state::DavSettings>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    sync_state::load_carddav_settings(&conn, &account_id).map_err(|e| e.to_string())
+    let login = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+    sync_state::load_carddav_settings(&conn, &login).map_err(|e| e.to_string())
 }
 
 // ── IMAP sync command ───────────────────────────────────
@@ -1536,6 +1814,44 @@ async fn sync_mail(
 ) -> Result<MailSyncResult, String> {
     let seq = state.next_seq();
     let event_account_id = account_id.clone();
+
+    // Sync is per-LOGIN, not per-account. Several accounts can be views onto
+    // one set of credentials; their mail is fetched once and stored once.
+    //
+    // `account_id` is deliberately rebound to the login id for the whole body
+    // below, because that is the value every `account_id` COLUMN in storage
+    // holds (see the db module header). Rebinding once, rather than renaming
+    // ~40 uses, means a missed one is impossible — and a missed one would be
+    // invisible in testing, since login.id == account.id for any unshared
+    // login. The requesting account survives as `event_account_id`, which the
+    // echoes below use.
+    let account_id: String = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        login::resolve(&conn, &account_id)
+            .map_err(|e| e.to_string())?
+            .to_string()
+    };
+
+    // Collapse a concurrent second pass over the same login. The frontend
+    // already loops unique logins, which handles the sequential case; this
+    // covers stragglers like fireSyncMail and a manual refresh landing at once.
+    let _in_flight = match SyncGuard::acquire(&state.syncing_logins, &account_id) {
+        Some(g) => g,
+        None => {
+            log::info!("sync_mail: login {} already syncing; skipping duplicate pass", account_id);
+            events::emit_mail_sync_completed(&app, events::MailSyncCompletedEvent {
+                account_id: event_account_id,
+                ok: true,
+                new_count: 0,
+                deleted_count: 0,
+                flag_updates: 0,
+                errors: Vec::new(),
+                seq,
+            });
+            return Ok(MailSyncResult { new_count: 0, deleted_count: 0, flag_updates: 0, errors: Vec::new() });
+        }
+    };
+
     // Wrap the existing IMAP sync logic so we can capture the result and emit
     // `mail:sync-completed` before returning — frontend treats the command as
     // fire-and-forget and reacts to the event.
@@ -1543,7 +1859,7 @@ async fn sync_mail(
     // Load settings from DB (need to clone out because we can't hold the lock across await)
     let (settings, folders_to_sync) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
+        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "No mail server settings configured for this account".to_string())?;
 
@@ -1703,8 +2019,8 @@ async fn sync_mail(
                     "INSERT OR IGNORE INTO emails
                      (id, account_id, from_name, from_email, from_initials, from_color,
                       subject, preview, body, date, is_read, is_starred, is_replied, has_attachment, folder, is_pinned,
-                      reply_to, message_id, auth_results)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,0,?16,?17,?18)",
+                      reply_to, message_id, auth_results, delivered_to)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,0,?16,?17,?18,?19)",
                     rusqlite::params![
                         email_id, account_id,
                         env.from_name, env.from_email, initials, color,
@@ -1714,6 +2030,11 @@ async fn sync_mail(
                         env.is_read as i32, env.is_starred as i32, env.is_replied as i32,
                         env.has_attachment as i32, local_id,
                         env.reply_to, env.message_id, env.auth_results,
+                        // NULL rather than '' when the server sends no delivery
+                        // header: the mailbox filter treats unknown delivery as
+                        // "don't hide", but a known-and-unmatched address as
+                        // "not mine". Conflating them would hide mail.
+                        Some(env.delivered_to.as_str()).filter(|s| !s.is_empty()),
                     ],
                 ).ok();
 
@@ -1986,7 +2307,7 @@ fn empty_folder(
         let email_ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
         let uids: Vec<u32> = rows.iter().filter_map(|(_, uid)| *uid).collect();
 
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
+        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
 
         (email_ids, uids, settings)
@@ -2129,7 +2450,7 @@ async fn fetch_email_body(
     // Need to fetch from IMAP
     let (settings, uid, imap_folder) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
+        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?
             .ok_or("No mail settings")?;
 
@@ -2261,7 +2582,7 @@ async fn fetch_previews_around(
     let (settings, anchor_folder, anchor_date, targets) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
 
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
+        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?
             .ok_or("No mail settings")?;
 
@@ -2430,7 +2751,7 @@ async fn open_attachment(
     // Resolve UID + IMAP folder from DB
     let (settings, uid, imap_folder) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
+        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?
             .ok_or("No mail settings")?;
         let row: Option<(u32, String)> = conn
@@ -2492,7 +2813,7 @@ async fn save_attachment(
     // Resolve UID + IMAP folder from DB
     let (settings, uid, imap_folder) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
+        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?
             .ok_or("No mail settings")?;
         let row: Option<(u32, String)> = conn
@@ -2556,7 +2877,7 @@ async fn flush_outbox(
 ) -> Result<usize, String> {
     let (settings, from_email, from_name) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let settings = sync_state::load_mail_settings(&conn, &account_id)
+        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?
             .ok_or("No mail settings")?;
         let (name, email_addr): (String, String) = conn
@@ -2692,6 +3013,7 @@ async fn test_carddav_connection(url: String, username: String, password: String
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 struct CalSyncResult {
     new_count: usize,
     updated_count: usize,
@@ -2706,11 +3028,25 @@ async fn sync_calendars(
 ) -> Result<CalSyncResult, String> {
     let seq = state.next_seq();
     let event_account_id = account_id.clone();
+
+    // Per-login, like sync_mail. This is the biggest win of the three: today
+    // each account re-runs the full CalDAV PROPFIND discovery waterfall, so two
+    // accounts on one login discovered the same calendars twice, every sync.
+    // `account_id` is rebound to the login id for the body — see sync_mail.
+    let account_id: String = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        login::resolve(&conn, &account_id).map_err(|e| e.to_string())?.to_string()
+    };
+    let _in_flight = match SyncGuard::acquire(&state.syncing_logins, &format!("caldav:{}", account_id)) {
+        Some(g) => g,
+        None => return Ok(CalSyncResult::default()),
+    };
+
     let result: Result<CalSyncResult, String> = async {
-    log::info!("sync_calendars: starting for account {}", account_id);
+    log::info!("sync_calendars: starting for login {}", account_id);
     let dav_settings = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::load_caldav_settings(&conn, &account_id)
+        sync_state::load_caldav_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?
             .ok_or("No CalDAV settings configured")?
     };
@@ -3136,6 +3472,7 @@ async fn sync_calendars(
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 struct ContactSyncResult {
     new_count: usize,
     updated_count: usize,
@@ -3150,8 +3487,21 @@ async fn sync_contacts(
 ) -> Result<ContactSyncResult, String> {
     let seq = state.next_seq();
     let event_account_id = account_id.clone();
+
+    // Per-login, like sync_mail: CardDAV discovery and address-book sync run
+    // once for credentials shared by several accounts. `account_id` is rebound
+    // to the login id for the body — see sync_mail for why.
+    let account_id: String = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        login::resolve(&conn, &account_id).map_err(|e| e.to_string())?.to_string()
+    };
+    let _in_flight = match SyncGuard::acquire(&state.syncing_logins, &format!("carddav:{}", account_id)) {
+        Some(g) => g,
+        None => return Ok(ContactSyncResult::default()),
+    };
+
     let result: Result<ContactSyncResult, String> = async {
-    log::info!("sync_contacts: starting for account {}", account_id);
+    log::info!("sync_contacts: starting for login {}", account_id);
 
     // ── Cleanup: fix stale sync state and duplicates ──────────────────────
     {
@@ -3224,7 +3574,7 @@ async fn sync_contacts(
 
     let dav_settings = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::load_carddav_settings(&conn, &account_id)
+        sync_state::load_carddav_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?
             .ok_or("No CardDAV settings configured")?
     };
@@ -3613,7 +3963,7 @@ async fn save_calendar_event(
     // Load CalDAV settings (optional — events can be saved locally without CalDAV)
     let dav_settings = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::load_caldav_settings(&conn, &account_id)
+        sync_state::load_caldav_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?
     };
 
@@ -3767,7 +4117,7 @@ async fn save_calendar_event(
     if !attendees.is_empty() {
         let smtp_info = {
             let conn = state.db.lock().map_err(|e| e.to_string())?;
-            let settings = sync_state::load_mail_settings(&conn, &account_id).ok().flatten();
+            let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?).ok().flatten();
             let from_email: Option<String> = conn.query_row(
                 "SELECT email FROM accounts WHERE id = ?1",
                 rusqlite::params![account_id],
@@ -3824,7 +4174,9 @@ async fn save_calendar_event(
     if let Ok(canonical_id) = &result {
         let event_opt: Option<CalendarEvent> = {
             if let Ok(conn) = state.db.lock() {
-                query_events(&conn, &event_account_id).into_iter().find(|e| e.id == *canonical_id)
+                login::view_of(&conn, &event_account_id)
+                    .ok()
+                    .and_then(|v| query_events(&conn, &v).into_iter().find(|e| e.id == *canonical_id))
             } else {
                 None
             }
@@ -3855,7 +4207,7 @@ async fn delete_calendar_event(
     // Attempt CalDAV server delete if settings + resource state are available (non-fatal)
     let caldav_info: Option<(sync_state::DavSettings, String, String)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let settings = sync_state::load_caldav_settings(&conn, &account_id)
+        let settings = sync_state::load_caldav_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .ok()
             .flatten();
         let resource = settings.as_ref().and_then(|_| {
@@ -3931,7 +4283,7 @@ async fn save_contact_entry(
     let result: Result<String, String> = async {
     let dav_settings = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::load_carddav_settings(&conn, &account_id)
+        sync_state::load_carddav_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?
             .ok_or("No CardDAV settings configured")?
     };
@@ -4072,7 +4424,9 @@ async fn save_contact_entry(
     if let Ok(canonical_id) = &result {
         let contact_opt: Option<FullContact> = {
             if let Ok(conn) = state.db.lock() {
-                query_contacts(&conn, &event_account_id).into_iter().find(|c| c.id == *canonical_id)
+                login::view_of(&conn, &event_account_id)
+                    .ok()
+                    .and_then(|v| query_contacts(&conn, &v).into_iter().find(|c| c.id == *canonical_id))
             } else {
                 None
             }
@@ -4211,7 +4565,7 @@ async fn delete_contact_entry(
     let result: Result<(), String> = async {
     let dav_settings = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::load_carddav_settings(&conn, &account_id)
+        sync_state::load_carddav_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?
             .ok_or("No CardDAV settings configured")?
     };
@@ -4520,11 +4874,14 @@ fn make_avatar_color(email: &str) -> String {
 
 // ── Query helpers ───────────────────────────────────────
 
-fn query_folders(conn: &Connection, account_id: &str) -> Vec<Folder> {
+/// Folders belong to the login — mailboxes on one login share an IMAP folder
+/// tree. Their unread badges still differ, because those are derived from the
+/// filtered `emails` array, not from here.
+fn query_folders(conn: &Connection, login: &login::LoginId) -> Vec<Folder> {
     let mut stmt = conn
         .prepare("SELECT id, name, icon, is_favorite FROM folders WHERE account_id = ?1 ORDER BY rowid")
         .unwrap();
-    stmt.query_map(rusqlite::params![account_id], |row| {
+    stmt.query_map(rusqlite::params![login.as_str()], |row| {
         Ok(Folder {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -4537,10 +4894,19 @@ fn query_folders(conn: &Connection, account_id: &str) -> Vec<Folder> {
     .collect()
 }
 
-fn query_emails(conn: &Connection, account_id: &str) -> Vec<Email> {
+/// Mail visible to one account.
+///
+/// This is the **only** path that populates `Account.emails`, which is why the
+/// mailbox filter lives here: the message list, reading pane and unread badges
+/// all derive from that array, so filtering once covers them all.
+fn query_emails(conn: &Connection, view: &login::View) -> Vec<Email> {
+    let login_id = view.login.as_str();
+
     // Build a lookup of contact photos by email address (lowercased).
     // Includes both the primary contacts.email and every entry in contact_emails,
     // so a sender matching any of a contact's addresses resolves the photo.
+    // Not mailbox-filtered: a photo is just a rendering detail, and the
+    // login's whole address book is fair game for resolving one.
     let contact_photos: std::collections::HashMap<String, String> = {
         let mut stmt = conn
             .prepare(
@@ -4552,7 +4918,7 @@ fn query_emails(conn: &Connection, account_id: &str) -> Vec<Email> {
                  WHERE c.account_id = ?1 AND c.photo_url IS NOT NULL AND c.photo_url != ''",
             )
             .unwrap();
-        stmt.query_map(rusqlite::params![account_id], |row| {
+        stmt.query_map(rusqlite::params![login_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .unwrap()
@@ -4560,17 +4926,18 @@ fn query_emails(conn: &Connection, account_id: &str) -> Vec<Email> {
         .collect()
     };
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, from_name, from_email, from_initials, from_color, subject, preview, body, date,
-                    is_read, is_starred, has_attachment, folder, is_pinned, is_focused,
-                    COALESCE(reply_to, ''), COALESCE(message_id, ''), COALESCE(auth_results, ''),
-                    is_replied, replied_at
-             FROM emails WHERE account_id = ?1 ORDER BY is_pinned DESC, date DESC",
-        )
-        .unwrap();
+    let sql = format!(
+        "SELECT id, from_name, from_email, from_initials, from_color, subject, preview, body, date,
+                is_read, is_starred, has_attachment, folder, is_pinned, is_focused,
+                COALESCE(reply_to, ''), COALESCE(message_id, ''), COALESCE(auth_results, ''),
+                is_replied, replied_at
+         FROM emails WHERE account_id = ?1{}
+         ORDER BY is_pinned DESC, date DESC",
+        login::mailbox_clause(view.mailbox.as_deref(), 2),
+    );
+    let mut stmt = conn.prepare(&sql).unwrap();
 
-    stmt.query_map(rusqlite::params![account_id], |row| {
+    stmt.query_map(view.params().as_slice(), |row| {
         let email_id: String = row.get(0)?;
         Ok((email_id, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
             row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
@@ -4925,8 +5292,11 @@ fn search_recipients(
     Ok(results)
 }
 
-pub fn query_contacts(conn: &Connection, account_id: &str) -> Vec<FullContact> {
-    let mut stmt = match conn.prepare(
+pub fn query_contacts(conn: &Connection, view: &login::View) -> Vec<FullContact> {
+    // `contacts` carries no collection, so the assignment filter rides the
+    // existing carddav_resource_state join. Locally-created contacts have no
+    // such row (NULL) and stay visible to every view on the login.
+    let sql = format!(
         "SELECT c.id, c.name, c.email, c.initials, c.color, c.phone, c.mobile,
                 c.job_title, c.department, c.organization, c.address, c.birthday, c.notes,
                 c.is_favorite, c.photo_url,
@@ -4935,9 +5305,11 @@ pub fn query_contacts(conn: &Connection, account_id: &str) -> Vec<FullContact> {
          FROM contacts c
          LEFT JOIN carddav_resource_state rs ON rs.contact_id = c.id AND rs.account_id = c.account_id
          LEFT JOIN carddav_collection_state cs ON cs.collection_url = rs.collection_url AND cs.account_id = c.account_id
-         WHERE c.account_id = ?1
+         WHERE c.account_id = ?1{}
          ORDER BY c.name",
-    ) { Ok(s) => s, Err(_) => return Vec::new() };
+        login::collection_clause_keep_local(view, "carddav", "rs.collection_url", 2),
+    );
+    let mut stmt = match conn.prepare(&sql) { Ok(s) => s, Err(_) => return Vec::new() };
 
     struct Row {
         id: String,
@@ -4964,7 +5336,7 @@ pub fn query_contacts(conn: &Connection, account_id: &str) -> Vec<FullContact> {
         rev: Option<String>,
     }
 
-    let rows: Vec<Row> = stmt.query_map(rusqlite::params![account_id], |row| {
+    let rows: Vec<Row> = stmt.query_map(view.collection_params().as_slice(), |row| {
         Ok(Row {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -5106,18 +5478,18 @@ fn query_contact_addresses(conn: &Connection, contact_id: &str, legacy: &Option<
     }
 }
 
-fn query_cal_categories(conn: &Connection, account_id: &str) -> Vec<CalendarCategory> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT cs.collection_url, cs.display_name, cs.color, cs.visible, cs.calendar_group
-             FROM caldav_collection_state cs
-             WHERE cs.account_id = ?1
-             ORDER BY
-               CASE cs.calendar_group WHEN 'my' THEN 0 ELSE 1 END,
-               cs.rowid"
-        )
-        .unwrap();
-    stmt.query_map(rusqlite::params![account_id], |row| {
+fn query_cal_categories(conn: &Connection, view: &login::View) -> Vec<CalendarCategory> {
+    let sql = format!(
+        "SELECT cs.collection_url, cs.display_name, cs.color, cs.visible, cs.calendar_group
+         FROM caldav_collection_state cs
+         WHERE cs.account_id = ?1{}
+         ORDER BY
+           CASE cs.calendar_group WHEN 'my' THEN 0 ELSE 1 END,
+           cs.rowid",
+        login::collection_clause(view, "caldav", "cs.collection_url", 2),
+    );
+    let mut stmt = conn.prepare(&sql).unwrap();
+    stmt.query_map(view.collection_params().as_slice(), |row| {
         Ok(CalendarCategory {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -5131,22 +5503,24 @@ fn query_cal_categories(conn: &Connection, account_id: &str) -> Vec<CalendarCate
     .collect()
 }
 
-pub fn query_events(conn: &Connection, account_id: &str) -> Vec<CalendarEvent> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT e.id, e.title, e.start, e.end,
-                    COALESCE(cs.color, e.color) AS color,
-                    e.location, e.description,
-                    e.is_all_day, e.calendar_id, e.is_online_meeting,
-                    COALESCE(cs.display_name, e.calendar_id) AS calendar_name,
-                    e.rrule, e.exdates, e.alert_minutes, e.meeting_url
-             FROM calendar_events e
-             LEFT JOIN caldav_collection_state cs
-               ON cs.account_id = e.account_id AND cs.collection_url = e.calendar_id
-             WHERE e.account_id = ?1 ORDER BY e.start",
-        )
-        .unwrap();
-    stmt.query_map(rusqlite::params![account_id], |row| {
+pub fn query_events(conn: &Connection, view: &login::View) -> Vec<CalendarEvent> {
+    // The LEFT JOIN needs no change: both sides of `cs.account_id =
+    // e.account_id` are login ids.
+    let sql = format!(
+        "SELECT e.id, e.title, e.start, e.end,
+                COALESCE(cs.color, e.color) AS color,
+                e.location, e.description,
+                e.is_all_day, e.calendar_id, e.is_online_meeting,
+                COALESCE(cs.display_name, e.calendar_id) AS calendar_name,
+                e.rrule, e.exdates, e.alert_minutes, e.meeting_url
+         FROM calendar_events e
+         LEFT JOIN caldav_collection_state cs
+           ON cs.account_id = e.account_id AND cs.collection_url = e.calendar_id
+         WHERE e.account_id = ?1{} ORDER BY e.start",
+        login::collection_clause(view, "caldav", "e.calendar_id", 2),
+    );
+    let mut stmt = conn.prepare(&sql).unwrap();
+    stmt.query_map(view.collection_params().as_slice(), |row| {
         let event_id: String = row.get(0)?;
         Ok((event_id, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
             row.get(5)?, row.get(6)?, row.get::<_, i32>(7)?, row.get(8)?,
@@ -5537,6 +5911,7 @@ pub fn run() {
                 storage_dir: storage_dir.clone(),
                 offline_workers: Mutex::new(std::collections::HashMap::new()),
                 event_seq: AtomicU64::new(0),
+                syncing_logins: Mutex::new(std::collections::HashSet::new()),
             });
 
             // Resume offline-download workers for any accounts that had the
@@ -5555,6 +5930,10 @@ pub fn run() {
             set_account_offline_download,
             get_offline_download_status,
             update_account,
+            set_account_is_mailbox,
+            get_login_siblings,
+            get_account_collections,
+            set_account_collection,
             add_account,
             delete_account,
             set_account_positions,

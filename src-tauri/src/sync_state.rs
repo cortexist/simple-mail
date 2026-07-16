@@ -173,7 +173,7 @@ pub struct MailServerSettings {
 
 fn default_sync_interval() -> i32 { 5 }
 
-pub fn save_mail_settings(conn: &Connection, account_id: &str, s: &MailServerSettings) -> Result<()> {
+pub fn save_mail_settings(conn: &Connection, account_id: &crate::login::LoginId, s: &MailServerSettings) -> Result<()> {
     let enc_incoming = crypto::encrypt_password(&s.incoming_password)
         .map_err(crypto_err)?;
     let enc_smtp = crypto::encrypt_password(&s.smtp_password)
@@ -191,7 +191,7 @@ pub fn save_mail_settings(conn: &Connection, account_id: &str, s: &MailServerSet
     Ok(())
 }
 
-pub fn load_mail_settings(conn: &Connection, account_id: &str) -> Result<Option<MailServerSettings>> {
+pub fn load_mail_settings(conn: &Connection, account_id: &crate::login::LoginId) -> Result<Option<MailServerSettings>> {
     let mut stmt = conn.prepare(
         "SELECT protocol, incoming_server, incoming_port, incoming_username, incoming_password, incoming_security,
                 smtp_server, smtp_port, smtp_username, smtp_password, smtp_security, sync_interval_minutes
@@ -229,7 +229,7 @@ pub struct DavSettings {
     pub password: String,
 }
 
-pub fn save_caldav_settings(conn: &Connection, account_id: &str, s: &DavSettings) -> Result<()> {
+pub fn save_caldav_settings(conn: &Connection, account_id: &crate::login::LoginId, s: &DavSettings) -> Result<()> {
     let enc_pw = crypto::encrypt_password(&s.password).map_err(crypto_err)?;
     conn.execute(
         "INSERT OR REPLACE INTO caldav_settings (account_id, url, username, password) VALUES (?1,?2,?3,?4)",
@@ -238,7 +238,7 @@ pub fn save_caldav_settings(conn: &Connection, account_id: &str, s: &DavSettings
     Ok(())
 }
 
-pub fn load_caldav_settings(conn: &Connection, account_id: &str) -> Result<Option<DavSettings>> {
+pub fn load_caldav_settings(conn: &Connection, account_id: &crate::login::LoginId) -> Result<Option<DavSettings>> {
     let mut stmt = conn.prepare("SELECT url, username, password FROM caldav_settings WHERE account_id = ?1")?;
     let mut rows = stmt.query(params![account_id])?;
     if let Some(row) = rows.next()? {
@@ -253,7 +253,7 @@ pub fn load_caldav_settings(conn: &Connection, account_id: &str) -> Result<Optio
     }
 }
 
-pub fn save_carddav_settings(conn: &Connection, account_id: &str, s: &DavSettings) -> Result<()> {
+pub fn save_carddav_settings(conn: &Connection, account_id: &crate::login::LoginId, s: &DavSettings) -> Result<()> {
     let enc_pw = crypto::encrypt_password(&s.password).map_err(crypto_err)?;
     conn.execute(
         "INSERT OR REPLACE INTO carddav_settings (account_id, url, username, password) VALUES (?1,?2,?3,?4)",
@@ -262,7 +262,7 @@ pub fn save_carddav_settings(conn: &Connection, account_id: &str, s: &DavSetting
     Ok(())
 }
 
-pub fn load_carddav_settings(conn: &Connection, account_id: &str) -> Result<Option<DavSettings>> {
+pub fn load_carddav_settings(conn: &Connection, account_id: &crate::login::LoginId) -> Result<Option<DavSettings>> {
     let mut stmt = conn.prepare("SELECT url, username, password FROM carddav_settings WHERE account_id = ?1")?;
     let mut rows = stmt.query(params![account_id])?;
     if let Some(row) = rows.next()? {

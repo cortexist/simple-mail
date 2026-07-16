@@ -1,3 +1,26 @@
+//! # `account_id` in this schema means *login id*
+//!
+//! A **login** is one set of server credentials. An **account** is a *view*
+//! onto a login: an identity (address, name, colour) plus an optional mailbox
+//! filter. Several accounts can share one login when several addresses are
+//! delivered to the same server account.
+//!
+//! All *synced-data* tables are keyed by **login**, and their column is still
+//! named `account_id` for historical reasons — it holds a [`crate::login::LoginId`],
+//! not an `accounts.id`. Obtain one only via [`crate::login::resolve`].
+//!
+//! | `account_id` holds a **login id** | `account_id` holds a real **account id** |
+//! |---|---|
+//! | `emails`, `email_labels`, `folders` | `account_ai_features` (per-view toggles) |
+//! | `imap_folder_state`, `imap_uid_map` | `account_collections` (per-view assignment) |
+//! | `calendar_events`, `caldav_*_state` | `outbox_queue` (sending identity) |
+//! | `contacts`, `carddav_*_state` | `dav_server_users` (per-address login) |
+//! | `mail_server_settings`, `caldav_settings`, `carddav_settings` | |
+//! | `sender_blocklist` | |
+//!
+//! Child tables (`email_recipients`, `event_attendees`, `contact_*`) are keyed
+//! indirectly through their parent's id and so need no login column.
+
 use rusqlite::{Connection, Result, params};
 #[cfg(debug_assertions)]
 use chrono::Local;
@@ -11,6 +34,15 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             value TEXT NOT NULL
         );
 
+        -- One set of server credentials. Owns every synced row: the
+        -- credential tables (mail_server_settings, caldav_settings,
+        -- carddav_settings) and all sync state are keyed by this id, stored
+        -- in columns named `account_id`. See the module header.
+        CREATE TABLE IF NOT EXISTS logins (
+            id         TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL DEFAULT ''
+        );
+
         CREATE TABLE IF NOT EXISTS accounts (
             id         TEXT PRIMARY KEY,
             name       TEXT NOT NULL,
@@ -20,6 +52,17 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             avatar_url TEXT,
             alias      TEXT NOT NULL DEFAULT '',
             position   INTEGER NOT NULL DEFAULT 0
+        );
+
+        -- Which CalDAV/CardDAV collections a mailbox account shows. Only
+        -- consulted when accounts.is_mailbox = 1; a non-mailbox account shows
+        -- every collection belonging to its login.
+        CREATE TABLE IF NOT EXISTS account_collections (
+            account_id     TEXT NOT NULL,
+            kind           TEXT NOT NULL,      -- 'caldav' | 'carddav'
+            collection_url TEXT NOT NULL,
+            PRIMARY KEY (account_id, kind, collection_url),
+            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS folders (
@@ -169,6 +212,16 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     conn.execute("ALTER TABLE emails ADD COLUMN replied_at TEXT", []).ok();
     conn.execute("ALTER TABLE contacts ADD COLUMN rev TEXT", []).ok();
 
+    // The login this account is a view onto. Seeded in run_migrations.
+    conn.execute("ALTER TABLE accounts ADD COLUMN login_id TEXT NOT NULL DEFAULT ''", []).ok();
+    // 1 ⇒ show only mail addressed to accounts.email; 0 ⇒ show everything on
+    // the login. Read-time filter only — flipping it stores nothing.
+    conn.execute("ALTER TABLE accounts ADD COLUMN is_mailbox INTEGER NOT NULL DEFAULT 0", []).ok();
+    // Envelope delivery address (Delivered-To / X-Original-To / X-Envelope-To).
+    // NULL on rows synced before this column existed — the mailbox filter falls
+    // back to email_recipients (To/Cc) for those, so no re-sync is needed.
+    conn.execute("ALTER TABLE emails ADD COLUMN delivered_to TEXT", []).ok();
+
     // Multi-value contact child tables (vCard 3.0 / CardDAV-aligned)
     conn.execute_batch("
         CREATE TABLE IF NOT EXISTS contact_emails (
@@ -233,8 +286,103 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     conn.execute("CREATE INDEX IF NOT EXISTS idx_contact_emails_contact_id ON contact_emails(contact_id)", []).ok();
     conn.execute("CREATE INDEX IF NOT EXISTS idx_contact_phones_contact_id ON contact_phones(contact_id)", []).ok();
     conn.execute("CREATE INDEX IF NOT EXISTS idx_contact_addresses_contact_id ON contact_addresses(contact_id)", []).ok();
+    // Mailbox filter reads delivered_to for the account's whole login.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_delivered_to ON emails(account_id, delivered_to)", []).ok();
+    // Mailbox filter's To/Cc fallback probes email_recipients by address.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_email_recipients_email ON email_recipients(email)", []).ok();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A database as it looked before logins existed: one account, one email,
+    /// credentials keyed by the account id.
+    fn legacy_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        crate::sync_state::init_sync_tables(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO accounts (id, name, email, initials, color)
+             VALUES ('work', 'Takashi', 'takashi.nakamoto@cortexist.com', 'TN', '#0078d4')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO emails (id, account_id, from_name, from_email, from_initials,
+                                 from_color, subject, preview, body, date, folder)
+             VALUES ('e1', 'work', 'A', 'a@x.com', 'A', '#000', 's', 'p', 'b', '2026-01-01', 'inbox')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mail_server_settings (account_id, incoming_server, incoming_username)
+             VALUES ('work', 'imap.cortexist.com', 'takashi')",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn migration_seeds_a_login_per_account_without_moving_data() {
+        let conn = legacy_db();
+        migrate_extract_logins(&conn);
+
+        // login.id == account.id is the whole trick: it makes every existing
+        // `account_id` value already a valid login id.
+        let login_id: String = conn
+            .query_row("SELECT login_id FROM accounts WHERE id = 'work'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(login_id, "work");
+        assert_eq!(
+            1i64,
+            conn.query_row("SELECT COUNT(*) FROM logins WHERE id = 'work'", [], |r| r.get::<_, i64>(0)).unwrap()
+        );
+
+        // Not one row moved: the email and the credentials still key to 'work',
+        // which is now the login id.
+        assert_eq!(
+            1i64,
+            conn.query_row("SELECT COUNT(*) FROM emails WHERE account_id = 'work'", [], |r| r.get::<_, i64>(0)).unwrap()
+        );
+        assert_eq!(
+            1i64,
+            conn.query_row("SELECT COUNT(*) FROM mail_server_settings WHERE account_id = 'work'", [], |r| r.get::<_, i64>(0)).unwrap()
+        );
+    }
+
+    #[test]
+    fn migration_is_idempotent_and_does_not_relink_shared_logins() {
+        let conn = legacy_db();
+        migrate_extract_logins(&conn);
+
+        // A second account attaches to the first's login, as save_mail_settings
+        // does on a credential match.
+        conn.execute(
+            "INSERT INTO accounts (id, name, email, initials, color, login_id)
+             VALUES ('eng', 'Engineering', 'engineering@cortexist.com', 'E', '#107c10', 'work')",
+            [],
+        )
+        .unwrap();
+
+        // Re-running must not hand 'eng' a login of its own and strand it from
+        // the shared data.
+        migrate_extract_logins(&conn);
+        run_migrations(&conn).ok();
+
+        let eng_login: String = conn
+            .query_row("SELECT login_id FROM accounts WHERE id = 'eng'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(eng_login, "work", "second run re-pointed a shared account");
+        assert_eq!(
+            0i64,
+            conn.query_row("SELECT COUNT(*) FROM logins WHERE id = 'eng'", [], |r| r.get::<_, i64>(0)).unwrap(),
+            "second run minted a login for a view-only account"
+        );
+    }
 }
 
 /// Check whether a sender is blocked for a given account.
@@ -328,7 +476,58 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // unescape fix.
     migrate_normalize_escaped_labels(conn);
 
+    // Give every pre-existing account its own login (one-time, flagged).
+    migrate_extract_logins(conn);
+
     Ok(())
+}
+
+/// One-time: back-fill `logins` for databases created before logins existed.
+///
+/// Every account gets a login whose id **is its own account id**. That choice
+/// is what makes this migration free: synced tables already store that value
+/// in their `account_id` column, so they are correct as written and not one
+/// row moves. Credentials also already live in `mail_server_settings` &co.
+/// keyed by the same id, so they need no transform either.
+///
+/// Accounts only start *sharing* a login later, when matching credentials are
+/// saved (see `login::attach_to_matching`).
+fn migrate_extract_logins(conn: &Connection) {
+    let already: bool = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'logins_extracted'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    if already {
+        return;
+    }
+
+    if conn
+        .execute(
+            "INSERT OR IGNORE INTO logins (id, created_at)
+             SELECT id, datetime('now') FROM accounts",
+            [],
+        )
+        .is_err()
+    {
+        return;
+    }
+    if conn
+        .execute("UPDATE accounts SET login_id = id WHERE login_id = ''", [])
+        .is_err()
+    {
+        return;
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('logins_extracted', '1')",
+        [],
+    )
+    .ok();
 }
 
 /// One-time: unescape IMAP quoted-string label values (e.g. `\\Important`

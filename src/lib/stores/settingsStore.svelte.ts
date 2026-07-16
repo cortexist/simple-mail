@@ -314,6 +314,71 @@ export function fireDeleteAccount(id: string): void {
   });
 }
 
+/**
+ * Turn an account's mailbox filter on or off.
+ *
+ * The backend echoes `settings:account-upserted` for *every* account on the
+ * login, not just this one — flipping one mailbox changes which messages the
+ * others show — so the page re-renders all the affected views from the echoes.
+ */
+export function fireSetAccountIsMailbox(accountId: string, isMailbox: boolean): void {
+  if (!inTauri()) return;
+  const k = seqKey('account', accountId);
+  incOp(k);
+  invoke('set_account_is_mailbox', { accountId, isMailbox }).catch((err) => {
+    console.error('set_account_is_mailbox rejected:', err);
+    decOp(k);
+  });
+}
+
+/** A CalDAV/CardDAV collection on an account's login, and whether it's scoped to it. */
+export interface AssignableCollection {
+  url: string;
+  displayName: string;
+  assigned: boolean;
+}
+
+/** Every collection on the account's login — you can't assign what you can't see. */
+export async function getAccountCollections(
+  accountId: string,
+  kind: 'caldav' | 'carddav',
+): Promise<AssignableCollection[]> {
+  if (!inTauri()) return [];
+  try {
+    return (await invoke('get_account_collections', { accountId, kind })) as AssignableCollection[];
+  } catch (err) {
+    console.error('get_account_collections rejected:', err);
+    return [];
+  }
+}
+
+/** Scope a mailbox to a collection, or unscope it. */
+export function fireSetAccountCollection(
+  accountId: string,
+  kind: 'caldav' | 'carddav',
+  collectionUrl: string,
+  assigned: boolean,
+): void {
+  if (!inTauri()) return;
+  const k = seqKey('account', accountId);
+  incOp(k);
+  invoke('set_account_collection', { accountId, kind, collectionUrl, assigned }).catch((err) => {
+    console.error('set_account_collection rejected:', err);
+    decOp(k);
+  });
+}
+
+/** Addresses of the other accounts sharing this account's login. */
+export async function getLoginSiblings(accountId: string): Promise<string[]> {
+  if (!inTauri()) return [];
+  try {
+    return (await invoke('get_login_siblings', { accountId })) as string[];
+  } catch (err) {
+    console.error('get_login_siblings rejected:', err);
+    return [];
+  }
+}
+
 export function fireSetAccountPositions(orderedIds: string[]): void {
   if (!inTauri()) return;
   const k = seqKey('reorder', 'all');

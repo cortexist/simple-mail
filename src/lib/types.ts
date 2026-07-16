@@ -214,6 +214,18 @@ export interface Account {
   initials: string;
   color: string;
   avatarUrl?: string;
+  /**
+   * The login (credential set) this account is a view onto. Several accounts
+   * share one when several addresses are delivered to the same server account;
+   * their mail is fetched and stored once, under this id. Sync loops must
+   * iterate unique logins rather than accounts.
+   */
+  loginId?: string;
+  /**
+   * Show only mail addressed to `email`, rather than everything on the login.
+   * A pure read-time filter — toggling it needs no re-sync.
+   */
+  isMailbox?: boolean;
   folders: Folder[];
   emails: Email[];
   calendarEvents: CalendarEvent[];

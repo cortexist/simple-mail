@@ -1117,29 +1117,41 @@
     syncErrors = [];
     const errors: string[] = [];
 
+    // Sync once per login, not once per account: several accounts can be views
+    // onto one set of credentials, and syncing each would fetch the same
+    // mailbox twice. The backend also guards this, but only against overlapping
+    // passes — this loop awaits each one, so the guard would never see them
+    // collide. Deduping here is what actually saves the round trip.
+    const syncedLogins = new Set<string>();
+
     for (const acct of accounts) {
       if (!isAccountFullyConfigured(acct)) continue;
-      try {
-        const result = await syncMail(acct.id);
-        if (result?.errors?.length) {
-          errors.push(...result.errors.map((e) => `${acct.email}: ${e}`));
+      const loginId = acct.loginId ?? acct.id;
+      if (!syncedLogins.has(loginId)) {
+        syncedLogins.add(loginId);
+        try {
+          const result = await syncMail(acct.id);
+          if (result?.errors?.length) {
+            errors.push(...result.errors.map((e) => `${acct.email}: ${e}`));
+          }
+        } catch (e) {
+          errors.push(`${acct.email}: ${e instanceof Error ? e.message : String(e)}`);
         }
-      } catch (e) {
-        errors.push(`${acct.email}: ${e instanceof Error ? e.message : String(e)}`);
+        // Sync calendars if CalDAV configured
+        if (acct.calDavSettings?.url) {
+          try { await syncCalendars(acct.id); } catch { /* best-effort */ }
+        }
+        // Sync contacts if CardDAV configured
+        if (acct.cardDavSettings?.url) {
+          try { await syncContacts(acct.id); } catch { /* best-effort */ }
+        }
       }
-      // Sync calendars if CalDAV configured
-      if (acct.calDavSettings?.url) {
-        try { await syncCalendars(acct.id); } catch { /* best-effort */ }
-      }
-      // Sync contacts if CardDAV configured
-      if (acct.cardDavSettings?.url) {
-        try { await syncContacts(acct.id); } catch { /* best-effort */ }
-      }
-      // Also flush any pending outbox items
+      // The outbox is per-account, not per-login — each mailbox sends as its
+      // own address, so every account's queue still needs flushing.
       try {
         await flushOutbox(acct.id);
       } catch { /* best-effort */ }
-      lastSyncTime.set(acct.id, Date.now());
+      lastSyncTime.set(loginId, Date.now());
     }
 
     // Reload all accounts to pick up new/deleted/updated emails
@@ -1206,10 +1218,14 @@
   async function handlePerAccountSync() {
     if (syncing) return;
     const now = Date.now();
+    // The interval belongs to the login: its credentials, its cadence setting
+    // and its data are all shared, so `lastSyncTime` is keyed by login. Keying
+    // it by account would let each mailbox on a shared login come due
+    // separately and re-fetch the same mailbox.
     const due = accounts.filter(acct => {
       if (!isAccountFullyConfigured(acct)) return false;
       const intervalMs = (acct.serverSettings?.syncIntervalMinutes ?? 5) * 60_000;
-      const last = lastSyncTime.get(acct.id) ?? 0;
+      const last = lastSyncTime.get(acct.loginId ?? acct.id) ?? 0;
       return now - last >= intervalMs;
     });
     if (due.length === 0) return;
@@ -1218,23 +1234,29 @@
     syncErrors = [];
     const errors: string[] = [];
 
+    const syncedLogins = new Set<string>();
     for (const acct of due) {
-      try {
-        const result = await syncMail(acct.id);
-        if (result?.errors?.length) {
-          errors.push(...result.errors.map((e: string) => `${acct.email}: ${e}`));
+      const loginId = acct.loginId ?? acct.id;
+      if (!syncedLogins.has(loginId)) {
+        syncedLogins.add(loginId);
+        try {
+          const result = await syncMail(acct.id);
+          if (result?.errors?.length) {
+            errors.push(...result.errors.map((e: string) => `${acct.email}: ${e}`));
+          }
+        } catch (e) {
+          errors.push(`${acct.email}: ${e instanceof Error ? e.message : String(e)}`);
         }
-      } catch (e) {
-        errors.push(`${acct.email}: ${e instanceof Error ? e.message : String(e)}`);
+        if (acct.calDavSettings?.url) {
+          try { await syncCalendars(acct.id); } catch { /* best-effort */ }
+        }
+        if (acct.cardDavSettings?.url) {
+          try { await syncContacts(acct.id); } catch { /* best-effort */ }
+        }
+        lastSyncTime.set(loginId, Date.now());
       }
-      if (acct.calDavSettings?.url) {
-        try { await syncCalendars(acct.id); } catch { /* best-effort */ }
-      }
-      if (acct.cardDavSettings?.url) {
-        try { await syncContacts(acct.id); } catch { /* best-effort */ }
-      }
+      // Per-account: each mailbox sends as its own address.
       try { await flushOutbox(acct.id); } catch { /* best-effort */ }
-      lastSyncTime.set(acct.id, Date.now());
     }
 
     // Reload all accounts to pick up changes
@@ -1584,6 +1606,21 @@
     };
     if (existing) {
       accounts = accounts.map((a) => (a.id === merged.id ? merged : a));
+      // Re-hydrate the visible list too when this is the account on screen.
+      // The echo can carry a DIFFERENT set of emails than we're rendering —
+      // toggling `isMailbox` re-runs the mailbox filter, so mail appears or
+      // disappears. `emails` is a separate copy of the active account's list,
+      // and the effect that syncs it only tracks `emails` itself, so updating
+      // `accounts` alone moves the unread badge while leaving the message list
+      // stale. Every earlier upsert (name, colour) left the mail untouched,
+      // which is why this only surfaces now.
+      if (merged.id === activeAccountId) {
+        emails = [...merged.emails];
+        calendarCategories = [...merged.calendarCategories];
+        if (selectedEmailId && !merged.emails.some((e) => e.id === selectedEmailId)) {
+          selectedEmailId = '';
+        }
+      }
     } else {
       const next = [...accounts, merged];
       accounts = next;
@@ -1891,10 +1928,26 @@
     clearBatchSelection();
   }
 
-  /** Apply a backend-pushed flag echo to the local emails array.
-   * `emails` is the active-account view; the `$effect` at the top of
-   * the script syncs it back into `accounts`. Echoes for non-active
-   * accounts update `accounts` directly. */
+  /** Apply a backend-pushed echo to every view holding the message.
+   *
+   * Patches are matched on `emailId` alone, NOT narrowed by `ev.accountId`.
+   * A message is stored once per login and can therefore appear in more than
+   * one account's list — a mailbox and a catch-all on the same login both show
+   * it. Narrowing by account would update one view and leave the other showing
+   * stale state (e.g. still unread) until the next full reload. Email ids are
+   * UUIDs, unique across the database, so matching on id alone is safe;
+   * `ev.accountId` is advisory, naming whoever triggered the change.
+   *
+   * `emails` is the active-account view; the `$effect` at the top of the script
+   * syncs it back into `accounts`. */
+  function patchEmailEverywhere(emailId: string, patch: (e: Email) => Email) {
+    emails = emails.map((e) => (e.id === emailId ? patch(e) : e));
+    accounts = accounts.map((a) => {
+      if (!a.emails.some((e) => e.id === emailId)) return a;
+      return { ...a, emails: a.emails.map((e) => (e.id === emailId ? patch(e) : e)) };
+    });
+  }
+
   function applyFlagEcho(ev: EmailFlagChangedEvent) {
     const patch = (e: Email): Email => {
       switch (ev.field) {
@@ -1905,38 +1958,23 @@
         case 'focused': return { ...e, isFocused: ev.value };
       }
     };
-    if (ev.accountId === activeAccountId) {
-      emails = emails.map((e) => (e.id === ev.emailId ? patch(e) : e));
-    } else {
-      accounts = accounts.map((a) =>
-        a.id === ev.accountId
-          ? { ...a, emails: a.emails.map((e) => (e.id === ev.emailId ? patch(e) : e)) }
-          : a);
-    }
+    patchEmailEverywhere(ev.emailId, patch);
   }
 
   function applyFolderEcho(ev: EmailFolderChangedEvent) {
-    if (ev.accountId === activeAccountId) {
-      emails = emails.map((e) => (e.id === ev.emailId ? { ...e, folder: ev.folder } : e));
-    } else {
-      accounts = accounts.map((a) =>
-        a.id === ev.accountId
-          ? { ...a, emails: a.emails.map((e) => (e.id === ev.emailId ? { ...e, folder: ev.folder } : e)) }
-          : a);
-    }
+    patchEmailEverywhere(ev.emailId, (e) => ({ ...e, folder: ev.folder }));
   }
 
   function applyRemovedEcho(ev: EmailRemovedEvent) {
     const ids = new Set(ev.emailIds);
-    if (ev.accountId === activeAccountId) {
-      emails = emails.filter((e) => !ids.has(e.id));
-      if (selectedEmailId && ids.has(selectedEmailId)) selectedEmailId = '';
-    } else {
-      accounts = accounts.map((a) =>
-        a.id === ev.accountId
-          ? { ...a, emails: a.emails.filter((e) => !ids.has(e.id)) }
-          : a);
-    }
+    // Removal fans out like the other echoes: a deleted message must disappear
+    // from every view on the login, not just the account that deleted it.
+    emails = emails.filter((e) => !ids.has(e.id));
+    if (selectedEmailId && ids.has(selectedEmailId)) selectedEmailId = '';
+    accounts = accounts.map((a) =>
+      a.emails.some((e) => ids.has(e.id))
+        ? { ...a, emails: a.emails.filter((e) => !ids.has(e.id)) }
+        : a);
   }
 
   /** Optimistically apply a flag locally so the UI flips on click instead of
