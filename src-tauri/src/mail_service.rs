@@ -355,7 +355,8 @@ pub async fn send_email(
         }
     };
 
-    // Save to Sent folder via IMAP APPEND
+    // Save to Sent folder via IMAP APPEND. Best-effort: the message has been
+    // SUBMITTED — whatever happens below must not leave the send unresolved.
     match imap_client::connect(&settings).await {
         Ok(mut session) => {
             let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
@@ -383,8 +384,6 @@ pub async fn send_email(
                 log::error!("Failed to save sent message to '{}': {}", sent_folder, e);
             } else {
                 log::info!("Sent message saved to IMAP folder '{}'", sent_folder);
-                // Notify the frontend to sync immediately
-                let _ = app.emit("mail:sent", account_id);
             }
             let _ = session.logout().await;
         }
@@ -392,6 +391,13 @@ pub async fn send_email(
             log::error!("IMAP connect failed when saving to Sent for account {}: {}", account_id, e);
         }
     }
+
+    // Emitted unconditionally once SMTP has accepted the message. This event
+    // is what stops the compose spinner and clears the optimistic Sent
+    // placeholder — gating it on the append succeeding (as before) meant an
+    // IMAP hiccup here left the UI spinning forever over a mail that had in
+    // fact been sent.
+    let _ = app.emit("mail:sent", account_id);
 
     Ok(())
 }

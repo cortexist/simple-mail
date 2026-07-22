@@ -83,7 +83,23 @@ impl<T> ImapTransport for T where T: AsyncRead + AsyncWrite + Unpin + Send + Deb
 pub(crate) type ImapSession = async_imap::Session<Box<dyn ImapTransport>>;
 
 /// Connect and authenticate to the IMAP server, returning a live session.
+///
+/// Bounded: a server that accepts TCP but stalls the greeting/TLS/LOGIN
+/// (typical when a per-user connection cap is hit) must fail loudly instead of
+/// hanging its caller forever. Every connect in the app funnels through here —
+/// sync, Sent-folder append, outbox reconcile, offline download — so this is
+/// the one choke point that keeps them all cancellable.
 pub async fn connect(settings: &MailServerSettings) -> Result<ImapSession> {
+    match tokio::time::timeout(std::time::Duration::from_secs(30), connect_inner(settings)).await {
+        Ok(r) => r,
+        Err(_) => bail!(
+            "IMAP connect to {}:{} timed out after 30s (server or connection-limit stall)",
+            settings.incoming_server, settings.incoming_port
+        ),
+    }
+}
+
+async fn connect_inner(settings: &MailServerSettings) -> Result<ImapSession> {
     let host = &settings.incoming_server;
     let port = settings.incoming_port as u16;
     let security = settings.incoming_security.to_ascii_lowercase();

@@ -148,10 +148,20 @@ pub async fn send_email(
 
     let raw = message.formatted();
 
-    transport
-        .send(message)
+    // Bounded, and loud on both ends. The transport connects lazily inside
+    // send(), so the timeout covers connect + TLS + AUTH + submission. Without
+    // it, a server that accepts TCP but withholds its banner (typical when a
+    // per-user connection cap is hit) hangs this future forever — the send
+    // spinner never resolves and nothing is ever logged.
+    log::info!(
+        "SMTP: sending via {}:{} ({}) from {}",
+        settings.smtp_server, settings.smtp_port, settings.smtp_security, from_email
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(60), transport.send(message))
         .await
+        .map_err(|_| anyhow::anyhow!("SMTP timed out after 60s (server or connection-limit stall)"))?
         .context("SMTP send failed")?;
+    log::info!("SMTP: message accepted by {}", settings.smtp_server);
 
     Ok(raw)
 }
@@ -324,4 +334,53 @@ pub async fn test_connection(settings: &MailServerSettings) -> Result<()> {
     let transport = build_transport(settings).await?;
     transport.test_connection().await.context("SMTP connection test failed")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    fn local_settings() -> MailServerSettings {
+        MailServerSettings {
+            protocol: "imap".into(),
+            incoming_server: "localhost".into(),
+            incoming_port: 143,
+            incoming_username: "cortexist@example.test".into(),
+            incoming_password: "pw".into(),
+            incoming_security: "none".into(),
+            smtp_server: "127.0.0.1".into(),
+            smtp_port: 2525,
+            smtp_username: "cortexist@example.test".into(),
+            smtp_password: "pw".into(),
+            smtp_security: "none".into(),
+            sync_interval_minutes: 5,
+        }
+    }
+
+    /// Mailbox send-as over a shared login: SMTP AUTH user is the login
+    /// (cortexist@) while From is the mailbox address (alias.person@).
+    /// Requires a local debug SMTP server on 127.0.0.1:2525 — run explicitly:
+    /// `cargo test --lib send_tests -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn send_as_alias_over_local_smtp() {
+        let email = OutboundEmail {
+            to: vec!["recipient@example.test".into()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "send-as test".into(),
+            body_html: "<p>hello</p>".into(),
+            attachments: vec![],
+        };
+        let raw = send_email(
+            &local_settings(),
+            "alias.person@example.test",
+            "Alias Person",
+            &email,
+            Some("<test-msgid-123@example.test>"),
+        )
+        .await
+        .expect("send through local SMTP should succeed");
+        assert!(!raw.is_empty());
+    }
 }

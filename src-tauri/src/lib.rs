@@ -838,36 +838,80 @@ fn set_account_offline_download(
 
 // ── Offline-download worker lifecycle ───────────────────
 
-/// Spawn (or respawn) the worker for `account_id`. If one is already running,
-/// cancel it first so a stale token doesn't outlive the new worker.
+/// Spawn (or respawn) the worker for `account_id`'s **login**. If one is
+/// already running for that login, cancel it first so a stale token doesn't
+/// outlive the new worker.
+///
+/// The worker map is keyed by login id: bodies are cached once per login, so
+/// two mailbox accounts sharing credentials must share ONE worker. Keying by
+/// account spawned two loops downloading the same mailbox concurrently — twice
+/// the traffic, and enough simultaneous IMAP connections to trip providers'
+/// per-user connection caps (which then stalls everything else, including the
+/// post-send Sent-folder append).
 fn start_offline_worker(
     app: tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     account_id: &str,
 ) {
+    let login_id = {
+        let Ok(conn) = state.db.lock() else { return };
+        match login::resolve(&conn, account_id) {
+            Ok(l) => l.as_str().to_string(),
+            // Pre-migration or unknown account: fall back to the id itself.
+            Err(_) => account_id.to_string(),
+        }
+    };
     let token = tokio_util::sync::CancellationToken::new();
     {
         let mut workers = match state.offline_workers.lock() {
             Ok(w) => w,
             Err(_) => return,
         };
-        if let Some(old) = workers.remove(account_id) {
+        if let Some(old) = workers.remove(&login_id) {
             old.cancel();
         }
-        workers.insert(account_id.to_string(), token.clone());
+        workers.insert(login_id.clone(), token.clone());
     }
     offline_download::spawn_worker(
         app,
         state.db.clone(),
         state.storage_dir.clone(),
-        account_id.to_string(),
+        login_id,
         token,
     );
 }
 
+/// Stop the login's worker — but only when no *other* account on the same
+/// login still has offline download enabled; the worker serves all of them.
 fn stop_offline_worker(state: &tauri::State<'_, AppState>, account_id: &str) {
+    let login_id = {
+        let Ok(conn) = state.db.lock() else { return };
+        let login_id = match login::resolve(&conn, account_id) {
+            Ok(l) => l.as_str().to_string(),
+            Err(_) => account_id.to_string(),
+        };
+        let lg = login::LoginId::new_unchecked(login_id.clone());
+        let siblings = login::accounts_on(&conn, &lg).unwrap_or_default();
+        let another_enabled = siblings.iter().filter(|id| id.as_str() != account_id).any(|id| {
+            conn.query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                rusqlite::params![offline_download_key(id)],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        });
+        if another_enabled {
+            log::info!(
+                "offline worker for login {} kept alive: another account on this login still has offline download enabled",
+                login_id
+            );
+            return;
+        }
+        login_id
+    };
     let Ok(mut workers) = state.offline_workers.lock() else { return };
-    if let Some(tok) = workers.remove(account_id) {
+    if let Some(tok) = workers.remove(&login_id) {
         tok.cancel();
     }
 }
@@ -930,6 +974,19 @@ fn resume_offline_workers(
         ) else { return };
         let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else { return };
         rows.flatten().collect()
+    };
+    // Toggles are per account, workers are per LOGIN (shared body cache). Two
+    // mailboxes sharing credentials must resume ONE worker, not two racing
+    // loops over the same server mailbox.
+    let ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        ids.into_iter()
+            .map(|id| match login::resolve(&conn, &id) {
+                Ok(l) => l.as_str().to_string(),
+                Err(_) => id,
+            })
+            .filter(|login_id| seen.insert(login_id.clone()))
+            .collect()
     };
     drop(conn);
 
@@ -3039,7 +3096,18 @@ async fn sync_calendars(
     };
     let _in_flight = match SyncGuard::acquire(&state.syncing_logins, &format!("caldav:{}", account_id)) {
         Some(g) => g,
-        None => return Ok(CalSyncResult::default()),
+        // Coalesced: another account on this login is already syncing calendars.
+        // Still emit the completion echo, keyed to the REQUESTING account — the
+        // frontend increments the network counter per fireSyncCalendars call and
+        // only decrements on this event. Skipping it here strands that increment
+        // and the activity indicator spins until the watchdog reaps it.
+        None => {
+            events::emit_calendar_sync_completed(&app, events::CalendarSyncCompletedEvent {
+                account_id: event_account_id, ok: true,
+                new_count: 0, updated_count: 0, deleted_count: 0, error: None, seq,
+            });
+            return Ok(CalSyncResult::default());
+        }
     };
 
     let result: Result<CalSyncResult, String> = async {
@@ -3497,7 +3565,15 @@ async fn sync_contacts(
     };
     let _in_flight = match SyncGuard::acquire(&state.syncing_logins, &format!("carddav:{}", account_id)) {
         Some(g) => g,
-        None => return Ok(ContactSyncResult::default()),
+        // Coalesced — emit the completion echo anyway so the requesting account's
+        // network-activity increment is balanced. See sync_calendars.
+        None => {
+            events::emit_contacts_sync_completed(&app, events::ContactsSyncCompletedEvent {
+                account_id: event_account_id, ok: true,
+                new_count: 0, updated_count: 0, deleted_count: 0, error: None, seq,
+            });
+            return Ok(ContactSyncResult::default());
+        }
     };
 
     let result: Result<ContactSyncResult, String> = async {

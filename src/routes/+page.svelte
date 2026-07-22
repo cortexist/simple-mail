@@ -51,6 +51,7 @@
     subscribeRemovedEvents,
     subscribeBodyFetched,
     subscribePreviewsFetched,
+    subscribeSent,
     subscribeSendFailed,
     subscribeDraftGenerated,
     fireAiDraftReply,
@@ -886,9 +887,12 @@
         handleSyncAll();
         // Set up periodic per-account sync check (every 60s)
         syncTimerId = setInterval(() => handlePerAccountSync(), 60_000);
-        // Listen for backend push after a message is sent (sync Sent folder + \Answered flag)
-        listen<string>('mail:sent', (event) => {
-          const acctId = event.payload;
+        // Listen for backend push after a message is sent (sync Sent folder + \Answered flag).
+        // MUST go through subscribeSent, not a raw listen: subscribeSent is what
+        // decrements the send op's network-activity counter (fireSendEmail
+        // increments it). A raw listen ran the sync but left the counter stuck,
+        // so the activity indicator spun forever after every successful send.
+        subscribeSent((acctId) => {
           handleSyncAccount(acctId);
           // Send succeeded: the post-send sync replaces `emails` with DB truth
           // (the APPENDed Sent copy), so drop the optimistic placeholders we

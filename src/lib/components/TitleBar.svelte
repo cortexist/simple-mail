@@ -411,11 +411,13 @@
   }
 
   .account-avatar {
+    width: 30px;
+    height: 30px;
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 9px;
+    font-size: 12px;
     font-weight: 600;
     color: white;
     overflow: hidden;
