@@ -133,6 +133,7 @@
     "newMessage": "新規メッセージ",
     "insert": "挿入",
     "discardConfirm": "この下書きを破棄しますか？変更内容は失われます。",
+    "discardChangesConfirm": "変更を破棄しますか？保存済みの下書きは保持されます。",
     "attachFiles": "ファイルを添付",
     "sourceList": "リスト",
     "sourceContact": "連絡先",

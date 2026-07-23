@@ -21,11 +21,17 @@
     signature?: string;
     onDraftChange?: (draft: ComposeDraft) => void;
     onSend: (draft: { to: string; cc: string; bcc: string; subject: string; body: string; attachments: Attachment[] }) => void;
+    /** True when editing a draft that already exists in the Drafts folder —
+     * discard then only reverts the edits, so the confirm wording changes. */
+    isSavedDraft?: boolean;
+    /** Focus the composer on mount. Selection-driven opens (arrowing through
+     * the Drafts folder) pass false so the message list keeps its focus. */
+    autoFocus?: boolean;
     onDiscard: () => void;
     onSaveDraft: () => void;
   }
 
-  let { mode, replyTo = null, draft = null, accountId = '', signature = '', onDraftChange, onSend, onDiscard, onSaveDraft }: Props = $props();
+  let { mode, replyTo = null, draft = null, accountId = '', signature = '', onDraftChange, onSend, onDiscard, onSaveDraft, isSavedDraft = false, autoFocus = true }: Props = $props();
 
   // Pre-fill fields based on compose mode
   let toField = $state('');
@@ -425,6 +431,39 @@
     }
   }
 
+  /** Strip environment styling (colors, fonts) from pasted HTML so content
+   * adapts to the composer and reading themes instead of carrying its source
+   * app's theme — e.g. a dark-theme editor's near-white text color renders
+   * white-on-white in the reading pane and for light-theme recipients.
+   * Semantic formatting (bold, links, lists, headings) is kept. */
+  function sanitizePastedHtml(html: string): string {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll('style, script, meta, link, title').forEach((n) => n.remove());
+    for (const el of Array.from(doc.body.querySelectorAll<HTMLElement>('*'))) {
+      el.removeAttribute('class');
+      el.removeAttribute('id');
+      // Legacy <font>/<td> presentation attributes
+      el.removeAttribute('color');
+      el.removeAttribute('face');
+      el.removeAttribute('bgcolor');
+      if (el.getAttribute('style')) {
+        for (const prop of ['color', 'background', 'background-color', 'font-family', 'font-size', '-webkit-text-fill-color']) {
+          el.style.removeProperty(prop);
+        }
+        if (!el.getAttribute('style')?.trim()) el.removeAttribute('style');
+      }
+    }
+    return doc.body.innerHTML;
+  }
+
+  function handleEditorPaste(e: ClipboardEvent) {
+    const html = e.clipboardData?.getData('text/html');
+    if (!html) return; // plain-text paste — default behavior is already clean
+    e.preventDefault();
+    document.execCommand('insertHTML', false, sanitizePastedHtml(html));
+    handleEditorInput();
+  }
+
   function saveSelection() {
     const sel = window.getSelection();
     if (sel && sel.rangeCount > 0 && editorEl?.contains(sel.anchorNode)) {
@@ -559,6 +598,7 @@
 
   // Auto-focus when the compose pane mounts: body for reply/forward (To is pre-filled), To for new
   $effect(() => {
+    if (!autoFocus) return;
     if (mode === 'new' || mode === 'forward') {
       if (toInputEl) requestAnimationFrame(() => toInputEl?.focus());
     } else {
@@ -933,6 +973,7 @@
       aria-label={t('compose.messageBody')}
       bind:this={editorEl}
       oninput={handleEditorInput}
+      onpaste={handleEditorPaste}
       data-placeholder={t('compose.messagePlaceholder')}
     ></div>
   </div>
@@ -997,7 +1038,7 @@
         (document.activeElement as HTMLButtonElement)?.click();
       }
     }}>
-      <p id="discard-dialog-title" class="discard-dialog-text">{t('compose.discardConfirm')}</p>
+      <p id="discard-dialog-title" class="discard-dialog-text">{t(isSavedDraft ? 'compose.discardChangesConfirm' : 'compose.discardConfirm')}</p>
       <div class="discard-dialog-actions">
         <button class="discard-dialog-btn danger" onclick={confirmDiscard} bind:this={discardConfirmBtnEl}>{t('compose.discard')}</button>
         <button class="discard-dialog-btn" onclick={cancelDiscard} bind:this={discardCancelBtnEl}>{t('common.cancel')}</button>

@@ -133,6 +133,7 @@
     "newMessage": "Nuevo mensaje",
     "insert": "Insertar",
     "discardConfirm": "\u00bfDescartar este borrador? Se perder\u00e1n los cambios.",
+    "discardChangesConfirm": "\u00bfDescartar los cambios? El borrador guardado se conservar\u00e1.",
     "attachFiles": "Adjuntar archivos",
     "sourceList": "Lista",
     "sourceContact": "Contacto",

@@ -2,6 +2,7 @@
   import type { Email } from '$lib/types';
   import { formatFullDate } from '$lib/utils';
   import { shouldForceSaveAs } from '$lib/utils/attachments';
+  import { ensureReadableTextColors } from '$lib/readableColors';
   import { open } from '@tauri-apps/plugin-shell';
   import { locale, t } from '$lib/i18n/index.svelte';
 
@@ -14,6 +15,9 @@
     onFocus?: () => void;
     onOpenAttachment?: (index: number) => void;
     onSaveAttachment?: (index: number, filename: string) => void;
+    /** Open a draft's attachment — a local file recorded in its draftData,
+     * not a synced MIME part, so it takes a different backend path. */
+    onOpenDraftAttachment?: (index: number) => void;
     showAllHeaders?: boolean;
     multiSelectCount?: number;
     /** Fired when a label chip is clicked. Parent uses this to route to a
@@ -21,7 +25,7 @@
     onLabelClick?: (label: string) => void;
   }
 
-  let { email, loadingBody = false, darkMode = false, isJunk = false, focused = false, onFocus, onOpenAttachment, onSaveAttachment, showAllHeaders = $bindable(false), multiSelectCount = 0, onLabelClick }: Props = $props();
+  let { email, loadingBody = false, darkMode = false, isJunk = false, focused = false, onFocus, onOpenAttachment, onSaveAttachment, onOpenDraftAttachment, showAllHeaders = $bindable(false), multiSelectCount = 0, onLabelClick }: Props = $props();
 
   // ── Attachment context menu ──
   let attachMenu: { x: number; y: number; index: number; filename: string; unsafe: boolean } | null = $state(null);
@@ -132,7 +136,11 @@
 
   function bodySrcdoc(body: string): string {
     const nativeDark = hasDarkModeSupport(body);
-    const content = /<!doctype|<html[\s>]/i.test(body) ? unwrapHtmlDocument(body) : body;
+    const unwrapped = /<!doctype|<html[\s>]/i.test(body) ? unwrapHtmlDocument(body) : body;
+    // Colors are authored against white here (dark theme is an invert of the
+    // white rendering), so drop inline text colors unreadable on white —
+    // e.g. dark-theme-editor pastes. Native-dark mail manages its own colors.
+    const content = nativeDark ? unwrapped : ensureReadableTextColors(unwrapped);
     const darkCss = darkMode && !nativeDark ? `
       html{filter:invert(0.9) hue-rotate(170deg);}
       img,video,picture,svg,canvas,[style*="background-image"]{filter:invert(0.9) hue-rotate(170deg);}
@@ -428,6 +436,29 @@
                 <span class="attachment-name">{attachment.filename}</span>
                 {#if attachment.size > 0}
                   <span class="attachment-size">{formatBytes(attachment.size)}</span>
+                {/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
+
+        <!-- Draft attachments live in draftData as local file paths (nothing
+             is uploaded until send), so they render from there rather than
+             from the synced-attachment list, and open via the local path. -->
+        {#if email.folder === 'drafts' && email.draftData && email.draftData.attachments.length > 0}
+          <div class="attachments">
+            {#each email.draftData.attachments as att, i (att.path)}
+              <button
+                class="attachment-chip"
+                onclick={() => onOpenDraftAttachment?.(i)}
+                data-tooltip={att.path}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+                </svg>
+                <span class="attachment-name">{att.name}</span>
+                {#if att.size > 0}
+                  <span class="attachment-size">{formatBytes(att.size)}</span>
                 {/if}
               </button>
             {/each}

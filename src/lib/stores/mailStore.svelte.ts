@@ -15,6 +15,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from './safeListen';
 import { incNetwork, decNetwork } from '$lib/networkActivity.svelte';
+import type { ComposeDraft } from '$lib/types';
 
 export type EmailFlagField = 'read' | 'starred' | 'replied' | 'pinned' | 'focused';
 
@@ -107,6 +108,21 @@ export interface OutboundEmailPayload {
   subject: string;
   bodyHtml: string;
   attachments: { name: string; path: string }[];
+}
+
+/** Everything `save_draft` persists: the display fields the message list
+ * renders plus the full composer state, which round-trips back untouched as
+ * `Email.draftData`. */
+export interface DraftPayload {
+  id: string;
+  subject: string;
+  preview: string;
+  body: string;
+  date: string;
+  hasAttachment: boolean;
+  to: { name: string; email: string; initials: string; color: string }[];
+  cc: { name: string; email: string; initials: string; color: string }[];
+  draftData: ComposeDraft;
 }
 
 // ── Pending-op bookkeeping (reactive) ────────────────────
@@ -447,6 +463,26 @@ export function fireSendEmail(accountId: string, email: OutboundEmailPayload): v
     // Real SMTP failures come via mail:send-failed.
     console.error('send_email rejected at invoke-time:', err);
     decOp(opKey);
+  });
+}
+
+/** Persist a draft to the local DB so it survives an app restart. No echo
+ * event — the in-memory emails array is already the source of truth for the
+ * running session. With `upload`, the backend also pushes the draft to the
+ * server's Drafts mailbox in the background (cross-device drafts) — set on
+ * explicit saves and composer-close flushes, not per-keystroke saves. */
+export function fireSaveDraft(accountId: string, draft: DraftPayload, upload = false): void {
+  invoke('save_draft', { accountId, draft, upload }).catch((err) => {
+    console.error('save_draft failed:', err);
+  });
+}
+
+/** Remove a persisted draft (discarded, sent, or emptied out in the composer),
+ * including its server copy if one was uploaded. A no-op for drafts that were
+ * never persisted. */
+export function fireDeleteDraft(accountId: string, emailId: string): void {
+  invoke('delete_draft', { accountId, emailId }).catch((err) => {
+    console.error('delete_draft failed:', err);
   });
 }
 

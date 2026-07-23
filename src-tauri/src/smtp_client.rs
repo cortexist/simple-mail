@@ -69,18 +69,16 @@ async fn build_transport(settings: &MailServerSettings) -> Result<AsyncSmtpTrans
     Ok(transport)
 }
 
-/// Send an email directly via SMTP. Returns the raw RFC 822 message bytes on success.
-/// If `message_id` is Some, it overrides lettre's auto-generated Message-ID so the same
-/// value is stamped on every retry (enables post-crash reconciliation via IMAP SEARCH).
-pub async fn send_email(
-    settings: &MailServerSettings,
+/// Build the full MIME [`Message`] for `email` without sending. `message_id`
+/// is written verbatim (lettre adds no angle brackets), so pass the form the
+/// consumer needs — the draft-upload path passes `<id@domain>` to byte-match
+/// what IMAP envelopes report.
+pub async fn build_message(
     from_email: &str,
     from_name: &str,
     email: &OutboundEmail,
     message_id: Option<&str>,
-) -> Result<Vec<u8>> {
-    let transport = build_transport(settings).await?;
-
+) -> Result<Message> {
     // Build the from address using Mailbox to properly handle special chars in names
     let from_addr: lettre::Address = from_email.parse().context("Invalid from email address")?;
     let from_mailbox = Mailbox::new(Some(from_name.to_string()), from_addr);
@@ -146,6 +144,41 @@ pub async fn send_email(
             .context("Failed to build multipart email")?
     };
 
+    Ok(message)
+}
+
+/// Parse a composer recipient string ("Name <a@b>; c@d, e@f") into entries
+/// lettre can consume, dropping anything that doesn't parse as an address —
+/// drafts legitimately hold half-typed recipients that must not fail an
+/// upload. Semicolons always separate; commas separate only outside
+/// "Last, First <email>" display names.
+pub fn parse_recipient_list(raw: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for seg in raw.split(';') {
+        if seg.contains('<') && seg.contains('>') {
+            parts.push(seg.trim().to_string());
+        } else {
+            parts.extend(seg.split(',').map(|s| s.trim().to_string()));
+        }
+    }
+    parts
+        .into_iter()
+        .filter(|s| !s.is_empty() && s.parse::<Mailbox>().is_ok())
+        .collect()
+}
+
+/// Send an email directly via SMTP. Returns the raw RFC 822 message bytes on success.
+/// If `message_id` is Some, it overrides lettre's auto-generated Message-ID so the same
+/// value is stamped on every retry (enables post-crash reconciliation via IMAP SEARCH).
+pub async fn send_email(
+    settings: &MailServerSettings,
+    from_email: &str,
+    from_name: &str,
+    email: &OutboundEmail,
+    message_id: Option<&str>,
+) -> Result<Vec<u8>> {
+    let transport = build_transport(settings).await?;
+    let message = build_message(from_email, from_name, email, message_id).await?;
     let raw = message.formatted();
 
     // Bounded, and loud on both ends. The transport connects lazily inside

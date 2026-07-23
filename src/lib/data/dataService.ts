@@ -620,6 +620,15 @@ export async function openAttachment(accountId: string, emailId: string, attachm
   await inv('open_attachment', { accountId, emailId, attachmentIndex });
 }
 
+/** Open a draft's attachment (a local file recorded in its draftData) using
+ * the system default application. */
+export async function openDraftAttachment(accountId: string, emailId: string, attachmentIndex: number): Promise<void> {
+  if (!isTauri()) return;
+  const inv = await getInvoke();
+  if (!inv) return;
+  await inv('open_draft_attachment', { accountId, emailId, attachmentIndex });
+}
+
 /** Save an attachment to a user-specified file path. */
 export async function saveAttachment(accountId: string, emailId: string, attachmentIndex: number, savePath: string): Promise<void> {
   if (!isTauri()) return;

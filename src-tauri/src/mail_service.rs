@@ -380,7 +380,7 @@ pub async fn send_email(
                 }
             };
 
-            if let Err(e) = imap_client::append_to_mailbox(&mut session, &sent_folder, &raw_message).await {
+            if let Err(e) = imap_client::append_to_mailbox(&mut session, &sent_folder, &raw_message, "(\\Seen)").await {
                 log::error!("Failed to save sent message to '{}': {}", sent_folder, e);
             } else {
                 log::info!("Sent message saved to IMAP folder '{}'", sent_folder);
@@ -400,6 +400,178 @@ pub async fn send_email(
     let _ = app.emit("mail:sent", account_id);
 
     Ok(())
+}
+
+/// Push a locally saved draft to the server's Drafts mailbox so it can be
+/// picked up from other devices (Outlook-style cross-device drafts).
+///
+/// APPENDs a fresh copy stamped with a new `<uuid@domain>` Message-ID (written
+/// to the local row first, so the sync dedup maps the server copy back onto
+/// it), records the new UID, then removes the previous server copy. The local
+/// DB is already saved when this runs — a failure here only means the server
+/// copy is stale, and the next save retries. Accounts without mail settings
+/// (local/demo) are a silent no-op.
+pub async fn upload_draft(
+    db: &Arc<Mutex<Connection>>,
+    account_id: &str,
+    email_id: &str,
+) -> Result<(), String> {
+    use futures::TryStreamExt;
+
+    let (settings, from_name, from_email, old_mid, draft_json, old_uids) = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let login = crate::login::resolve(&conn, account_id).map_err(|e| e.to_string())?;
+        let Some(settings) = sync_state::load_mail_settings(&conn, &login).map_err(|e| e.to_string())? else {
+            return Ok(());
+        };
+        let (from_name, from_email, old_mid, draft_json): (String, String, String, String) = conn
+            .query_row(
+                "SELECT from_name, from_email, COALESCE(message_id, ''), draft_data
+                 FROM emails
+                 WHERE id = ?1 AND account_id = ?2 AND folder = 'drafts' AND draft_data IS NOT NULL",
+                rusqlite::params![email_id, login.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|_| "Draft not found".to_string())?;
+        let old_uids: Vec<u32> = {
+            let mut stmt = conn
+                .prepare("SELECT uid FROM imap_uid_map WHERE email_id = ?1 AND folder = 'drafts'")
+                .map_err(|e| e.to_string())?;
+            let collected: Vec<u32> = stmt
+                .query_map(rusqlite::params![email_id], |row| row.get(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            collected
+        };
+        (settings, from_name, from_email, old_mid, draft_json, old_uids)
+    };
+
+    // Assemble the outbound form from the stored composer state. Recipients
+    // are display strings that may hold half-typed entries — those stay in
+    // the local draft but are dropped from the MIME copy. Attachments are
+    // local paths; missing files are skipped rather than failing the upload.
+    let data: serde_json::Value = serde_json::from_str(&draft_json).map_err(|e| e.to_string())?;
+    let field = |k: &str| data.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let attachments: Vec<smtp_client::AttachmentInfo> = data
+        .get("attachments")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    let name = a.get("name")?.as_str()?.to_string();
+                    let path = a.get("path")?.as_str()?.to_string();
+                    if std::path::Path::new(&path).exists() {
+                        Some(smtp_client::AttachmentInfo { name, path })
+                    } else {
+                        log::warn!("upload_draft [{}]: attachment missing on disk, skipped: {}", email_id, path);
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let outbound = smtp_client::OutboundEmail {
+        to: smtp_client::parse_recipient_list(&field("to")),
+        cc: smtp_client::parse_recipient_list(&field("cc")),
+        bcc: smtp_client::parse_recipient_list(&field("bcc")),
+        subject: field("subject"),
+        body_html: field("body"),
+        attachments,
+    };
+
+    // Fresh Message-ID per save: the previous server copy is replaced, and
+    // other devices see the replacement as a new message (their stale row
+    // drops off when its UID disappears). Written to the local row BEFORE the
+    // APPEND so a sync racing this upload still dedups onto our row.
+    let domain = from_email.rsplit('@').next().filter(|d| !d.is_empty()).unwrap_or("localhost");
+    let new_mid = format!("<{}@{}>", uuid::Uuid::new_v4(), domain);
+    {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE emails SET message_id = ?1 WHERE id = ?2",
+            rusqlite::params![new_mid, email_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    let message = smtp_client::build_message(&from_email, &from_name, &outbound, Some(&new_mid))
+        .await
+        .map_err(|e| e.to_string())?;
+    let raw = message.formatted();
+
+    let mut session = imap_client::connect(&settings)
+        .await
+        .map_err(|e| format!("IMAP connect failed: {}", e))?;
+
+    let result = async {
+        let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
+        let drafts_folder = match remote_folders.iter().find(|(_, mapped)| mapped == "drafts") {
+            Some((name, _)) => name.clone(),
+            None => {
+                log::info!("upload_draft: no Drafts folder found — creating 'Drafts'");
+                if let Err(e) = session.create("Drafts").await {
+                    log::error!("Failed to create Drafts folder: {}", e);
+                }
+                "Drafts".to_string()
+            }
+        };
+
+        imap_client::append_to_mailbox(&mut session, &drafts_folder, &raw, "(\\Seen \\Draft)")
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Learn the appended copy's UID so sync recognizes it as already ours.
+        let new_uid = imap_client::find_uid_by_message_id(&mut session, &drafts_folder, &new_mid)
+            .await
+            .ok()
+            .flatten();
+        if let Some(uid) = new_uid {
+            if let Ok(conn) = db.lock() {
+                sync_state::insert_imap_uid(&conn, account_id, "drafts", uid, email_id).ok();
+            }
+        } else {
+            log::warn!("upload_draft [{}]: appended copy's UID not found (sync will dedup by Message-ID)", email_id);
+        }
+
+        // Replace semantics: drop the previous server copy (tracked UIDs, plus
+        // a Message-ID search in case a UID was never learned).
+        let mut stale: Vec<u32> = old_uids.clone();
+        if !old_mid.trim().is_empty() && old_mid != new_mid {
+            if let Ok(Some(uid)) = imap_client::find_uid_by_message_id(&mut session, &drafts_folder, &old_mid).await {
+                if !stale.contains(&uid) {
+                    stale.push(uid);
+                }
+            }
+        }
+        stale.retain(|u| Some(*u) != new_uid);
+        if !stale.is_empty() {
+            session.select(&drafts_folder).await.map_err(|e| e.to_string())?;
+            let uid_set = stale.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
+            session
+                .uid_store(&uid_set, "+FLAGS (\\Deleted)")
+                .await
+                .map_err(|e| e.to_string())?
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(|e| e.to_string())?;
+            session.expunge().await.map_err(|e| e.to_string())?.try_collect::<Vec<_>>().await.ok();
+            if let Ok(conn) = db.lock() {
+                sync_state::delete_imap_uids(&conn, account_id, "drafts", &stale).ok();
+            }
+        }
+
+        log::info!(
+            "upload_draft [{}]: uploaded to '{}' (uid={:?}, replaced {} old copies)",
+            email_id, drafts_folder, new_uid, stale.len()
+        );
+        Ok::<(), String>(())
+    }
+    .await;
+
+    let _ = session.logout().await;
+    result
 }
 
 // ── Reads (used by P2 classification + P4 MCP) ──────────

@@ -778,7 +778,7 @@ pub async fn move_message(
 
 /// SELECT a folder and return the UID of a message matching the given Message-ID.
 /// Strips surrounding angle brackets for broader server compatibility.
-async fn find_uid_by_message_id(
+pub async fn find_uid_by_message_id(
     session: &mut ImapSession,
     folder: &str,
     message_id: &str,
@@ -791,14 +791,16 @@ async fn find_uid_by_message_id(
     Ok(uids.into_iter().max())
 }
 
-/// Append a raw RFC 822 message to a mailbox (used to save sent messages).
+/// Append a raw RFC 822 message to a mailbox with the given flag list —
+/// `"(\\Seen)"` for sent copies, `"(\\Seen \\Draft)"` for server drafts.
 pub async fn append_to_mailbox(
     session: &mut ImapSession,
     imap_folder: &str,
     raw_message: &[u8],
+    flags: &str,
 ) -> Result<()> {
     session
-        .append(imap_folder, Some("(\\Seen)"), None, raw_message)
+        .append(imap_folder, Some(flags), None, raw_message)
         .await
         .with_context(|| format!("IMAP APPEND to '{}' failed", imap_folder))?;
     Ok(())

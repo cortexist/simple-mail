@@ -134,6 +134,7 @@
     "newMessage": "新邮件",
     "insert": "插入",
     "discardConfirm": "放弃此草稿？您的更改将丢失。",
+    "discardChangesConfirm": "放弃更改？已保存的草稿将保留。",
     "attachFiles": "附加文件",
     "sourceList": "列表",
     "sourceContact": "联系人",

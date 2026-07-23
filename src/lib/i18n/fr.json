@@ -133,6 +133,7 @@
     "newMessage": "Nouveau message",
     "insert": "Insérer",
     "discardConfirm": "Supprimer ce brouillon ? Vos modifications seront perdues.",
+    "discardChangesConfirm": "Abandonner les modifications ? Le brouillon enregistré sera conservé.",
     "attachFiles": "Joindre des fichiers",
     "sourceList": "Liste",
     "sourceContact": "Contact",

@@ -133,6 +133,7 @@
     "newMessage": "新郵件",
     "insert": "插入",
     "discardConfirm": "放棄此草稿？您的變更將會遺失。",
+    "discardChangesConfirm": "放棄變更？已儲存的草稿將保留。",
     "attachFiles": "附加檔案",
     "sourceList": "清單",
     "sourceContact": "聯絡人",

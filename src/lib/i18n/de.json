@@ -133,6 +133,7 @@
     "newMessage": "Neue Nachricht",
     "insert": "Einfügen",
     "discardConfirm": "Diesen Entwurf verwerfen? Ihre Änderungen gehen verloren.",
+    "discardChangesConfirm": "Änderungen verwerfen? Der gespeicherte Entwurf bleibt erhalten.",
     "attachFiles": "Dateien anhängen",
     "sourceList": "Liste",
     "sourceContact": "Kontakt",

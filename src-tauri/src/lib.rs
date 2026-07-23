@@ -165,6 +165,10 @@ pub struct Email {
     /// Display-side labels (currently Gmail X-GM-LABELS minus internal markers).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Composer state for locally saved drafts (`save_draft`), round-tripped
+    /// verbatim so the frontend can reopen the draft with Bcc/attachments intact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_data: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2042,6 +2046,21 @@ async fn sync_mail(
             // Insert new emails
             for env in &sync_result.new_emails {
 
+                // Skip UIDs we already track and whose row still exists —
+                // e.g. our own draft APPEND records its UID at upload time,
+                // and the envelope fetch would otherwise re-import it.
+                let already_mapped: Option<String> = tx
+                    .query_row(
+                        "SELECT m.email_id FROM imap_uid_map m JOIN emails e ON e.id = m.email_id
+                         WHERE m.account_id = ?1 AND m.folder = ?2 AND m.uid = ?3",
+                        rusqlite::params![account_id, local_id, env.uid],
+                        |row| row.get(0),
+                    )
+                    .ok();
+                if already_mapped.is_some() {
+                    continue;
+                }
+
                 // Dedup by Message-ID: if an email with the same non-empty
                 // Message-ID already exists for this account, attach the new
                 // UID mapping to the existing row and update its folder in
@@ -2425,6 +2444,184 @@ fn empty_folder(
     });
 
     Ok(deleted)
+}
+
+// ── Locally saved drafts ────────────────────────────────
+
+/// Payload for `save_draft`: the display fields the message list needs plus
+/// the full composer state (`draft_data`), which round-trips verbatim back to
+/// the frontend via `Email::draft_data`.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct DraftPayload {
+    id: String,
+    subject: String,
+    preview: String,
+    body: String,
+    /// RFC 3339, same shape the sync path stores.
+    date: String,
+    has_attachment: bool,
+    to: Vec<Contact>,
+    cc: Vec<Contact>,
+    draft_data: serde_json::Value,
+}
+
+/// Upsert a locally saved draft so it survives a restart. The row is keyed to
+/// the login like all mail; `from_*` carries the account identity, which is
+/// what the mailbox predicate matches drafts on. The conflict arm is scoped to
+/// `folder = 'drafts'` so a colliding id can never overwrite synced mail.
+///
+/// With `upload`, the draft is also pushed to the server's Drafts mailbox in
+/// the background (Outlook-style cross-device drafts) — the frontend sets it
+/// on explicit saves and composer-close flushes, not on per-keystroke
+/// debounced saves, to keep IMAP traffic sane.
+#[tauri::command]
+fn save_draft(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    draft: DraftPayload,
+    upload: bool,
+) -> Result<(), String> {
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    let login_id = login::resolve(&conn, &account_id)
+        .map_err(|e| e.to_string())?
+        .as_str()
+        .to_string();
+    let (name, email_addr, initials, color, alias): (String, String, String, String, Option<String>) = conn
+        .query_row(
+            "SELECT name, email, initials, color, alias FROM accounts WHERE id = ?1",
+            rusqlite::params![account_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let from_name = alias.filter(|s| !s.is_empty()).unwrap_or(name);
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO emails (id, account_id, from_name, from_email, from_initials, from_color,
+                             subject, preview, body, date, is_read, is_starred, is_pinned,
+                             is_focused, has_attachment, folder, draft_data)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 0, 0, 1, ?11, 'drafts', ?12)
+         ON CONFLICT(id) DO UPDATE SET
+             subject = excluded.subject, preview = excluded.preview, body = excluded.body,
+             date = excluded.date, has_attachment = excluded.has_attachment,
+             draft_data = excluded.draft_data
+         WHERE emails.folder = 'drafts'",
+        rusqlite::params![
+            draft.id, login_id, from_name, email_addr, initials, color,
+            draft.subject, draft.preview, draft.body, draft.date,
+            draft.has_attachment as i32, draft.draft_data.to_string(),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.execute("DELETE FROM email_recipients WHERE email_id = ?1", rusqlite::params![draft.id])
+        .map_err(|e| e.to_string())?;
+    for (list, rtype) in [(&draft.to, "to"), (&draft.cc, "cc")] {
+        for r in list.iter() {
+            tx.execute(
+                "INSERT INTO email_recipients (email_id, name, email, initials, color, type)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![draft.id, r.name, r.email, r.initials, r.color, rtype],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    drop(conn);
+
+    if upload {
+        let db = state.db.clone();
+        let email_id = draft.id.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = mail_service::upload_draft(&db, &account_id, &email_id).await {
+                log::error!("Draft upload to server failed for {}: {}", email_id, e);
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Remove a locally saved draft (discarded, sent, or emptied out by the
+/// composer). Scoped to `folder = 'drafts'` so it can never touch synced mail.
+/// If the draft has a server copy (uploaded via `save_draft`), it is expunged
+/// from the IMAP Drafts mailbox in the background.
+#[tauri::command]
+fn delete_draft(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    email_id: String,
+) -> Result<(), String> {
+    let (uids, settings) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let login_id = login::resolve(&conn, &account_id)
+            .map_err(|e| e.to_string())?
+            .as_str()
+            .to_string();
+
+        // Server copies to expunge — gathered before the rows go away.
+        let uids: Vec<u32> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT m.uid FROM imap_uid_map m
+                     JOIN emails e ON e.id = m.email_id
+                     WHERE m.email_id = ?1 AND m.folder = 'drafts'
+                       AND e.account_id = ?2 AND e.folder = 'drafts'",
+                )
+                .map_err(|e| e.to_string())?;
+            let collected: Vec<u32> = stmt
+                .query_map(rusqlite::params![email_id, login_id], |row| row.get(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            collected
+        };
+        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+
+        conn.execute(
+            "DELETE FROM email_recipients WHERE email_id IN
+                 (SELECT id FROM emails WHERE id = ?1 AND account_id = ?2 AND folder = 'drafts')",
+            rusqlite::params![email_id, login_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM imap_uid_map WHERE email_id = ?1 AND folder = 'drafts'",
+            rusqlite::params![email_id],
+        )
+        .ok();
+        conn.execute(
+            "DELETE FROM emails WHERE id = ?1 AND account_id = ?2 AND folder = 'drafts'",
+            rusqlite::params![email_id, login_id],
+        )
+        .map_err(|e| e.to_string())?;
+        (uids, settings)
+    };
+
+    if let (Some(settings), false) = (settings, uids.is_empty()) {
+        tauri::async_runtime::spawn(async move {
+            use futures::TryStreamExt;
+            let outcome = async {
+                let mut session = imap_client::connect(&settings).await?;
+                let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
+                if let Some((name, _)) = remote_folders.iter().find(|(_, mapped)| mapped == "drafts") {
+                    session.select(name).await?;
+                    let uid_set = uids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
+                    session.uid_store(&uid_set, "+FLAGS (\\Deleted)").await?
+                        .try_collect::<Vec<_>>().await?;
+                    session.expunge().await?.try_collect::<Vec<_>>().await?;
+                }
+                let _ = session.logout().await;
+                anyhow::Ok(())
+            }
+            .await;
+            if let Err(e) = outcome {
+                log::error!("Failed to remove server draft copy for {}: {}", email_id, e);
+            }
+        });
+    }
+    Ok(())
 }
 
 // ── Move email to folder ────────────────────────────────
@@ -2856,6 +3053,49 @@ async fn open_attachment(
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// Open a draft's attachment with the system default app. Draft attachments
+/// are local file paths recorded in `draft_data` (nothing is uploaded until
+/// send), so the path is resolved from the DB by index rather than trusting
+/// the caller with an arbitrary path.
+#[tauri::command]
+fn open_draft_attachment(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    email_id: String,
+    attachment_index: usize,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let path = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let login_id = login::resolve(&conn, &account_id)
+            .map_err(|e| e.to_string())?
+            .as_str()
+            .to_string();
+        let raw: String = conn
+            .query_row(
+                "SELECT draft_data FROM emails
+                 WHERE id = ?1 AND account_id = ?2 AND folder = 'drafts' AND draft_data IS NOT NULL",
+                rusqlite::params![email_id, login_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "Draft not found".to_string())?;
+        let data: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        data.get("attachments")
+            .and_then(|a| a.get(attachment_index))
+            .and_then(|a| a.get("path"))
+            .and_then(|p| p.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("Attachment index {} not found", attachment_index))?
+    };
+
+    if !std::path::Path::new(&path).exists() {
+        return Err(format!("File not found: {}", path));
+    }
+    app.opener().open_path(&path, None::<&str>).map_err(|e| e.to_string())
 }
 
 /// Save an attachment to a user-chosen path (the frontend provides save_path via a dialog).
@@ -5006,7 +5246,7 @@ fn query_emails(conn: &Connection, view: &login::View) -> Vec<Email> {
         "SELECT id, from_name, from_email, from_initials, from_color, subject, preview, body, date,
                 is_read, is_starred, has_attachment, folder, is_pinned, is_focused,
                 COALESCE(reply_to, ''), COALESCE(message_id, ''), COALESCE(auth_results, ''),
-                is_replied, replied_at
+                is_replied, replied_at, draft_data
          FROM emails WHERE account_id = ?1{}
          ORDER BY is_pinned DESC, date DESC",
         login::mailbox_clause(view.mailbox.as_deref(), 2),
@@ -5020,11 +5260,11 @@ fn query_emails(conn: &Connection, view: &login::View) -> Vec<Email> {
             row.get::<_, i32>(9)?, row.get::<_, i32>(10)?, row.get::<_, i32>(11)?,
             row.get(12)?, row.get::<_, i32>(13)?, row.get::<_, i32>(14)?,
             row.get(15)?, row.get(16)?, row.get(17)?, row.get::<_, i32>(18)?,
-            row.get::<_, Option<String>>(19)?))
+            row.get::<_, Option<String>>(19)?, row.get::<_, Option<String>>(20)?))
     })
     .unwrap()
     .filter_map(|r| r.ok())
-    .map(|(id, fn_, fe, fi, fc, subj, prev, body, date, read, star, att, folder, pinned, focused, reply_to, message_id, auth_results, replied, replied_at): (String, String, String, String, String, String, String, String, String, i32, i32, i32, String, i32, i32, String, String, String, i32, Option<String>)| {
+    .map(|(id, fn_, fe, fi, fc, subj, prev, body, date, read, star, att, folder, pinned, focused, reply_to, message_id, auth_results, replied, replied_at, draft_data): (String, String, String, String, String, String, String, String, String, i32, i32, i32, String, i32, i32, String, String, String, i32, Option<String>, Option<String>)| {
         let (to_recipients, cc_recipients) = query_email_recipients(conn, &id);
         let photo_url = contact_photos.get(&fe.to_lowercase()).cloned();
         let attachments = query_email_attachments(conn, &id);
@@ -5051,6 +5291,7 @@ fn query_emails(conn: &Connection, view: &login::View) -> Vec<Email> {
             message_id,
             auth_results,
             labels,
+            draft_data: draft_data.and_then(|s| serde_json::from_str(&s).ok()),
         }
     })
     .collect()
@@ -6021,6 +6262,8 @@ pub fn run() {
             delete_email,
             empty_folder,
             move_email,
+            save_draft,
+            delete_draft,
             save_mail_settings,
             load_mail_settings,
             save_caldav_settings,
@@ -6031,6 +6274,7 @@ pub fn run() {
             fetch_email_body,
             fetch_previews_around,
             open_attachment,
+            open_draft_attachment,
             save_attachment,
             send_email,
             flush_outbox,

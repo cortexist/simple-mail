@@ -221,6 +221,9 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     // NULL on rows synced before this column existed — the mailbox filter falls
     // back to email_recipients (To/Cc) for those, so no re-sync is needed.
     conn.execute("ALTER TABLE emails ADD COLUMN delivered_to TEXT", []).ok();
+    // Composer state (ComposeDraft JSON) for locally saved drafts, so a draft
+    // reopens with Bcc/attachments intact after a restart. NULL for synced mail.
+    conn.execute("ALTER TABLE emails ADD COLUMN draft_data TEXT", []).ok();
 
     // Multi-value contact child tables (vCard 3.0 / CardDAV-aligned)
     conn.execute_batch("

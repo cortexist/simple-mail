@@ -133,6 +133,7 @@
     "newMessage": "Nuovo messaggio",
     "insert": "Inserisci",
     "discardConfirm": "Eliminare questa bozza? Le modifiche andranno perse.",
+    "discardChangesConfirm": "Annullare le modifiche? La bozza salvata verrà conservata.",
     "attachFiles": "Allega file",
     "sourceList": "Elenco",
     "sourceContact": "Contatto",

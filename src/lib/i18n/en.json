@@ -133,6 +133,7 @@
     "newMessage": "New Message",
     "insert": "Insert",
     "discardConfirm": "Discard this draft? Your changes will be lost.",
+    "discardChangesConfirm": "Discard your changes? The saved draft will be kept.",
     "attachFiles": "Attach files",
     "sourceList": "List",
     "sourceContact": "Contact",

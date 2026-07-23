@@ -19,6 +19,7 @@
     syncCalendars,
     syncContacts,
     openAttachment,
+    openDraftAttachment,
     flushOutbox,
     getContactLists,
     addToSenderBlocklist,
@@ -44,6 +45,8 @@
     fireDeleteEmail,
     fireEmptyFolder,
     fireSendEmail,
+    fireSaveDraft,
+    fireDeleteDraft,
     fireFetchEmailBody,
     fireFetchPreviewsAround,
     subscribeFlagEvents,
@@ -127,6 +130,7 @@
   import { networkActivity } from '$lib/networkActivity.svelte';
   import type { Email, Contact, NavItem, CalendarViewMode, ComposeMode, Theme, Account, CalendarEvent, FullContact, ComposeDraft, ContactList } from '$lib/types';
   import { parseSearchQuery, emailMatchesQuery, buildSearchText } from '$lib/searchQuery';
+  import { ensureReadableTextColors } from '$lib/readableColors';
   import { setLocale, detectLocale, locale, LANGUAGE_NAMES, t } from '$lib/i18n/index.svelte';
 
   // ── Undo system ──────────────────────────────────────────
@@ -839,9 +843,15 @@
       // ── Mail shortcuts (only when in mail view with a selected email) ──
       if (activeNav !== 'mail' || !selectedEmail) return;
 
-      // Enter on a selected draft opens it in compose
+      // Enter on a selected draft focuses its composer (the drafts auto-open
+      // effect has already put it on screen)
       if (e.key === 'Enter' && !mod && selectedEmail.folder === 'drafts' && !isEditing) {
-        e.preventDefault(); openDraftInCompose(selectedEmail); return;
+        e.preventDefault();
+        if (activeDraftId === selectedEmail.id) {
+          focusedPane = 'compose';
+          composePaneRef?.focus();
+        }
+        return;
       }
 
       // Skip non-modifier keys when user is typing in an input
@@ -971,6 +981,8 @@
   });
 
   onDestroy(() => {
+    // Best-effort: catch a draft still inside the debounce window on teardown.
+    flushPersistDraft();
     if (syncTimerId) clearInterval(syncTimerId);
     if (unlistenMailSent) unlistenMailSent();
     if (unlistenOffline) unlistenOffline();
@@ -1103,6 +1115,17 @@
 
   async function handleSelectAccount(accountId: string) {
     if (accountId === activeAccountId) return;
+    // Persist any open draft, then hand the outgoing account's entry the live
+    // drafts — they exist only in the emails array until a sync reloads from
+    // the DB, and applyAccountState reads acct.emails on the way back.
+    flushPersistDraft();
+    if (activeAccountId) {
+      const outgoingId = activeAccountId;
+      const draftRows = emails.filter((e) => e.folder === 'drafts' && !e.isSending);
+      accounts = accounts.map((a) => (a.id === outgoingId
+        ? { ...a, emails: [...a.emails.filter((e) => e.folder !== 'drafts'), ...draftRows] }
+        : a));
+    }
     applyAccountState(accountId);
     searchQuery = '';
     composeMode = null;
@@ -1419,6 +1442,7 @@
 
     // Close compose when selecting a different email (unless it's the active draft)
     if (composeMode && activeDraftId && activeDraftId !== email.id) {
+      flushPersistDraft();
       composeMode = null;
       composeReplyTo = null;
       composeDraft = null;
@@ -1728,6 +1752,16 @@
     }
   }
 
+  async function handleOpenDraftAttachment(attachmentIndex: number) {
+    if (!selectedEmail || !activeAccountId) return;
+    try {
+      await openDraftAttachment(activeAccountId, selectedEmail.id, attachmentIndex);
+    } catch (err) {
+      console.error('Failed to open draft attachment:', err);
+      syncErrors = [...syncErrors, String(err)];
+    }
+  }
+
   async function handleSaveAttachment(attachmentIndex: number, filename: string) {
     if (!selectedEmail || !activeAccountId) return;
     try {
@@ -1745,6 +1779,7 @@
 
     // When switching folders, close any open compose (draft stays saved in emails array)
     if (composeMode && activeDraftId) {
+      flushPersistDraft();
       composeMode = null;
       composeReplyTo = null;
       composeDraft = null;
@@ -2058,13 +2093,81 @@
     return draftId;
   }
 
+  // The state a Drafts-folder draft had when it was opened in the composer.
+  // Discard restores this instead of deleting: an already-saved draft is only
+  // ever deleted through an explicit Delete, never through Esc/Discard.
+  // Draft ids are never reused, so a stale snapshot is inert — it's only
+  // honored while activeDraftId matches.
+  let openedDraftSnapshot = $state<{ id: string; email: Email } | null>(null);
+  // Dirty tracking for the opened saved draft. The composer emits one
+  // onDraftChange on mount with normalized-but-unedited content — that
+  // emission becomes the baseline, and until an emission differs from it the
+  // draft is "clean": close paths skip the save/upload (no server churn or
+  // date bumps from merely viewing a draft).
+  let openedDraftBaseline: string | null = null;
+  let openedDraftDirty = false;
+  // Whether the next ComposePane mount should grab focus. Selection-driven
+  // opens (the drafts auto-open effect) leave focus in the message list.
+  let composeAutoFocus = $state(true);
+
   /** Open a draft email in the ComposePane */
-  function openDraftInCompose(email: Email) {
+  function openDraftInCompose(email: Email, focus = true) {
+    // Arrow navigation between drafts bypasses handleSelectEmail's close
+    // path — flush the previously open draft before replacing it.
+    if (activeDraftId && activeDraftId !== email.id) flushPersistDraft();
+    composeAutoFocus = focus;
     activeDraftId = email.id;
     composeMode = 'new';
     composeReplyTo = null;
-    composeDraft = email.draftData ?? buildDraftFromEmail(email);
+    const d = email.draftData ?? buildDraftFromEmail(email);
+    // Repair drafts stored before paste sanitization existed: drop inline
+    // text colors that are unreadable on the mail canvas, so the re-saved
+    // (and eventually sent) body is clean.
+    composeDraft = { ...d, body: ensureReadableTextColors(d.body) };
+    openedDraftSnapshot = { id: email.id, email: { ...email, body: composeDraft.body, draftData: composeDraft } };
+    openedDraftBaseline = null;
+    openedDraftDirty = false;
+    if (focus) focusedPane = 'compose';
   }
+
+  // Drafts are always editable (Outlook-style): whenever the selected mail is
+  // a draft, the composer replaces the reading pane — there is no read-only
+  // draft view, and Send is always available. Opened without stealing focus
+  // so arrow-key navigation in the list keeps working; Enter or a click into
+  // the pane focuses the editor. Server-synced drafts without a cached body
+  // fetch it first; the effect re-fires when the body echo lands.
+  $effect(() => {
+    if (activeNav !== 'mail') return;
+    const email = emails.find((e) => e.id === selectedEmailId);
+    if (!email || email.folder !== 'drafts' || email.isSending) return;
+    if (activeDraftId === email.id) return;
+    if (!email.draftData && !email.body) {
+      if (activeAccountId && fetchingBodyId !== email.id) {
+        fetchingBodyId = email.id;
+        const accountId = activeAccountId;
+        untrack(() => fireFetchEmailBody(accountId, email.id));
+      }
+      return;
+    }
+    untrack(() => openDraftInCompose(email, false));
+  });
+
+  // The reverse guard: close the composer when its draft vanishes from the
+  // Drafts folder under it (deleted from the list, archived, moved) — without
+  // flushing, since whatever removed it owns the outcome. Sending is excluded
+  // via isSending; explicit close paths null activeDraftId before this runs.
+  $effect(() => {
+    if (!composeMode || !activeDraftId) return;
+    const email = emails.find((e) => e.id === activeDraftId);
+    if (email && (email.folder === 'drafts' || email.isSending)) return;
+    untrack(() => {
+      cancelPersistDraft();
+      composeMode = null;
+      composeReplyTo = null;
+      composeDraft = null;
+      activeDraftId = null;
+    });
+  });
 
   /** Request an AI-generated reply for the selected email. The draft arrives
    * asynchronously via `mail:draft-generated` (applyDraftGeneratedEcho). */
@@ -2118,6 +2221,7 @@
     emails = [...emails, draftEmail];
 
     activeNav = 'mail';
+    composeAutoFocus = true;
     activeDraftId = draftId;
     composeMode = 'new';
     composeReplyTo = null;
@@ -2125,10 +2229,102 @@
     focusedPane = 'compose';
   }
 
+  // ── Draft persistence ───────────────────────────────────
+  // Drafts live in the in-memory emails array while composing; these helpers
+  // mirror the active draft into the local DB (save_draft / delete_draft) so
+  // it survives an app restart. Saves are debounced while typing and flushed
+  // on every path that closes the composer.
+  let draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** True when the composer holds no user content — recipients, subject and
+   * attachments empty, and the body blank or just the account signature
+   * (a fresh compose seeds `<br>` + signature). */
+  function isDraftEmpty(d: ComposeDraft, signature: string): boolean {
+    if (d.to.trim() || d.cc.trim() || d.bcc.trim() || d.subject.trim() || d.attachments.length > 0) return false;
+    const bodyText = stripHtmlPreview(d.body).trim();
+    return !bodyText || bodyText === stripHtmlPreview(signature).trim();
+  }
+
+  /** Mirror draft `id` into the DB — upsert when it has content, delete when
+   * it's empty (so clearing out a saved draft also clears the persisted copy).
+   * With `upload`, the backend also replaces the server's Drafts copy. */
+  function persistDraft(accountId: string, id: string, upload = false) {
+    const email = emails.find((e) => e.id === id);
+    if (!email || email.folder !== 'drafts' || email.isSending) return;
+    const d = email.draftData;
+    if (!d) return;
+    const signature = accounts.find((a) => a.id === accountId)?.signature ?? '';
+    if (isDraftEmpty(d, signature)) {
+      fireDeleteDraft(accountId, id);
+      return;
+    }
+    const strip = (c: Contact) => ({ name: c.name, email: c.email, initials: c.initials, color: c.color });
+    fireSaveDraft(accountId, {
+      id,
+      subject: email.subject,
+      preview: email.preview,
+      body: email.body,
+      date: email.date.toISOString(),
+      hasAttachment: email.hasAttachment,
+      to: email.to.map(strip),
+      cc: (email.cc ?? []).map(strip),
+      draftData: d,
+    }, upload);
+  }
+
+  /** Debounced save while typing (handleDraftChange fires per keystroke). */
+  function schedulePersistDraft() {
+    if (!activeDraftId || !activeAccountId) return;
+    const accountId = activeAccountId;
+    const id = activeDraftId;
+    if (draftSaveTimer) clearTimeout(draftSaveTimer);
+    draftSaveTimer = setTimeout(() => {
+      draftSaveTimer = null;
+      persistDraft(accountId, id);
+    }, 1500);
+  }
+
+  /** Persist the active draft now, including the server's Drafts copy. Must
+   * run before any state reset that closes the composer — it reads
+   * activeDraftId and the emails array. Opened-but-unedited saved drafts have
+   * nothing to write; skipping them keeps Drafts-folder navigation free of
+   * save and server-upload churn. */
+  function flushPersistDraft() {
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
+    }
+    if (!activeDraftId || !activeAccountId) return;
+    if (openedDraftSnapshot?.id === activeDraftId && !openedDraftDirty) return;
+    persistDraft(activeAccountId, activeDraftId, true);
+  }
+
+  /** Drop any scheduled save (the draft is being discarded or sent). */
+  function cancelPersistDraft() {
+    if (draftSaveTimer) {
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
+    }
+  }
+
   /** Update the draft email in the emails array from compose state */
   function handleDraftChange(d: ComposeDraft) {
     composeDraft = d;
     if (!activeDraftId) return;
+
+    // Baseline/dirty tracking for opened saved drafts: the first emission is
+    // the composer's normalized copy of unedited content. Until an emission
+    // differs from it, skip the array update entirely — viewing a draft must
+    // not bump its date (which reorders the list) or schedule saves.
+    if (openedDraftSnapshot?.id === activeDraftId && !openedDraftDirty) {
+      const serialized = JSON.stringify(d);
+      if (openedDraftBaseline === null) {
+        openedDraftBaseline = serialized;
+        return;
+      }
+      if (serialized === openedDraftBaseline) return;
+      openedDraftDirty = true;
+    }
 
     // Parse recipients from "Name <email>" format.
     // Commas inside "Last, First <email>" must not be treated as separators.
@@ -2166,6 +2362,8 @@
         draftData: d,
       };
     });
+
+    schedulePersistDraft();
   }
 
   function handlePrint() {
@@ -2183,6 +2381,7 @@
   function handleEmailContact(email: string, name: string) {
     activeNav = 'mail';
     const draftId = createDraftEmail();
+    composeAutoFocus = true;
     activeDraftId = draftId;
     composeMode = 'new';
     composeReplyTo = null;
@@ -2198,6 +2397,7 @@
     // If already composing, the current draft is already saved in emails array via handleDraftChange
     // Just create a new draft
     const draftId = createDraftEmail();
+    composeAutoFocus = true;
     activeDraftId = draftId;
     composeMode = mode;
     composeReplyTo = mode === 'new' ? null : selectedEmail;
@@ -2259,6 +2459,7 @@
     const accountId = activeAccountId;
 
     // Mark draft as in-flight — hides it from the drafts list immediately
+    cancelPersistDraft();
     if (draftId) {
       emails = emails.map((e) => e.id === draftId ? { ...e, isSending: true } : e);
     }
@@ -2291,10 +2492,12 @@
       fireToggleReplied(accountId, replyTo.id, true);
     }
 
-    // Remove the sent draft from the emails array (IMAP sync will fetch the
-    // Sent copy). If the SMTP send fails, the outbox row stays in 'pending'
-    // and the next flush_outbox retries — we don't restore the draft row.
+    // Remove the sent draft from the emails array and the DB copy (IMAP sync
+    // will fetch the Sent copy). If the SMTP send fails, the outbox row stays
+    // in 'pending' and the next flush_outbox retries — we don't restore the
+    // draft row.
     if (draftId) {
+      fireDeleteDraft(accountId, draftId);
       emails = emails.filter((e) => e.id !== draftId);
     }
 
@@ -2354,8 +2557,21 @@
     // Remember the email we were replying to / forwarding before clearing state
     const previousEmailId = composeReplyTo?.id;
 
-    // Remove the draft email from the emails array
-    if (activeDraftId) {
+    cancelPersistDraft();
+    if (activeDraftId && openedDraftSnapshot?.id === activeDraftId) {
+      // The draft pre-existed this compose session: discard reverts the edits,
+      // never the saved draft (deleting takes an explicit Delete). When dirty,
+      // restore the state it was opened with and re-persist it (server copy
+      // included), since the debounced auto-save may already have written the
+      // now-discarded edits to the DB. When clean there is nothing to revert.
+      if (openedDraftDirty) {
+        const snapshot = openedDraftSnapshot.email;
+        emails = emails.map((e) => (e.id === activeDraftId ? snapshot : e));
+        if (activeAccountId) persistDraft(activeAccountId, activeDraftId, true);
+      }
+    } else if (activeDraftId) {
+      // Never-saved draft: discard removes it from the array and the DB copy
+      if (activeAccountId) fireDeleteDraft(activeAccountId, activeDraftId);
       emails = emails.filter((e) => e.id !== activeDraftId);
     }
     composeMode = null;
@@ -2374,7 +2590,9 @@
   }
 
   function handleComposeSaveDraft() {
-    // Draft is already saved via onDraftChange — just close the compose pane
+    // The emails array already has the draft via onDraftChange — persist it
+    // to the DB now (Ctrl+S is the explicit save), then close the pane.
+    flushPersistDraft();
     composeMode = null;
     composeReplyTo = null;
     composeDraft = null;
@@ -2872,7 +3090,13 @@
                 currentFolder={activeFolder}
                 folderName={activeAccount?.folders.find((f) => f.id === activeFolder)?.name ?? activeFolder}
                 onSelectEmail={handleSelectEmail}
-                onOpenDraft={(email) => openDraftInCompose(email)}
+                onOpenDraft={(email) => {
+                  // The auto-open effect already opened it — double-click just focuses
+                  if (activeDraftId === email.id) {
+                    focusedPane = 'compose';
+                    composePaneRef?.focus();
+                  }
+                }}
                 onToggleStar={handleToggleStar}
                 onTogglePin={handleTogglePin}
                 onToggleFocused={handleToggleFocused}
@@ -2899,11 +3123,13 @@
               onSend={handleComposeSend}
               onDiscard={handleComposeDiscard}
               onSaveDraft={handleComposeSaveDraft}
+              isSavedDraft={openedDraftSnapshot?.id === activeDraftId}
+              autoFocus={composeAutoFocus}
             /></div>
             {/key}
           {:else}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div style="display:contents" onmousedown={() => (focusedPane = 'reading')}><ReadingPane bind:this={readingPaneRef} email={selectedEmail} loadingBody={fetchingBodyId === selectedEmailId} darkMode={resolvedTheme === 'dark'} isJunk={activeFolder === 'junk'} focused={focusedPane === 'reading'} onFocus={() => (focusedPane = 'reading')} onOpenAttachment={handleOpenAttachment} onSaveAttachment={handleSaveAttachment} bind:showAllHeaders {multiSelectCount} onLabelClick={handleLabelClick} /></div>
+            <div style="display:contents" onmousedown={() => (focusedPane = 'reading')}><ReadingPane bind:this={readingPaneRef} email={selectedEmail} loadingBody={fetchingBodyId === selectedEmailId} darkMode={resolvedTheme === 'dark'} isJunk={activeFolder === 'junk'} focused={focusedPane === 'reading'} onFocus={() => (focusedPane = 'reading')} onOpenAttachment={handleOpenAttachment} onSaveAttachment={handleSaveAttachment} onOpenDraftAttachment={handleOpenDraftAttachment} bind:showAllHeaders {multiSelectCount} onLabelClick={handleLabelClick} /></div>
           {/if}
         {:else if activeNav === 'calendar'}
           <CalendarView
