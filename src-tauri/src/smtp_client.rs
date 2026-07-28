@@ -70,9 +70,10 @@ async fn build_transport(settings: &MailServerSettings) -> Result<AsyncSmtpTrans
 }
 
 /// Build the full MIME [`Message`] for `email` without sending. `message_id`
-/// is written verbatim (lettre adds no angle brackets), so pass the form the
-/// consumer needs — the draft-upload path passes `<id@domain>` to byte-match
-/// what IMAP envelopes report.
+/// is written verbatim (lettre adds no angle brackets), so callers must pass
+/// the full RFC 5322 form `<id@domain>` — a bare id goes onto the wire as a
+/// malformed header. Verbatim writing is what lets the draft-upload path
+/// byte-match what IMAP envelopes report.
 pub async fn build_message(
     from_email: &str,
     from_name: &str,
@@ -243,7 +244,10 @@ pub async fn send_invitation(
 /// Queue an email for sending. Returns (outbox_id, message_id).
 ///
 /// `from_email` is used to form the domain part of the Message-ID so that
-/// upstream servers don't reject the message for an off-domain id.
+/// upstream servers don't reject the message for an off-domain id. The id is
+/// stored in the full RFC 5322 form `<uuid@domain>` — it reaches the wire
+/// verbatim via [`build_message`], and a bare `uuid@domain` is a malformed
+/// header (SpamAssassin INVALID_MSGID, −1.167).
 pub fn queue_email(
     conn: &Connection,
     account_id: &str,
@@ -252,7 +256,7 @@ pub fn queue_email(
 ) -> Result<(String, String)> {
     let id = uuid::Uuid::new_v4().to_string();
     let domain = from_email.rsplit('@').next().filter(|d| !d.is_empty()).unwrap_or("localhost");
-    let message_id = format!("{}@{}", uuid::Uuid::new_v4(), domain);
+    let message_id = format!("<{}@{}>", uuid::Uuid::new_v4(), domain);
     let now = chrono::Utc::now().to_rfc3339();
 
     conn.execute(
