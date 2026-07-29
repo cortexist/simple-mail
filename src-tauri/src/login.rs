@@ -336,21 +336,35 @@ pub fn purge(conn: &Connection, login: &LoginId) -> Result<()> {
 /// for splicing into a query over `emails` after `account_id = ?<login>`.
 /// Binds the address as `?<addr_idx>`.
 ///
-/// A message belongs to the mailbox when **any** of three things holds:
+/// A message belongs to the mailbox when **any** of three things holds, tried
+/// in this order — the earlier, address-specific signals outrank the later ones:
 ///
-/// 1. **`delivered_to` matches** — what the server actually delivered to, and
-///    the only signal that catches BCC'd or alias-forwarded mail, which names
-///    the address nowhere else. Captured at sync; NULL on rows stored before
-///    the column existed.
-/// 2. **To/Cc matches** (`email_recipients`) — already populated for *all*
-///    existing mail, which is what lets the filter work retroactively with no
-///    re-sync.
-/// 3. **Delivery is unknown and nobody else claims it** — fail open. Without
-///    this, flipping the switch on would make a user's existing BCC'd and
-///    mailing-list mail silently disappear: it predates `delivered_to` (1) and
-///    names them in neither To nor Cc (2). Such a message shows up in every
+/// 1. **To/Cc matches** (`email_recipients`) — the address the sender actually
+///    wrote. Already populated for *all* existing mail, which is what lets the
+///    filter work retroactively with no re-sync.
+/// 2. **`delivered_to` matches and no sibling is named in To/Cc** — the
+///    delivery address catches BCC'd and mailing-list mail, which names the
+///    mailbox nowhere else. Captured at sync; NULL on rows stored before the
+///    column existed.
+///
+///    The sibling check is what keeps this from swallowing the whole login.
+///    Where several addresses alias into **one** physical mailbox, the MTA
+///    stamps the *mailbox's* own address on every message it delivers — Postfix
+///    writes `Delivered-To:` after alias expansion, so mail sent to `sales@`
+///    arrives carrying `Delivered-To: takashi@`. Left unqualified, that one
+///    address matches everything and its account absorbs every sibling's mail.
+///    So when To/Cc explicitly names another mailbox on the login, rule 1 has
+///    already given the message an owner and the delivery claim stands down.
+///
+///    The trade-off: a message BCC'd to this mailbox but addressed to a sibling
+///    lands in the sibling. Both copies arrive in the same physical mailbox, so
+///    nothing is lost — it is filed under one address instead of two.
+/// 3. **Delivery is unknown and nobody claims it** — fail open. Without this,
+///    flipping the switch on would make a user's existing BCC'd and
+///    mailing-list mail silently disappear: it predates `delivered_to` (2) and
+///    names them in neither To nor Cc (1). Such a message shows up in every
 ///    mailbox on the login rather than vanishing from all of them. Once a
-///    re-sync backfills `delivered_to`, rule 1 takes over and it resolves to
+///    re-sync backfills `delivered_to`, rule 2 takes over and it resolves to
 ///    the one true mailbox.
 ///
 /// Sent and Drafts invert the test: a mailbox's outgoing mail is *from* its
@@ -371,16 +385,16 @@ pub const MAILBOX_PREDICATE: &str = "
                              WHERE o.login_id = emails.account_id AND o.is_mailbox = 1
                                AND lower(o.email) = lower(emails.from_email))
          ELSE
-              lower(COALESCE(emails.delivered_to, '')) = lower(?ADDR)
-              OR EXISTS (SELECT 1 FROM email_recipients r
-                         WHERE r.email_id = emails.id
-                           AND lower(r.email) = lower(?ADDR))
-              OR (COALESCE(emails.delivered_to, '') = ''
-                  AND NOT EXISTS (SELECT 1 FROM accounts o
-                                  WHERE o.login_id = emails.account_id AND o.is_mailbox = 1
-                                    AND EXISTS (SELECT 1 FROM email_recipients r2
-                                                WHERE r2.email_id = emails.id
-                                                  AND lower(r2.email) = lower(o.email))))
+              EXISTS (SELECT 1 FROM email_recipients r
+                      WHERE r.email_id = emails.id
+                        AND lower(r.email) = lower(?ADDR))
+              OR (NOT EXISTS (SELECT 1 FROM accounts o
+                              WHERE o.login_id = emails.account_id AND o.is_mailbox = 1
+                                AND EXISTS (SELECT 1 FROM email_recipients r2
+                                            WHERE r2.email_id = emails.id
+                                              AND lower(r2.email) = lower(o.email)))
+                  AND (lower(COALESCE(emails.delivered_to, '')) = lower(?ADDR)
+                       OR COALESCE(emails.delivered_to, '') = ''))
          END)";
 
 /// [`MAILBOX_PREDICATE`] with `?ADDR` bound to a concrete parameter index, or
@@ -724,6 +738,35 @@ mod tests {
 
         assert_eq!(visible(&conn, "eng"), vec!["bcc_eng"], "delivered_to should have claimed it");
         assert!(visible(&conn, "work").is_empty(), "leaked a sibling's BCC'd mail");
+    }
+
+    /// The alias-into-one-mailbox setup: every message lands in takashi@'s
+    /// physical mailbox, so the MTA stamps `Delivered-To: takashi@` on mail
+    /// addressed to engineering@ too. Matching on delivery alone would hand
+    /// takashi@ the entire login.
+    #[test]
+    fn delivery_to_the_shared_mailbox_does_not_outrank_a_sibling_in_to_cc() {
+        let conn = shared_login_db();
+        add_mail(&conn, "for_eng", "inbox", "a@x.com", Some(TAKASHI), &[ENG]);
+        add_mail(&conn, "for_takashi", "inbox", "a@x.com", Some(TAKASHI), &[TAKASHI]);
+
+        assert_eq!(
+            visible(&conn, "work"),
+            vec!["for_takashi"],
+            "the delivery address swallowed a sibling's mail"
+        );
+        assert_eq!(visible(&conn, "eng"), vec!["for_eng"]);
+    }
+
+    /// The sibling has to be a *mailbox* to veto a delivery claim: a plain
+    /// recipient who happens to share the login's domain claims nothing.
+    #[test]
+    fn delivery_still_claims_mail_addressed_to_an_outsider() {
+        let conn = shared_login_db();
+        add_mail(&conn, "list_mail", "inbox", "list@x.com", Some(ENG), &["announce@lists.example"]);
+
+        assert_eq!(visible(&conn, "eng"), vec!["list_mail"]);
+        assert!(visible(&conn, "work").is_empty());
     }
 
     #[test]

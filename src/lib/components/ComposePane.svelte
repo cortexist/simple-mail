@@ -1442,6 +1442,21 @@
     padding: 0;
   }
 
+  /* Quoted mail and signatures are authored against a white canvas: our own
+     wrapper sets color:#666, and correspondents' clients inline #000/#000000
+     on the bodies they quote. ReadingPane renders that document in an iframe
+     it can invert; the composer must keep it editable, so it renders directly
+     in a theme-colored contenteditable — and in dark theme those authored-for-
+     white colors land dark-on-dark (#666 is dim, #000 is invisible).
+     Override at display time only: this element holds the document that will
+     be sent, so its colors must not be rewritten. Links keep their own. */
+  :global([data-theme="dark"]) .compose-body :global(.quote-block),
+  :global([data-theme="dark"]) .compose-body :global(.quote-block *:not(a)),
+  :global([data-theme="dark"]) .compose-body :global(.signature-block),
+  :global([data-theme="dark"]) .compose-body :global(.signature-block *:not(a)) {
+    color: var(--text-secondary) !important;
+  }
+
   /* Restore list styles inside editor (global reset strips them) */
   .compose-body :global(ul),
   .compose-body :global(ol) {
