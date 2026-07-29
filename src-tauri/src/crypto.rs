@@ -16,6 +16,28 @@ const KEY_ENTRY: &str = "master-encryption-key";
 /// Cached master key (loaded once per process).
 static MASTER_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 
+/// Explain a keyring failure in terms of what the user can do about it.
+///
+/// Worth the words because this is the one failure that reaches ordinary users.
+/// A Linux desktop with no Secret Service provider — minimal WM setups, headless
+/// sessions, containers — fails one of two ways, and the underlying text for
+/// both is opaque D-Bus wording that reads like a bug in this app:
+///
+/// * nothing implements `org.freedesktop.secrets` ⇒ *"The name is not activatable"*
+/// * a provider is running but has no unlocked default keyring ⇒ *"no result found"*
+///
+/// The second is the sharper trap: the store answers, so this is **not** a
+/// `NoEntry`, and the first-run branch below never gets to create a key.
+fn keyring_unavailable(e: &keyring::Error) -> String {
+    format!(
+        "could not reach the OS credential store ({e}). \
+         Mail passwords are encrypted with a key kept there, so they cannot be \
+         saved without it. On Linux, install and run a Secret Service provider \
+         (for example gnome-keyring), and make sure a login keyring exists and \
+         is unlocked."
+    )
+}
+
 /// Get or create the 256-bit master key from the OS keyring.
 fn get_master_key() -> Result<[u8; 32], String> {
     let mut guard = MASTER_KEY.lock().map_err(|e| format!("lock error: {e}"))?;
@@ -24,7 +46,7 @@ fn get_master_key() -> Result<[u8; 32], String> {
     }
 
     let entry = keyring::Entry::new(SERVICE_NAME, KEY_ENTRY)
-        .map_err(|e| format!("keyring entry error: {e}"))?;
+        .map_err(|e| keyring_unavailable(&e))?;
 
     let key = match entry.get_password() {
         Ok(b64_key) => {
@@ -44,10 +66,10 @@ fn get_master_key() -> Result<[u8; 32], String> {
             rand::rng().fill(&mut key);
             let b64 = base64::engine::general_purpose::STANDARD.encode(&key);
             entry.set_password(&b64)
-                .map_err(|e| format!("failed to store master key in OS keyring: {e}"))?;
+                .map_err(|e| keyring_unavailable(&e))?;
             key
         }
-        Err(e) => return Err(format!("keyring error: {e}")),
+        Err(e) => return Err(keyring_unavailable(&e)),
     };
 
     *guard = Some(key);
