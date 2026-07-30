@@ -3,6 +3,8 @@
   import { formatFullDate } from '$lib/utils';
   import { shouldForceSaveAs } from '$lib/utils/attachments';
   import { ensureReadableTextColors } from '$lib/readableColors';
+  import { buildMailDocument, isHtmlDocument, stripStyleBlocks, unwrapHtmlDocument } from '$lib/emailBody';
+  import { beginRenderTrace, installRenderTraceConsole, DISABLED_TRACE, type RenderTrace } from '$lib/renderTrace';
   import { open } from '@tauri-apps/plugin-shell';
   import { locale, t } from '$lib/i18n/index.svelte';
 
@@ -98,93 +100,17 @@
   }
   let hoveredLink: string | null = $state(null);
 
-  /** Build a self-contained HTML document for the iframe srcdoc */
-  /** Check if the email HTML already supports dark mode natively */
-  function hasDarkModeSupport(html: string): boolean {
-    // color-scheme meta tag or CSS property containing "dark"
-    if (/color-scheme[^"]*dark/i.test(html)) return true;
-    // prefers-color-scheme media query
-    if (/prefers-color-scheme\s*:\s*dark/i.test(html)) return true;
-    return false;
-  }
-
-  /** Strip outer HTML/HEAD/BODY wrapper from an email so we can re-wrap it
-   *  inside our own controlled document.  Preserves any style blocks from
-   *  the original head section. */
-  // Build regexes via constructor to avoid literal closing tags that confuse the Svelte parser
-  const CL = '<' + '/';
-  const RE_HEAD = new RegExp('<head[^>]*>([\\s\\S]*?)' + CL + 'head>', 'i');
-  const RE_STYLE_G = new RegExp('<style[\\s\\S]*?' + CL + 'style>', 'gi');
-  const RE_BODY = new RegExp('<body[^>]*>([\\s\\S]*?)' + CL + 'body>', 'i');
-  const RE_HTML_TAGS = new RegExp(CL + '?html[^>]*>', 'gi');
-  const RE_HEAD_BLOCK = new RegExp('<head[^>]*>[\\s\\S]*?' + CL + 'head>', 'i');
-
-  function unwrapHtmlDocument(html: string): string {
-    let s = html.trim();
-    // Remove doctype
-    s = s.replace(/^<!doctype[^>]*>/i, '').trim();
-    // Extract <head> content (styles we want to keep)
-    const headMatch = s.match(RE_HEAD);
-    const headStyles = headMatch
-      ? (headMatch[1].match(RE_STYLE_G) || []).join('\n')
-      : '';
-    // Extract <body> content
-    const bodyMatch = s.match(RE_BODY);
-    const inner = bodyMatch ? bodyMatch[1] : s.replace(RE_HTML_TAGS, '').replace(RE_HEAD_BLOCK, '');
-    return headStyles ? headStyles + '\n' + inner : inner;
-  }
-
+  /** Build the self-contained document written into the iframe. The assembly
+   *  lives in $lib/emailBody, where it stays pure and measurable. */
   function bodySrcdoc(body: string): string {
-    const nativeDark = hasDarkModeSupport(body);
-    const unwrapped = /<!doctype|<html[\s>]/i.test(body) ? unwrapHtmlDocument(body) : body;
-    // Colors are authored against white here (dark theme is an invert of the
-    // white rendering), so drop inline text colors unreadable on white —
-    // e.g. dark-theme-editor pastes. Native-dark mail manages its own colors.
-    const content = nativeDark ? unwrapped : ensureReadableTextColors(unwrapped);
-    const darkCss = darkMode && !nativeDark ? `
-      html{filter:invert(0.9) hue-rotate(170deg);}
-      img,video,picture,svg,canvas,[style*="background-image"]{filter:invert(0.9) hue-rotate(170deg);}
-    ` : '';
-    // Block all external resources for junk/spam emails
-    const cspMeta = isJunk
-      ? `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">`
-      : '';
-    const css = 'html,body{margin:0;padding:0;height:auto!important;overflow:visible!important;min-height:0!important;}' +
-      'body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.65;color:#242424;overflow-wrap:break-word;}' +
-      'img{max-width:100%;height:auto;}a{color:#0078d4;}' + darkCss;
-    // The geometry rules repeat AFTER the content. The email's own stylesheets
-    // land between the two, so on equal-specificity ties (`body{height:100%
-    // !important}` is boilerplate in real mail) source order decides — and
-    // resizeIframe can only trust document geometry if these rules win.
-    // Only the geometry subset: theming (fonts, link color) stays first so
-    // emails can still override it.
-    //
-    // .__mailSqueeze: fixed-width mail (`<table width="640">`, images with
-    // inline `width: 640px`) refuses to shrink below its min-content floor,
-    // and the iframe is scrolling="no" — so in a pane narrower than the mail,
-    // the right edge was silently clipped mid-word. When resizeIframe detects
-    // horizontal overflow it stamps this class on <html>, and these rules
-    // relax the fixed widths so the layout adapts the way Gmail/Outlook web
-    // render the same mail. Conditional on purpose: `img{width:auto}` is the
-    // piece that actually breaks the floor (nothing else beats an inline
-    // pixel width during table min-content sizing), but globally it would
-    // blow retina images (1280px assets declared width=640) up to their
-    // natural size — mail that fits must keep author-exact rendering.
-    const geometryCss = 'html,body{height:auto!important;min-height:0!important;overflow:visible!important;}' +
-      'html.__mailSqueeze table{width:auto!important;max-width:100%!important;}' +
-      'html.__mailSqueeze img{width:auto!important;max-width:100vw!important;height:auto!important;}';
-    return '<!DOCTYPE html><html><head><meta charset="utf-8">' + cspMeta +
-      '<' + 'style>' + css + '<' + '/style><' + '/head>' +
-      '<body>' + content +
-      '<' + 'style>' + geometryCss + '<' + '/style>' +
-      '<' + '/body><' + '/html>';
+    return buildMailDocument(body, { darkMode, isJunk, ensureReadableTextColors });
   }
 
   /** Extract just the body content for the print-only div.
    *  Strips style blocks so they don't leak into the main document. */
   function printBody(body: string): string {
-    let content = /<!doctype|<html[\s>]/i.test(body) ? unwrapHtmlDocument(body) : body;
-    return content.replace(RE_STYLE_G, '');
+    const content = isHtmlDocument(body) ? unwrapHtmlDocument(body) : body;
+    return stripStyleBlocks(content);
   }
 
   /** Resize the iframe to match its content.  Only grows (never shrinks)
@@ -207,11 +133,16 @@
    *  rules after the content, winning equal-specificity ties on source
    *  order. */
   let iframeInitialized = false;
+  /** Timing for the document currently being rendered. No-op unless tracing is
+   *  switched on — see $lib/renderTrace. */
+  let renderTrace: RenderTrace = DISABLED_TRACE;
 
-  function resizeIframe(iframe: HTMLIFrameElement) {
+  /** Returns the height it measured, or null if the document wasn't ready. */
+  function resizeIframe(iframe: HTMLIFrameElement): number | null {
     try {
       const doc = iframe.contentDocument;
-      if (!doc?.body) return;
+      if (!doc?.body) return null;
+      renderTrace.measure();
 
       // Fixed-width mail wider than the pane would be clipped on the right
       // (scrolling="no"). Engage squeeze mode (see geometryCss) to relax the
@@ -233,12 +164,56 @@
       // `> 1`, not `> 0`: a render-blocked document (stylesheet import still
       // loading) reports ~1px — initializing on that locks the pane collapsed.
       if (!iframeInitialized) {
-        if (h > 1) { iframe.style.height = h + 'px'; iframeInitialized = true; }
+        if (h > 1) {
+          iframe.style.height = h + 'px';
+          iframeInitialized = true;
+          renderTrace.mark('firstSize');
+          renderTrace.resized(h);
+        }
       } else if (h > cur) {
         iframe.style.height = h + 'px';
+        renderTrace.resized(h);
       }
+      return h;
     } catch { /* cross-origin – ignore */ }
+    return null;
   }
+
+  /** Coalesce every resize trigger onto one measurement per animation frame.
+   *
+   *  A mail with 79 images fires ~90 triggers while it loads — one per image,
+   *  plus the ResizeObserver, the MutationObserver and the poll. Called
+   *  directly, each one reads layout (`scrollWidth`, `getBoundingClientRect`,
+   *  `scrollHeight`) and then writes `iframe.style.height`, so every trigger
+   *  forces a synchronous layout and dirties the one after it.
+   *
+   *  Batching collapses that to one measurement per frame. Dark theme benefits
+   *  a little more — `darkCss` filters the iframe root, so each repaint also
+   *  re-runs the invert (measured at +1.2ms per resize on a 79-image digest in
+   *  Chromium) — but the win is mostly the layout thrash, which both themes pay
+   *  equally. This is not a fix for the dark-theme render delay; that cause is
+   *  still unidentified, and the filter is too cheap to account for it. */
+  function makeResizeScheduler(iframe: HTMLIFrameElement) {
+    let frame = 0;
+    // Retry budget for the initial sizing. A render-blocked document measures
+    // ~1px and can't initialize (see resizeIframe), so keep asking until it
+    // resolves — bounded, since a genuinely empty mail never exceeds 1px.
+    let initialRetries = 60;
+    const run = () => {
+      frame = 0;
+      resizeIframe(iframe);
+      if (!iframeInitialized && initialRetries-- > 0) schedule();
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(run); };
+    const cancel = () => { if (frame) cancelAnimationFrame(frame); frame = 0; };
+    return { schedule, cancel };
+  }
+
+  /** Drops the observers, timers and pending frame belonging to the document
+   *  currently in the iframe. Every message switch replaces that document, and
+   *  without this the previous message's poll and observers keep firing against
+   *  the new one. */
+  let teardownIframe: (() => void) | null = null;
 
   /** Write HTML into the iframe via document.write() instead of srcdoc.
    *  This forces synchronous parsing and avoids Chromium srcdoc rendering
@@ -247,46 +222,83 @@
     try {
       const doc = iframe.contentDocument;
       if (!doc) return;
+      teardownIframe?.();
+      // `filtered` is read off the generated document rather than the theme:
+      // mail that styles itself for dark backgrounds renders unfiltered in both.
+      // Held locally as well as in `renderTrace`: the closures below must
+      // publish *this* render's timings even if a newer message has already
+      // replaced the current trace by the time they run.
+      const trace = beginRenderTrace({
+        darkMode,
+        filtered: html.includes('filter:invert'),
+        docBytes: html.length,
+        images: (html.match(/<img/gi) || []).length,
+      });
+      renderTrace = trace;
       doc.open();
       doc.write(html);
       doc.close();
+      trace.mark('write');
 
-      // Resize after layout
-      requestAnimationFrame(() => {
-        resizeIframe(iframe);
-        requestAnimationFrame(() => resizeIframe(iframe));
-      });
+      const { schedule, cancel } = makeResizeScheduler(iframe);
+      // Measure after layout. Every other trigger below funnels into the same
+      // scheduler, so they collapse into one measurement per frame.
+      schedule();
 
       // ResizeObserver for body dimension changes
       if (doc.body) {
-        const ro = new ResizeObserver(() => resizeIframe(iframe));
+        const ro = new ResizeObserver(schedule);
         ro.observe(doc.body);
 
         // Parsing + subresources done. When the parser finishes async (see
         // resizeIframe's doc comment) this is the moment the content exists —
         // and the img listeners below saw none of it, since the imgs weren't
         // in the DOM yet when we queried.
-        doc.defaultView?.addEventListener('load', () => resizeIframe(iframe), { once: true });
+        doc.defaultView?.addEventListener('load', () => {
+          trace.mark('load');
+          schedule();
+        }, { once: true });
 
         // Watch all images (only those the parser has emitted so far — the
         // load event above covers the rest)
         doc.querySelectorAll('img').forEach((img) => {
           if (!img.complete) {
-            img.addEventListener('load', () => resizeIframe(iframe), { once: true });
-            img.addEventListener('error', () => resizeIframe(iframe), { once: true });
+            img.addEventListener('load', schedule, { once: true });
+            img.addEventListener('error', schedule, { once: true });
           }
         });
 
         // MutationObserver for late DOM changes
-        const mo = new MutationObserver(() => resizeIframe(iframe));
+        const mo = new MutationObserver(schedule);
         mo.observe(doc.body, { childList: true, subtree: true, attributes: true });
 
-        // Polling fallback for the first 5s
+        // Polling fallback for the first 5s, for changes none of the observers
+        // above report. Gives up early once the document has finished loading
+        // and stopped growing — the common case, where the remaining ticks
+        // would each re-measure (and in dark theme re-filter) for nothing.
         let polls = 0;
+        let stable = 0;
+        let lastH = -1;
         const poll = setInterval(() => {
-          resizeIframe(iframe);
-          if (++polls >= 10) clearInterval(poll);
+          const h = resizeIframe(iframe);
+          stable = h !== null && h === lastH ? stable + 1 : 0;
+          lastH = h ?? -1;
+          if (++polls >= 10 || (stable >= 2 && doc.readyState === 'complete')) {
+            clearInterval(poll);
+            // Height has stopped moving: the render is as done as it gets, so
+            // this is the point where the trace is worth reading.
+            trace.finish();
+          }
         }, 500);
+
+        teardownIframe = () => {
+          cancel();
+          ro.disconnect();
+          mo.disconnect();
+          clearInterval(poll);
+          trace.finish();   // no-op if the poll already published it
+          teardownIframe = null;
+        };
 
         // Intercept link clicks → open in system browser
         doc.addEventListener('click', (evt) => {
@@ -333,6 +345,11 @@
     } catch { /* ignore */ }
   }
 
+  // Expose __mailRenderTrace so render timing can be switched on from the
+  // devtools console in a running build. Registration only; tracing stays off
+  // until enabled (and the setting persists across restarts).
+  installRenderTraceConsole();
+
   // Write content into iframe whenever email body or iframe element changes
   $effect(() => {
     if (iframeEl && email?.body) {
@@ -340,6 +357,7 @@
       hoveredLink = null;
       writeIframeContent(iframeEl, bodySrcdoc(email.body));
     }
+    return () => teardownIframe?.();
   });
 
   // Reset headers view when email changes
@@ -504,9 +522,16 @@
             <span>{t('readingPane.loadingMessage')}</span>
           </div>
         {:else}
+          <!-- allow-scripts is required for the app's own listeners (link
+               interception, key forwarding, hover preview) to run at all:
+               WebKitGTK blocks every listener on a script-less sandboxed
+               document, parent-registered ones included. Mail's own scripts are
+               blocked by the CSP that buildMailDocument emits instead — see the
+               note there. Deliberately absent: allow-top-navigation,
+               allow-popups, allow-forms, allow-modals. -->
           <iframe
             bind:this={iframeEl}
-            sandbox="allow-same-origin"
+            sandbox="allow-same-origin allow-scripts"
             scrolling="no"
             title={t('readingPane.emailBody')}
             class="body-iframe"
