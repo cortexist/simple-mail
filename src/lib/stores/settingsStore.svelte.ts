@@ -424,33 +424,42 @@ export function fireSetAccountOfflineDownload(accountId: string, enabled: boolea
   });
 }
 
-export function fireSaveMailSettings(accountId: string, settings: MailServerSettings): void {
-  if (!inTauri()) return;
+/**
+ * Persisting credentials can fail outright — the password is encrypted with a
+ * master key held in the OS secret store, so a machine with no Secret Service
+ * provider rejects the write. Returning the promise lets the caller report that
+ * instead of flashing "Saved" over a save the backend refused.
+ */
+export function fireSaveMailSettings(accountId: string, settings: MailServerSettings): Promise<void> {
+  if (!inTauri()) return Promise.resolve();
   const k = seqKey('mail', accountId);
   incOp(k);
-  invoke('save_mail_settings', { accountId, settings }).catch((err) => {
+  return invoke<void>('save_mail_settings', { accountId, settings }).catch((err) => {
     console.error('save_mail_settings rejected:', err);
     decOp(k);
+    throw err;
   });
 }
 
-export function fireSaveCalDavSettings(accountId: string, settings: DavSettings): void {
-  if (!inTauri()) return;
+export function fireSaveCalDavSettings(accountId: string, settings: DavSettings): Promise<void> {
+  if (!inTauri()) return Promise.resolve();
   const k = seqKey('caldav', accountId);
   incOp(k);
-  invoke('save_caldav_settings', { accountId, settings }).catch((err) => {
+  return invoke<void>('save_caldav_settings', { accountId, settings }).catch((err) => {
     console.error('save_caldav_settings rejected:', err);
     decOp(k);
+    throw err;
   });
 }
 
-export function fireSaveCardDavSettings(accountId: string, settings: DavSettings): void {
-  if (!inTauri()) return;
+export function fireSaveCardDavSettings(accountId: string, settings: DavSettings): Promise<void> {
+  if (!inTauri()) return Promise.resolve();
   const k = seqKey('carddav', accountId);
   incOp(k);
-  invoke('save_carddav_settings', { accountId, settings }).catch((err) => {
+  return invoke<void>('save_carddav_settings', { accountId, settings }).catch((err) => {
     console.error('save_carddav_settings rejected:', err);
     decOp(k);
+    throw err;
   });
 }
 

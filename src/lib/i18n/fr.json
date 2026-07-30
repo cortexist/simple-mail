@@ -336,7 +336,8 @@
     "discovering": "Découverte des paramètres du serveur…",
     "discoverFailed": "Impossible de découvrir automatiquement les paramètres du serveur.",
     "discoverSuccess": "Paramètres du serveur remplis automatiquement depuis {source}.",
-    "invalidEmail": "Veuillez saisir une adresse e-mail valide."
+    "invalidEmail": "Veuillez saisir une adresse e-mail valide.",
+    "saveFailed": "Échec de l'enregistrement : {error}"
   },
   "contacts": {
     "toggleMuted": "Afficher/masquer les contacts en sourdine",

@@ -2632,17 +2632,26 @@
     fireSetSetting('locale', code);
   }
 
-  function handleUpdateAccount(updated: Account) {
+  /**
+   * Awaits the credential writes so a rejection reaches the settings form.
+   * They can fail for real (no OS secret store ⇒ the password can't be
+   * encrypted), and a silent failure there reads as "the app won't save".
+   * The metadata write stays fire-and-forget; it has no such failure mode.
+   */
+  async function handleUpdateAccount(updated: Account) {
     fireUpdateAccount(updated);
+    const writes: Promise<void>[] = [];
     if (updated.serverSettings) {
-      fireSaveMailSettings(updated.id, updated.serverSettings);
+      writes.push(fireSaveMailSettings(updated.id, updated.serverSettings));
     }
     if (updated.calDavSettings) {
-      fireSaveCalDavSettings(updated.id, updated.calDavSettings);
+      writes.push(fireSaveCalDavSettings(updated.id, updated.calDavSettings));
     }
     if (updated.cardDavSettings) {
-      fireSaveCardDavSettings(updated.id, updated.cardDavSettings);
+      writes.push(fireSaveCardDavSettings(updated.id, updated.cardDavSettings));
     }
+    // all, not allSettled: the first rejection is the one worth showing.
+    await Promise.all(writes);
   }
 
   function handleDeleteAccount(accountId: string) {

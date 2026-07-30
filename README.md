@@ -118,6 +118,10 @@ Highlights since late March 2026:
 - [Node.js](https://nodejs.org) >= 18
 - [Rust](https://rustup.rs) >= 1.77
 - Platform build tools for [Tauri](https://v2.tauri.app/start/prerequisites/)
+- **Linux, at runtime:** a Secret Service provider such as `gnome-keyring`, used
+  to hold the key that encrypts stored mail passwords. Present by default on
+  GNOME-based desktops; usually absent on minimal window-manager setups. See
+  [Credential Storage](#credential-storage).
 
 ## Getting Started
 
@@ -133,6 +137,76 @@ npm run tauri build
 ```
 
 The production binary and installer are output to `src-tauri/target/release/bundle/`.
+
+## Credential Storage
+
+Mail passwords are encrypted with AES-256-GCM before being written to the
+database. The master key is deliberately **not** stored beside them — it lives in
+the OS credential store (Windows Credential Manager, macOS Keychain, Linux Secret
+Service).
+
+Windows and macOS work out of the box. On Linux the app needs a running **Secret
+Service** provider (`org.freedesktop.secrets`):
+
+- **GNOME-based desktops** (Ubuntu, Fedora Workstation, Debian GNOME, Pop!_OS)
+  ship `gnome-keyring`, started and unlocked at login. Nothing to do.
+- **Minimal setups** — tiling WMs (sway, i3, Hyprland), bare X sessions,
+  containers, CI — usually have no provider at all.
+- **KDE** ships KWallet, whose Secret Service support has varied across
+  versions. Don't assume; check with the `busctl` command below.
+
+### Symptom
+
+Saving an account fails with:
+
+> Couldn't save: could not reach the OS credential store …
+
+Nothing is persisted, because the password cannot be encrypted. Two knock-on
+effects are worth recognising, since neither obviously points at the keyring:
+
+- The server and username fields come back empty next time you open the account.
+- Adding a second mailbox on the *same* credentials silently fails to merge.
+  Accounts are grouped into one login by matching stored credentials, so when
+  nothing is stored there is nothing to match, and each account keeps its own
+  login instead of sharing one.
+
+An account saved with an **empty** password field appears to succeed — empty
+values skip encryption entirely and never touch the keyring.
+
+### Fix
+
+Install a provider:
+
+```bash
+sudo pacman -S gnome-keyring     # Arch
+sudo apt install gnome-keyring   # Debian/Ubuntu
+sudo dnf install gnome-keyring   # Fedora
+```
+
+A provider on its own is not enough: there must also be a login keyring, and it
+must be unlocked. Create/unlock it for the current session with
+
+```bash
+echo -n "your-keyring-password" | gnome-keyring-daemon --unlock --components=secrets
+```
+
+To unlock it automatically with your login password, enable `pam_gnome_keyring`
+in your display manager's PAM stack (or `/etc/pam.d/login`):
+
+```
+auth     optional  pam_gnome_keyring.so
+session  optional  pam_gnome_keyring.so auto_start
+```
+
+Verify the service is reachable:
+
+```bash
+busctl --user list | grep org.freedesktop.secrets
+```
+
+The `.deb` and `.rpm` packages list `gnome-keyring` under *Recommends*, so most
+package-managed installs pull one in. The AppImage cannot express a dependency —
+on a minimal system, install it yourself.
 
 ## Provider Notes
 

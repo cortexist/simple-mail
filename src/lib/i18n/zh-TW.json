@@ -336,7 +336,8 @@
     "discovering": "正在探索伺服器設定…",
     "discoverFailed": "無法自動探索伺服器設定。",
     "discoverSuccess": "已從 {source} 自動填入伺服器設定。",
-    "invalidEmail": "請輸入有效的電子郵件地址。"
+    "invalidEmail": "請輸入有效的電子郵件地址。",
+    "saveFailed": "儲存失敗：{error}"
   },
   "contacts": {
     "toggleMuted": "切換靜音聯絡人",

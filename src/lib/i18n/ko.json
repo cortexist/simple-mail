@@ -336,7 +336,8 @@
     "discovering": "서버 설정 검색 중…",
     "discoverFailed": "서버 설정을 자동으로 검색할 수 없습니다.",
     "discoverSuccess": "서버 설정이 {source}에서 자동으로 채워졌습니다.",
-    "invalidEmail": "유효한 이메일 주소를 입력하세요."
+    "invalidEmail": "유효한 이메일 주소를 입력하세요.",
+    "saveFailed": "저장하지 못했습니다: {error}"
   },
   "contacts": {
     "toggleMuted": "음소거된 연락처 토글",

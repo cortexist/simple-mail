@@ -336,7 +336,8 @@
     "discovering": "Detectando configuraci\u00f3n del servidor\u2026",
     "discoverFailed": "No se pudo detectar autom\u00e1ticamente la configuraci\u00f3n del servidor.",
     "discoverSuccess": "Configuraci\u00f3n del servidor completada autom\u00e1ticamente desde {source}.",
-    "invalidEmail": "Introduce una dirección de correo válida."
+    "invalidEmail": "Introduce una dirección de correo válida.",
+    "saveFailed": "No se pudo guardar: {error}"
   },
   "contacts": {
     "toggleMuted": "Alternar contactos silenciados",

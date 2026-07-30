@@ -359,19 +359,29 @@
       username: accountForm.cardDavUsername || accountForm.email,
       password: accountForm.cardDavPassword,
     } : undefined;
-    await onUpdateAccount({
-      ...selectedAccount,
-      name: buildAccountName(accountForm),
-      alias: accountForm.alias || undefined,
-      email: accountForm.email,
-      initials: accountForm.initials,
-      color: accountForm.color,
-      avatarUrl: accountForm.avatarUrl || undefined,
-      signature: accountForm.signature,
-      serverSettings,
-      calDavSettings,
-      cardDavSettings,
-    });
+    try {
+      await onUpdateAccount({
+        ...selectedAccount,
+        name: buildAccountName(accountForm),
+        alias: accountForm.alias || undefined,
+        email: accountForm.email,
+        initials: accountForm.initials,
+        color: accountForm.color,
+        avatarUrl: accountForm.avatarUrl || undefined,
+        signature: accountForm.signature,
+        serverSettings,
+        calDavSettings,
+        cardDavSettings,
+      });
+    } catch (e) {
+      // Storing credentials can be refused outright (no OS secret store to hold
+      // the encryption key). Reporting success here would leave the user
+      // re-entering a server that never persisted.
+      accountFormError = t('settings.saveFailed', {
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
     if (requireAccount) {
       await onCompleteRequiredSetup?.();
     } else {

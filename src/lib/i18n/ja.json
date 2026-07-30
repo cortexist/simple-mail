@@ -336,7 +336,8 @@
     "discovering": "サーバー設定を検出中…",
     "discoverFailed": "サーバー設定を自動検出できませんでした。",
     "discoverSuccess": "{source} からサーバー設定を自動入力しました。",
-    "invalidEmail": "有効なメールアドレスを入力してください。"
+    "invalidEmail": "有効なメールアドレスを入力してください。",
+    "saveFailed": "保存できませんでした: {error}"
   },
   "contacts": {
     "toggleMuted": "ミュート済み連絡先の表示切替",

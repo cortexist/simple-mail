@@ -336,7 +336,8 @@
     "discovering": "Servereinstellungen werden ermittelt…",
     "discoverFailed": "Servereinstellungen konnten nicht automatisch ermittelt werden.",
     "discoverSuccess": "Servereinstellungen automatisch ausgefüllt von {source}.",
-    "invalidEmail": "Bitte gültige E-Mail-Adresse eingeben."
+    "invalidEmail": "Bitte gültige E-Mail-Adresse eingeben.",
+    "saveFailed": "Speichern fehlgeschlagen: {error}"
   },
   "contacts": {
     "toggleMuted": "Stummgeschaltete Kontakte umschalten",

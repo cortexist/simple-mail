@@ -339,7 +339,8 @@
     "discovering": "Discovering server settings…",
     "discoverFailed": "Could not auto-discover server settings.",
     "discoverSuccess": "Server settings auto-filled from {source}.",
-    "invalidEmail": "Please enter a valid email address."
+    "invalidEmail": "Please enter a valid email address.",
+    "saveFailed": "Couldn't save: {error}"
   },
   "contacts": {
     "toggleMuted": "Toggle muted contacts",

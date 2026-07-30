@@ -336,7 +336,8 @@
     "discovering": "Ricerca impostazioni server…",
     "discoverFailed": "Impossibile rilevare automaticamente le impostazioni del server.",
     "discoverSuccess": "Impostazioni server compilate automaticamente da {source}.",
-    "invalidEmail": "Inserisci un indirizzo email valido."
+    "invalidEmail": "Inserisci un indirizzo email valido.",
+    "saveFailed": "Salvataggio non riuscito: {error}"
   },
   "contacts": {
     "toggleMuted": "Attiva/disattiva contatti silenziati",

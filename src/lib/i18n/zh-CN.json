@@ -337,7 +337,8 @@
     "discovering": "正在发现服务器设置…",
     "discoverFailed": "无法自动发现服务器设置。",
     "discoverSuccess": "已从 {source} 自动填充服务器设置。",
-    "invalidEmail": "请输入有效的电子邮件地址。"
+    "invalidEmail": "请输入有效的电子邮件地址。",
+    "saveFailed": "保存失败：{error}"
   },
   "contacts": {
     "toggleMuted": "切换静音联系人",
