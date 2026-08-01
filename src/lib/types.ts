@@ -259,6 +259,18 @@ export interface ContactList {
   members: ContactListMember[];
 }
 
+/** Which window controls this environment expects the app to draw — see
+ *  `src-tauri/src/chrome.rs`. A tiling compositor implements neither minimize
+ *  nor maximize, so drawing those buttons there would draw buttons that do
+ *  nothing. */
+export interface WindowChrome {
+  controls: boolean;
+  minimize: boolean;
+  maximize: boolean;
+  /** Leave the left of the bar clear for the platform's own controls. */
+  trafficLightInset: boolean;
+}
+
 export type NavItem = 'mail' | 'calendar' | 'contacts';
 export type CalendarViewMode = 'day' | 'week' | 'month';
 export type ComposeMode = 'new' | 'reply' | 'replyAll' | 'forward';

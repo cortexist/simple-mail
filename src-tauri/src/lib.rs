@@ -1,3 +1,4 @@
+mod chrome;
 mod db;
 mod login;
 mod sync_state;
@@ -397,6 +398,13 @@ fn get_all_accounts(state: tauri::State<'_, AppState>) -> Result<Vec<Account>, S
         .collect();
 
     Ok(accounts)
+}
+
+/// Which window controls this environment expects the app to draw. Asked once
+/// at start-up: nothing here changes while the window is open.
+#[tauri::command]
+fn window_chrome() -> chrome::WindowChrome {
+    chrome::detect()
 }
 
 #[tauri::command]
@@ -6239,6 +6247,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_all_accounts,
+            window_chrome,
             get_setting,
             set_setting,
             get_storage_info,

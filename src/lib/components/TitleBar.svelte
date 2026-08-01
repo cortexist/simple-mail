@@ -1,8 +1,9 @@
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { invoke } from '@tauri-apps/api/core';
   import { listen } from '$lib/stores/safeListen';
   import { onMount } from 'svelte';
-  import type { Account, NavItem } from '$lib/types';
+  import type { Account, NavItem, WindowChrome } from '$lib/types';
   import { t } from '$lib/i18n/index.svelte';
 
   interface Props {
@@ -36,7 +37,6 @@
   });
 
   let isMaximized = $state(false);
-  const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.userAgent);
 
   // Lazy: getCurrentWindow() dereferences __TAURI_INTERNALS__.metadata, which
   // doesn't exist in a plain browser (`npm run dev`) — calling it at component
@@ -44,17 +44,49 @@
   const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
   const appWindow = inTauri ? getCurrentWindow() : null;
 
+  // Which controls this environment expects us to draw. The window is
+  // undecorated, so the bar is ours and the answer can't come from the
+  // toolkit — the backend works it out in src-tauri/src/chrome.rs.
+  //
+  // Nothing until the answer arrives, and nothing in a plain browser where
+  // there is no window to control: an empty corner is better than one that
+  // flashes buttons it then takes away.
+  const none: WindowChrome = { controls: false, minimize: false, maximize: false, trafficLightInset: false };
+  let chrome = $state<WindowChrome>(none);
+
   async function checkMaximized() {
     if (appWindow) isMaximized = await appWindow.isMaximized();
   }
 
   onMount(() => {
-    checkMaximized();
-    const unlisten = listen('tauri://resize', () => {
+    // The resize listener is only registered once the backend has answered, so
+    // it may outlive an unmount that happens while that call is in flight —
+    // hence the flag as well as the handle.
+    let disposed = false;
+    let unlisten: ReturnType<typeof listen> | null = null;
+
+    (async () => {
+      if (!inTauri) return;
+      try {
+        chrome = await invoke<WindowChrome>('window_chrome');
+      } catch (err) {
+        // A backend that can't answer leaves the bar plain, which is still a
+        // usable window — the compositor can always close it.
+        console.error('window_chrome failed:', err);
+        return;
+      }
+      // Nothing here can maximize the window, so there is no such state to
+      // follow and no icon that depends on it.
+      if (disposed || !chrome.maximize) return;
       checkMaximized();
-    });
+      unlisten = listen('tauri://resize', () => {
+        checkMaximized();
+      });
+    })();
+
     return () => {
-      unlisten.then((fn) => fn());
+      disposed = true;
+      unlisten?.then((fn) => fn());
     };
   });
 
@@ -65,10 +97,10 @@
   });
 </script>
 
-<header class="title-bar" class:macos={isMac}>
+<header class="title-bar">
   <!-- Left: app brand -->
   <div class="bar-left">
-    {#if isMac}<div class="traffic-light-spacer"></div>{/if}
+    {#if chrome.trafficLightInset}<div class="traffic-light-spacer"></div>{/if}
     <div class="app-brand">
         <svg class="app-icon" height="24" viewBox="0 0 125.77 24">
             <g fill="currentColor">
@@ -195,13 +227,18 @@
       {/if}
     </button>
 
-    {#if !isMac}
+    <!-- Only the controls that do something here are drawn — see
+         src-tauri/src/chrome.rs for who gets what. -->
+    {#if chrome.controls}
       <div class="window-controls">
+        {#if chrome.minimize}
         <button class="win-btn" tabindex="-1" data-tooltip={t('titleBar.minimize')} data-tooltip-position="bottom" aria-label={t('titleBar.minimize')} onclick={() => appWindow?.minimize()}>
           <svg width="10" height="10" viewBox="0 0 10 10">
             <line x1="0" y1="5" x2="10" y2="5" stroke="currentColor" stroke-width="1" />
           </svg>
         </button>
+        {/if}
+        {#if chrome.maximize}
         <button class="win-btn" tabindex="-1" data-tooltip={isMaximized ? t('titleBar.restore') : t('titleBar.maximize')} data-tooltip-position="bottom" aria-label={isMaximized ? t('titleBar.restore') : t('titleBar.maximize')} onclick={() => appWindow?.toggleMaximize()}>
           {#if isMaximized}
             <svg width="10" height="10" viewBox="0 0 10 10">
@@ -216,6 +253,8 @@
             </svg>
           {/if}
         </button>
+        {/if}
+        <!-- Close is unconditional: every window manager can close a window. -->
         <button class="win-btn win-close" tabindex="-1" data-tooltip={t('titleBar.close')} data-tooltip-position="bottom" aria-label={t('titleBar.close')} onclick={() => appWindow?.close()}>
           <svg width="10" height="10" viewBox="0 0 10 10">
             <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.2" />
