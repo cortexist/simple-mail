@@ -12,6 +12,7 @@
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import { t, locale } from '$lib/i18n/index.svelte';
   import DatePicker from './DatePicker.svelte';
+  import Select from './Select.svelte';
   import TimePicker from './TimePicker.svelte';
 
   interface Props {
@@ -607,6 +608,18 @@
     { key: 'calendar.alert1hour', value: 60 },
     { key: 'calendar.alert1day', value: 1440 },
   ];
+
+  // Derived so the dropdowns re-translate when the locale changes.
+  let alertOptions = $derived(ALERT_OPTIONS.map((o) => ({ value: o.value, label: t(o.key) })));
+
+  let recurFreqOptions = $derived([
+    { value: 'daily',   label: t('calendar.days') },
+    { value: 'weekly',  label: t('calendar.weeks') },
+    { value: 'monthly', label: t('calendar.months') },
+    { value: 'yearly',  label: t('calendar.years') },
+  ]);
+
+  let calendarOptions = $derived(categories.map((c) => ({ value: c.id, label: calendarDisplayName(c) })));
 
   // Delete recurring confirmation
   let showDeleteRecurDialog = $state(false);
@@ -1588,12 +1601,9 @@
               onkeydown={(e) => { if (!/^[0-9]$/.test(e.key) && !['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'].includes(e.key)) e.preventDefault(); }}
               oninput={(e) => { const raw = (e.target as HTMLInputElement).value.replace(/\D/g, '').slice(0, 3); (e.target as HTMLInputElement).value = raw; const v = parseInt(raw); evRecurInterval = v > 0 ? v : evRecurInterval; }}
             />
-            <select class="ev-input ev-input-freq" bind:value={evRecurFreq}>
-              <option value="daily">{t('calendar.days')}</option>
-              <option value="weekly">{t('calendar.weeks')}</option>
-              <option value="monthly">{t('calendar.months')}</option>
-              <option value="yearly">{t('calendar.years')}</option>
-            </select>
+            <div class="ev-input-freq">
+              <Select bind:value={evRecurFreq} options={recurFreqOptions} ariaLabel={t('calendar.repeats')} />
+            </div>
           </div>
           {#if (evRecurFreq === 'monthly' || evRecurFreq === 'yearly') && evDate}
             <div class="ev-recur-byday">
@@ -1633,22 +1643,12 @@
 
         <div class="ev-field">
           <label class="ev-label" for="ev-alert">{t('calendar.alert')}</label>
-          <select id="ev-alert" class="ev-input" bind:value={evAlertMinutes}>
-            {#each ALERT_OPTIONS as opt}
-              <option value={opt.value}>{t(opt.key)}</option>
-            {/each}
-          </select>
+          <Select id="ev-alert" bind:value={evAlertMinutes} options={alertOptions} />
         </div>
 
         <div class="ev-field">
           <label class="ev-label" for="ev-calendar">{t('calendar.calendarLabel')}</label>
-          <select id="ev-calendar" class="ev-input" bind:value={evCalendarId}>
-            {#each categories as cat}
-              <option value={cat.id}>
-                {calendarDisplayName(cat)}
-              </option>
-            {/each}
-          </select>
+          <Select id="ev-calendar" bind:value={evCalendarId} options={calendarOptions} />
         </div>
 
         <div class="ev-field">

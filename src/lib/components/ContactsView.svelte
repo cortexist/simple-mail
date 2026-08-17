@@ -4,6 +4,7 @@
   import { fireToggleContactFavorite } from '$lib/stores/contactsStore.svelte';
   import { t } from '$lib/i18n/index.svelte';
   import { isLikelyEmail } from '$lib/utils';
+  import Select from './Select.svelte';
 
   interface Props {
     contacts: FullContact[];
@@ -284,6 +285,11 @@
     }
     return full;
   }
+
+  // Derived so the label dropdowns re-translate when the locale changes.
+  let emailLabelOptions   = $derived(EMAIL_LABELS.map((l) => ({ value: l, label: labelText(l) })));
+  let phoneLabelOptions   = $derived(PHONE_LABELS.map((l) => ({ value: l, label: labelText(l) })));
+  let addressLabelOptions = $derived(ADDRESS_LABELS.map((l) => ({ value: l, label: labelText(l) })));
 
   /** Build FN from name parts; fall back to organization */
   function buildFullName(): string {
@@ -1157,9 +1163,9 @@
           </div>
           {#each ctEmails as row, i (i)}
             <div class="ct-multi-row">
-              <select class="ct-input ct-label-select" bind:value={row.label}>
-                {#each EMAIL_LABELS as lbl}<option value={lbl}>{labelText(lbl)}</option>{/each}
-              </select>
+              <div class="ct-label-select">
+                <Select bind:value={row.label} options={emailLabelOptions} ariaLabel={t('contacts.email')} />
+              </div>
               <input autocomplete="off" type="email" class="ct-input ct-multi-input" class:invalid={row.email.trim() && !isLikelyEmail(row.email)} bind:value={row.email} placeholder={t('contacts.emailPlaceholder')} />
               <button type="button" class="ct-move-btn" onclick={() => moveEmailRow(i, -1)} disabled={i === 0} aria-label="Move Up" data-tooltip={t('contacts.moveUp')}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1188,9 +1194,9 @@
           </div>
           {#each ctPhones as row, i (i)}
             <div class="ct-multi-row ct-multi-row-phone">
-              <select class="ct-input ct-label-select" bind:value={row.label}>
-                {#each PHONE_LABELS as lbl}<option value={lbl}>{labelText(lbl)}</option>{/each}
-              </select>
+              <div class="ct-label-select">
+                <Select bind:value={row.label} options={phoneLabelOptions} ariaLabel={t('contacts.phone')} />
+              </div>
               <input autocomplete="off" type="tel" class="ct-input ct-multi-input" bind:value={row.number} placeholder={t('contacts.phonePlaceholder')} onblur={() => { row.number = normalizePhone(row.number); }} />
               <button type="button" class="ct-move-btn" onclick={() => movePhoneRow(i, -1)} disabled={i === 0} aria-label="Move Up" data-tooltip={t('contacts.moveUp')}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1228,9 +1234,9 @@
           {#each ctAddresses as row, i (i)}
             <div class="ct-address-block">
               <div class="ct-multi-row">
-                <select class="ct-input ct-label-select" bind:value={row.label}>
-                  {#each ADDRESS_LABELS as lbl}<option value={lbl}>{labelText(lbl)}</option>{/each}
-                </select>
+                <div class="ct-label-select">
+                  <Select bind:value={row.label} options={addressLabelOptions} ariaLabel={t('contacts.addressLabel')} />
+                </div>
                 <button type="button" class="ct-move-btn" onclick={() => moveAddressRow(i, -1)} disabled={i === 0} aria-label="Move Up" data-tooltip={t('contacts.moveUp')}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                     <polyline points="18 15 12 9 6 15" />
@@ -2061,10 +2067,10 @@
     min-width: 0;
   }
 
+  /* Sizing-only wrapper around <Select>; the control draws its own chrome. */
   .ct-label-select {
     flex: 0 0 auto;
     width: 96px;
-    padding: 7px 8px;
   }
 
   .ct-move-btn {

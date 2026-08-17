@@ -158,11 +158,33 @@ async fn connect_inner(settings: &MailServerSettings) -> Result<ImapSession> {
 
     log::info!("IMAP connected to {}:{} using '{}', attempting login as '{}'", host, port, security, settings.incoming_username);
 
-    let mut session = client
+    let mut session = match client
         .login(&settings.incoming_username, &settings.incoming_password)
         .await
-        .map_err(|(e, _)| e)
-        .with_context(|| format!("IMAP login failed for {}:{} using {}", host, port, security))?;
+    {
+        Ok(session) => session,
+        Err((e, _)) => {
+            // The transport is already proven at this point — TCP, TLS and the
+            // greeting all succeeded. Saying "connect failed" here sends users
+            // hunting through port and SSL/STARTTLS settings that were never
+            // wrong. Name the rejection for what it is, and point at the two
+            // account-side switches that actually cause it.
+            let detail = e.to_string();
+            if is_auth_rejection(&detail) {
+                bail!(
+                    "IMAP server {}:{} rejected the credentials for '{}' ({}). \
+                     The connection itself succeeded — TLS and the port are fine, so this is \
+                     an authentication failure, not a connection failure. Check that the \
+                     password is correct, and note that some providers (mail.com, GMX, Yahoo, \
+                     Fastmail) refuse your normal web password: they require an app-specific \
+                     password, and some also need IMAP access switched on in their web settings.",
+                    host, port, settings.incoming_username, detail.trim()
+                );
+            }
+            return Err(anyhow::Error::new(e))
+                .with_context(|| format!("IMAP login failed for {}:{} using {}", host, port, security));
+        }
+    };
 
     log::info!("IMAP login successful for {}:{}", host, port);
 
@@ -178,6 +200,33 @@ async fn connect_inner(settings: &MailServerSettings) -> Result<ImapSession> {
     }
 
     Ok(session)
+}
+
+/// Does this LOGIN/AUTHENTICATE error mean "the server understood us and said
+/// no" rather than "the connection broke"?
+///
+/// Servers word the refusal freely — RFC 3501 only suggests the
+/// `[AUTHENTICATIONFAILED]` response code, and plenty omit it. mail.com answers
+/// a bare `NO authentication failed`, Gmail `[AUTHENTICATIONFAILED] Invalid
+/// credentials`, Yahoo `[AUTHENTICATIONFAILED] AUTHENTICATE failed`. Matching
+/// the text is unavoidable; matching it loosely is the point, since a missed
+/// match only falls back to the previous, vaguer message.
+fn is_auth_rejection(detail: &str) -> bool {
+    let d = detail.to_ascii_lowercase();
+    [
+        "authenticationfailed",
+        "authentication failed",
+        "authenticate failed",
+        "invalid credentials",
+        "invalid login",
+        "login failed",
+        "authorization failed",
+        "auth failed",
+        "bad credentials",
+        "password",
+    ]
+    .iter()
+    .any(|needle| d.contains(needle))
 }
 
 /// Probe the post-login server for the X-GM-EXT-1 capability (Gmail-only).
@@ -877,7 +926,44 @@ fn pick_delivered_to(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::pick_delivered_to;
+    use super::{is_auth_rejection, pick_delivered_to};
+
+    /// Verbatim from a live `imap.mail.com:993` LOGIN — the failure that got
+    /// reported as a broken SSL/TLS connection, because the cause was buried
+    /// under a message naming the port and security mode.
+    #[test]
+    fn recognizes_the_mail_dot_com_refusal() {
+        assert!(is_auth_rejection(
+            r#"no response: code: None, info: Some("authentication failed")"#
+        ));
+    }
+
+    #[test]
+    fn recognizes_the_common_provider_wordings() {
+        for detail in [
+            "[AUTHENTICATIONFAILED] Invalid credentials (Failure)",
+            "[AUTHENTICATIONFAILED] AUTHENTICATE failed.",
+            "NO LOGIN failed",
+            "Invalid login or password",
+        ] {
+            assert!(is_auth_rejection(detail), "should classify: {detail}");
+        }
+    }
+
+    /// Transport and protocol faults must keep the old, unmassaged message —
+    /// telling someone to check their app password when the TCP stream died
+    /// is the same misdirection in the other direction.
+    #[test]
+    fn leaves_transport_failures_alone() {
+        for detail in [
+            "connection reset by peer",
+            "unexpected end of file",
+            "io: broken pipe",
+            "BAD Command unrecognized",
+        ] {
+            assert!(!is_auth_rejection(detail), "should not classify: {detail}");
+        }
+    }
 
     #[test]
     fn reads_a_plain_delivered_to() {

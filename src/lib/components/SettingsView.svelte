@@ -32,6 +32,7 @@
   import { t } from '$lib/i18n/index.svelte';
   import { isLikelyEmail } from '$lib/utils';
   import type { DiscoveredConfig, ServerConfig } from '$lib/data/dataService';
+  import Select from './Select.svelte';
 
   interface Props {
     theme: Theme;
@@ -526,6 +527,33 @@
     if (domain) return `user@${domain}`;
     return '';
   }
+
+  // ── Dropdown option sets ────────────────────────────────
+  // Derived where the labels are translated, so they follow a locale switch.
+
+  const protocolOptions = [
+    { value: 'imap', label: 'IMAP' },
+    { value: 'pop3', label: 'POP3' },
+  ];
+
+  const securityOptions = [
+    { value: 'ssl',  label: 'SSL/TLS' },
+    { value: 'tls',  label: 'STARTTLS' },
+    { value: 'none', label: 'None' },
+  ];
+
+  let syncIntervalOptions = $derived([
+    { value: 1,  label: t('settings.every1Minute') },
+    ...[2, 5, 10, 15, 30, 60].map((n) => ({
+      value: n,
+      label: t('settings.everyNMinutes', { n }),
+    })),
+  ]);
+
+  let davAccountOptions = $derived([
+    { value: '', label: t('settings.selectAccountOption') },
+    ...accounts.map((a) => ({ value: a.id, label: `${a.name} (${a.email})` })),
+  ]);
 
   function mapSocketType(value: string): 'ssl' | 'tls' | 'none' {
     const v = value.toLowerCase();
@@ -1694,12 +1722,9 @@
                       {/if}
                     </button>
                   </div>
-                  <select class="form-input" bind:value={davNewAccountId}>
-                    <option value="">{t('settings.selectAccountOption')}</option>
-                    {#each accounts as acct}
-                      <option value={acct.id}>{acct.name} ({acct.email})</option>
-                    {/each}
-                  </select>
+                  <div class="form-select">
+                    <Select bind:value={davNewAccountId} options={davAccountOptions} />
+                  </div>
                   <button class="btn btn-primary btn-sm" onclick={handleAddDavUser} disabled={!davNewEmail || !davNewPassword || !davNewAccountId}>{t('common.add')}</button>
                 </div>
               </div>
@@ -2049,10 +2074,9 @@
             <div class="detail-form">
               <label class="form-row">
                 <span class="form-label">{t('settings.protocol')}</span>
-                <select class="form-input" bind:value={accountForm.protocol} onchange={onProtocolChange}>
-                  <option value="imap">IMAP</option>
-                  <option value="pop3">POP3</option>
-                </select>
+                <div class="form-select">
+                  <Select bind:value={accountForm.protocol} options={protocolOptions} onchange={onProtocolChange} />
+                </div>
               </label>
               <label class="form-row">
                 <span class="form-label">{t('settings.server')}</span>
@@ -2065,11 +2089,9 @@
                 </label>
                 <label class="form-row" style="flex:1">
                   <span class="form-label">{t('settings.security')}</span>
-                  <select class="form-input" bind:value={accountForm.incomingSecurity} onchange={onIncomingSecurityChange}>
-                    <option value="ssl">SSL/TLS</option>
-                    <option value="tls">STARTTLS</option>
-                    <option value="none">None</option>
-                  </select>
+                  <div class="form-select">
+                    <Select bind:value={accountForm.incomingSecurity} options={securityOptions} onchange={onIncomingSecurityChange} />
+                  </div>
                 </label>
               </div>
               <label class="form-row">
@@ -2109,15 +2131,9 @@
               </label>
               <label class="form-row">
                 <span class="form-label">{t('settings.syncInterval')}</span>
-                <select class="form-input" bind:value={accountForm.syncIntervalMinutes}>
-                  <option value={1}>{t('settings.every1Minute')}</option>
-                  <option value={2}>{t('settings.everyNMinutes', { n: 2 })}</option>
-                  <option value={5}>{t('settings.everyNMinutes', { n: 5 })}</option>
-                  <option value={10}>{t('settings.everyNMinutes', { n: 10 })}</option>
-                  <option value={15}>{t('settings.everyNMinutes', { n: 15 })}</option>
-                  <option value={30}>{t('settings.everyNMinutes', { n: 30 })}</option>
-                  <option value={60}>{t('settings.everyNMinutes', { n: 60 })}</option>
-                </select>
+                <div class="form-select">
+                  <Select bind:value={accountForm.syncIntervalMinutes} options={syncIntervalOptions} />
+                </div>
               </label>
             </div>
           </section>
@@ -2162,11 +2178,9 @@
                 </label>
                 <label class="form-row" style="flex:1">
                   <span class="form-label">{t('settings.security')}</span>
-                  <select class="form-input" bind:value={accountForm.smtpSecurity} onchange={onSmtpSecurityChange}>
-                    <option value="ssl">SSL/TLS</option>
-                    <option value="tls">STARTTLS</option>
-                    <option value="none">None</option>
-                  </select>
+                  <div class="form-select">
+                    <Select bind:value={accountForm.smtpSecurity} options={securityOptions} onchange={onSmtpSecurityChange} />
+                  </div>
                 </label>
               </div>
               <label class="form-row">
@@ -2888,7 +2902,8 @@
     transition: border-color 0.15s;
   }
 
-  .dav-add-user-form .form-input, .dav-detail-form .form-input {
+  .dav-add-user-form .form-input, .dav-detail-form .form-input,
+  .dav-add-user-form .form-select {
     width: 500px;
   }
 
@@ -2910,9 +2925,10 @@
     margin: 0;
   }
 
-  select.form-input {
-    cursor: pointer;
-    appearance: auto;
+  /* Sizing-only wrapper around <Select>. The control brings its own border,
+     background and padding, so this must not restate .form-input's chrome. */
+  .form-select {
+    width: 100%;
   }
 
   .signature-input {

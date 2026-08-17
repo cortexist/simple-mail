@@ -1959,16 +1959,16 @@ async fn sync_mail(
     let mut session = imap_client::connect(&settings)
         .await
         .map_err(|e| {
-            log::error!("IMAP connect failed for account {}: {}", account_id, e);
-            format!("IMAP connect failed: {}", e)
+            log::error!("IMAP connect failed for account {}: {:#}", account_id, e);
+            format!("IMAP connect failed: {:#}", e)
         })?;
 
     // List remote folders to map names
     let remote_folders = imap_client::list_folders(&mut session)
         .await
         .map_err(|e| {
-            log::error!("Failed to list IMAP folders for account {}: {}", account_id, e);
-            format!("Failed to list IMAP folders: {}", e)
+            log::error!("Failed to list IMAP folders for account {}: {:#}", account_id, e);
+            format!("Failed to list IMAP folders: {:#}", e)
         })?;
 
     log::info!("sync_mail [{}]: {} remote IMAP folders found", account_id, remote_folders.len());
@@ -2030,13 +2030,13 @@ async fn sync_mail(
         .await
         .map_err(|e| {
             log::error!(
-                "IMAP sync failed for account {} folder {} (remote {}): {}",
+                "IMAP sync failed for account {} folder {} (remote {}): {:#}",
                 account_id,
                 local_id,
                 imap_name,
                 e
             );
-            format!("Sync {} failed: {}", local_id, e)
+            format!("Sync {} failed: {:#}", local_id, e)
         })?;
 
         log::info!(
@@ -2735,7 +2735,7 @@ async fn fetch_email_body(
         .await
         .map_err(|e| {
             log::error!("IMAP connect failed while fetching body for email {}: {}", email_id, e);
-            format!("IMAP connect failed: {}", e)
+            format!("IMAP connect failed: {:#}", e)
         })?;
 
     // Map folder ID back to IMAP name
@@ -2761,7 +2761,7 @@ async fn fetch_email_body(
                 imap_name,
                 e
             );
-            format!("Body fetch failed: {}", e)
+            format!("Body fetch failed: {:#}", e)
         })?;
 
     session.logout().await.ok();
@@ -2926,7 +2926,7 @@ async fn fetch_previews_around(
 
     let mut session = imap_client::connect(&settings)
         .await
-        .map_err(|e| format!("IMAP connect failed: {}", e))?;
+        .map_err(|e| format!("IMAP connect failed: {:#}", e))?;
 
     let remote_folders = imap_client::list_folders(&mut session)
         .await
@@ -3031,7 +3031,7 @@ async fn open_attachment(
     // Connect and fetch raw MIME
     let mut session = imap_client::connect(&settings)
         .await
-        .map_err(|e| format!("IMAP connect failed: {}", e))?;
+        .map_err(|e| format!("IMAP connect failed: {:#}", e))?;
 
     let remote_folders = imap_client::list_folders(&mut session)
         .await
@@ -3043,7 +3043,7 @@ async fn open_attachment(
 
     let raw = imap_client::fetch_raw(&mut session, &imap_name, uid)
         .await
-        .map_err(|e| format!("Body fetch failed: {}", e))?;
+        .map_err(|e| format!("Body fetch failed: {:#}", e))?;
     session.logout().await.ok();
 
     // Extract the requested attachment bytes
@@ -3136,7 +3136,7 @@ async fn save_attachment(
     // Connect and fetch raw MIME
     let mut session = imap_client::connect(&settings)
         .await
-        .map_err(|e| format!("IMAP connect failed: {}", e))?;
+        .map_err(|e| format!("IMAP connect failed: {:#}", e))?;
 
     let remote_folders = imap_client::list_folders(&mut session)
         .await
@@ -3148,7 +3148,7 @@ async fn save_attachment(
 
     let raw = imap_client::fetch_raw(&mut session, &imap_name, uid)
         .await
-        .map_err(|e| format!("Body fetch failed: {}", e))?;
+        .map_err(|e| format!("Body fetch failed: {:#}", e))?;
     session.logout().await.ok();
 
     // Extract the requested attachment bytes
@@ -3266,7 +3266,7 @@ async fn discover_mail_settings(email: String) -> Result<autodiscover::Discovere
         .await
         .map_err(|e| {
             log::error!("Mail auto-discovery failed for {}: {}", email, e);
-            format!("Auto-discovery failed: {}", e)
+            format!("Auto-discovery failed: {:#}", e)
         })
 }
 
@@ -3277,8 +3277,8 @@ async fn test_imap_connection(settings: sync_state::MailServerSettings) -> Resul
     let mut session = imap_client::connect(&settings)
         .await
         .map_err(|e| {
-            log::error!("IMAP connection test failed for server {}:{}: {}", settings.incoming_server, settings.incoming_port, e);
-            format!("IMAP connection failed: {}", e)
+            log::error!("IMAP connection test failed for server {}:{}: {:#}", settings.incoming_server, settings.incoming_port, e);
+            format!("IMAP connection failed: {:#}", e)
         })?;
     session.logout().await.ok();
     Ok(())
@@ -3289,8 +3289,8 @@ async fn test_smtp_connection(settings: sync_state::MailServerSettings) -> Resul
     smtp_client::test_connection(&settings)
         .await
         .map_err(|e| {
-            log::error!("SMTP connection test failed for server {}:{}: {}", settings.smtp_server, settings.smtp_port, e);
-            format!("SMTP connection failed: {}", e)
+            log::error!("SMTP connection test failed for server {}:{}: {:#}", settings.smtp_server, settings.smtp_port, e);
+            format!("SMTP connection failed: {:#}", e)
         })
 }
 
@@ -3299,8 +3299,8 @@ async fn test_caldav_connection(url: String, username: String, password: String)
     caldav_client::test_connection(&url, &username, &password)
         .await
         .map_err(|e| {
-            log::error!("CalDAV connection test failed for {}: {}", url, e);
-            format!("CalDAV connection failed: {}", e)
+            log::error!("CalDAV connection test failed for {}: {:#}", url, e);
+            format!("CalDAV connection failed: {:#}", e)
         })
 }
 
@@ -3309,8 +3309,8 @@ async fn test_carddav_connection(url: String, username: String, password: String
     carddav_client::test_connection(&url, &username, &password)
         .await
         .map_err(|e| {
-            log::error!("CardDAV connection test failed for {}: {}", url, e);
-            format!("CardDAV connection failed: {}", e)
+            log::error!("CardDAV connection test failed for {}: {:#}", url, e);
+            format!("CardDAV connection failed: {:#}", e)
         })
 }
 
@@ -3375,7 +3375,7 @@ async fn sync_calendars(
     .await
     .map_err(|e| {
         log::error!("CalDAV discovery failed for account {}: {}", account_id, e);
-        format!("CalDAV discovery failed: {}", e)
+        format!("CalDAV discovery failed: {:#}", e)
     })?;
 
     // ── Clean up phantom collection rows ──────────────────────────────────
@@ -3648,7 +3648,7 @@ async fn sync_calendars(
                 cal.url,
                 e
             );
-            format!("CalDAV sync failed for {}: {}", cal.display_name, e)
+            format!("CalDAV sync failed for {}: {:#}", cal.display_name, e)
         })?;
 
         // Apply to local DB
@@ -3910,7 +3910,7 @@ async fn sync_contacts(
     .await
     .map_err(|e| {
         log::error!("CardDAV discovery failed for account {}: {}", account_id, e);
-        format!("CardDAV discovery failed: {}", e)
+        format!("CardDAV discovery failed: {:#}", e)
     })?;
 
     // ── Push local-only address books to the server ───────────────────────
@@ -4019,7 +4019,7 @@ async fn sync_contacts(
                 book.url,
                 e
             );
-            format!("CardDAV sync failed for {}: {}", book.display_name, e)
+            format!("CardDAV sync failed for {}: {:#}", book.display_name, e)
         })?;
 
         // Download remote photo URLs as data URIs so they're cached locally
@@ -4634,7 +4634,7 @@ async fn save_contact_entry(
             &normalized, &dav_settings.username, &dav_settings.password,
         )
         .await
-        .map_err(|e| format!("CardDAV discovery failed: {}", e))?;
+        .map_err(|e| format!("CardDAV discovery failed: {:#}", e))?;
         books.into_iter().next().map(|b| b.url).ok_or("No address books found")?
     };
 
