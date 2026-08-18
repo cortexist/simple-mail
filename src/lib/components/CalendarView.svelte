@@ -1825,7 +1825,7 @@
   }
 
   .mini-cal-weekday {
-    width: 28px;
+    width: 32px;
     font-size: 10px;
     color: var(--text-secondary);
     padding: 2px;
@@ -1837,7 +1837,7 @@
   }
 
   .mini-cal-day {
-    width: 28px;
+    width: 32px;
     height: 28px;
     display: flex;
     align-items: center;
