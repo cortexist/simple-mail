@@ -1,12 +1,52 @@
 /* ── Outlook for Windows 11 — Global Styles ── */
 
 :root {
-  /* Accent */
+  /* ── Accent ──────────────────────────────────────────────────────────
+     The picker (src/lib/theme.ts) writes two numbers onto <html>: `--accent-h`,
+     an OKLCH hue, and `--accent-base-l`, how bright that hue is at full
+     strength. Everything below is derived from them, so a preset is one color
+     and no shade can be forgotten. The pair below is `blue`'s, so the frame
+     before the picker runs already shows the default accent.
+
+     Two roles, and picking the wrong one is the mistake to avoid:
+
+       --accent…       a filled surface — buttons, badges, indicator bars.
+                       Pair it with --text-on-accent, never a fixed color.
+       --accent-text…  the accent drawn *on* the page — text, icons, hairlines,
+                       focus rings. Dimmed until it is legible there.
+
+     They part company only for hues that have to be bright to be themselves:
+     a gold button stays gold while gold lettering darkens to something you can
+     read on white. Every other hue resolves both roles to the same color.
+
+     The three theme values are the whole difference between light and dark:
+     how saturated the accent is, the lightness the page forces it up to, and
+     which way hover and pressed travel (away from the page, in both themes). */
+  --accent-h: 251;
+  --accent-base-l: 0.55;
+
+  --accent-c: 0.17;
+  --accent-l-floor: 0;
+  --accent-step: -0.05;
+
+  --accent-l: max(var(--accent-base-l), var(--accent-l-floor));
+  /* OKLCH lightness is perceptual, so this one cap is the whole legibility
+     question — it needs no per-hue entry. */
+  --accent-text-l: min(var(--accent-l), 0.51);
+
   --app-icon: #555;
-  --accent: #0078d4;
-  --accent-hover: #106ebe;
-  --accent-active: #005a9e;
-  --accent-light: #ebf3fc;
+  --accent: oklch(var(--accent-l) var(--accent-c) var(--accent-h));
+  --accent-hover: oklch(calc(var(--accent-l) + var(--accent-step)) var(--accent-c) var(--accent-h));
+  --accent-active: oklch(calc(var(--accent-l) + var(--accent-step) * 2) var(--accent-c) var(--accent-h));
+
+  --accent-text: oklch(var(--accent-text-l) var(--accent-c) var(--accent-h));
+  --accent-text-hover: oklch(calc(var(--accent-text-l) + var(--accent-step)) var(--accent-c) var(--accent-h));
+  --accent-text-active: oklch(calc(var(--accent-text-l) + var(--accent-step) * 2) var(--accent-c) var(--accent-h));
+
+  /* Muted accent — the readable accent pulled most of the way toward the page.
+     Lighter than the accent on a light page and darker on a dark one, from one
+     rule. Follows --accent-text because it is used as text as well as fill. */
+  --accent-light: color-mix(in oklab, var(--accent-text) 45%, var(--bg-primary));
 
   /* Backgrounds */
   --bg-primary: #fafafa;
@@ -14,14 +54,20 @@
   --bg-tertiary: #e8e7e7;
   --bg-nav: #f3f3f3;
   --bg-hover: #bdbdbd;
-  --bg-selected: #eff6fc;
+  /* Selection wash — the same accent, barely there. */
+  --bg-selected: color-mix(in oklab, var(--accent) 16%, var(--bg-primary));
   --bg-tooltip: #fece54;
 
   /* Text */
   --text-primary: #242424;
   --text-secondary: #616161;
   --text-tertiary: #909090;
-  --text-on-accent: #000000;
+  /* Whatever reads on the accent, decided by the accent itself. Below the
+     crossover lightness the multiplication goes positive and clamps to white;
+     above it, negative, and clamps to black. Perceptual lightness is the whole
+     contrast question here, so this needs no per-color entry — and `--accent`'s
+     hover and active shades step further from the crossover, never across it. */
+  --text-on-accent: hsl(0 0% clamp(0%, (0.575 - var(--accent-l)) * 10000%, 100%));
   --text-tooltip: #000000;
 
   /* Borders */
@@ -81,30 +127,33 @@ input {
 }
 
 a {
-  color: var(--accent);
+  color: var(--accent-text);
   text-decoration: none;
 }
 
 /* ── Dark theme ── */
 [data-theme="dark"] {
   --app-icon: #fff;
-  --accent: #4cc2ff;
-  --accent-hover: #62cdff;
-  --accent-active: #2eb8ff;
-  --accent-light: #1a3a4a;
+
+  /* The dark theme's share of the accent recipe: a touch calmer, floored well
+     up so every hue reads against a near-black page, and hover and pressed
+     brightening instead of deepening. Nothing here is bright enough to need
+     dimming for text, so the two roles collapse into one. */
+  --accent-c: 0.16;
+  --accent-l-floor: 0.76;
+  --accent-step: 0.05;
+  --accent-text-l: var(--accent-l);
 
   --bg-primary: #0e0e0e;
   --bg-secondary: #1c1c1c;
   --bg-tertiary: #2d2d2d;
   --bg-nav: #151515;
   --bg-hover: #4f4f4f;
-  --bg-selected: #3a3a3a;
   --bg-tooltip: #fae48c;
 
   --text-primary: #e0e0e0;
   --text-secondary: #a0a0a0;
   --text-tertiary: #6a6a6a;
-  --text-on-accent: #000000;
 
   --border: #4a4a4a;
   --border-light: #333333;
@@ -126,11 +175,6 @@ a {
 
 [data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.25);
-}
-
-[data-theme="dark"] ::selection {
-  background: var(--accent-light);
-  color: var(--text-primary);
 }
 
 /* ── Scrollbar — Outlook thin style ── */
@@ -292,8 +336,17 @@ a {
   }
 
   .email-content {
+    display: block !important;
     overflow: visible !important;
     padding: 0 !important;
+  }
+
+  /* The body scroller must not clip, and must not carry the dark-theme invert
+     into the printout — a filter on it would print the page inverted. */
+  .email-scroll {
+    display: block !important;
+    overflow: visible !important;
+    filter: none !important;
   }
 
   .email-body {

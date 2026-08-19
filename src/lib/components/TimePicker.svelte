@@ -106,8 +106,8 @@
     text-align: left;
     transition: border-color 0.15s;
   }
-  .tp-trigger:hover { border-color: var(--accent); }
-  .tp-trigger:focus { outline: none; border-color: var(--accent-active); }
+  .tp-trigger:hover { border-color: var(--accent-text); }
+  .tp-trigger:focus { outline: none; border-color: var(--accent-text-active); }
   .tp-trigger svg   { color: var(--text-secondary); flex-shrink: 0; }
 
   .tp-backdrop {
@@ -142,5 +142,5 @@
     border: none;
   }
   .tp-option:hover  { background: var(--bg-hover); }
-  .tp-option.active { background: var(--bg-selected); color: var(--accent); font-weight: 600; }
+  .tp-option.active { background: var(--bg-selected); color: var(--accent-text); font-weight: 600; }
 </style>

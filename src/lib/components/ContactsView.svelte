@@ -1341,7 +1341,7 @@
                   <span class="cl-pick-name">{contact.name}</span>
                   <span class="cl-pick-email">{contact.email}</span>
                   {#if alreadyAdded}
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                   {/if}
                 </button>
               {/each}
@@ -1422,12 +1422,12 @@
   }
 
   .contacts-nav-item.selected:hover {
-    border-left-color: var(--accent);
+    border-left-color: var(--accent-text);
     color: var(--text-secondary);
   }
 
   .contacts-nav.active .contacts-nav-item.selected {
-    border-left-color: var(--accent-active);
+    border-left-color: var(--accent-text-active);
   }
 
   /* ── 2nd Level Nav — Contact List ── */
@@ -1466,7 +1466,7 @@
   .contact-letter {
     font-size: 12px;
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
     padding: 6px 16px;
     position: sticky;
     border-bottom: 1px solid var(--border-light);
@@ -1522,7 +1522,7 @@
   }
 
   .contact-item.selected:hover {
-    border-left-color: var(--accent);
+    border-left-color: var(--accent-text);
   }
 
   .contact-item.selected:hover .contact-item-name {
@@ -1530,7 +1530,7 @@
   }
 
   .contacts-scroll.active .contact-item.selected {
-    border-left-color: var(--accent-active);
+    border-left-color: var(--accent-text-active);
   }
 
   .contact-avatar-sm {
@@ -1579,7 +1579,7 @@
     margin-left: auto;
     font-size: 11px;
     font-weight: 600;
-    color: var(--accent-active);
+    color: var(--accent-text-active);
     min-width: 18px;
     text-align: center;
   }
@@ -1665,7 +1665,7 @@
   .contact-hover-btn.selected {
     opacity: 1;
     pointer-events: auto;
-    color: var(--accent-active);
+    color: var(--accent-text-active);
   }
 
   .contact-item:hover .contact-hover-btn {
@@ -1824,16 +1824,16 @@
   .contact-action-btn:hover,
   .contact-action-btn:focus {
     background: var(--bg-hover);
-    color: var(--accent-active);
+    color: var(--accent-text-active);
   }
 
   .contact-action-btn svg {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .contact-action-btn:hover svg,
   .contact-action-btn:focus svg {
-    color: var(--accent-active);
+    color: var(--accent-text-active);
   }
 
   /* Info section */
@@ -1873,7 +1873,7 @@
   }
 
   .contact-info-link {
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: none;
     outline: none;
     background: none;
@@ -1886,7 +1886,7 @@
 
   .contact-info-link:hover,
   .contact-info-link:focus {
-    color: var(--accent-active);
+    color: var(--accent-text-active);
     text-decoration: underline;
   }
 
@@ -2021,11 +2021,11 @@
   }
 
   .ct-input:hover {
-    border-color: var(--accent-hover);
+    border-color: var(--accent-text-hover);
   }
 
   .ct-input:focus {
-    border-color: var(--accent-active);
+    border-color: var(--accent-text-active);
   }
 
   .ct-input.invalid {
@@ -2091,7 +2091,7 @@
 
   .ct-move-btn:hover:not(:disabled) {
     background: var(--bg-hover);
-    border-color: var(--accent-hover);
+    border-color: var(--accent-text-hover);
   }
 
   .ct-move-btn:disabled {
@@ -2185,7 +2185,7 @@
   }
 
   .btn:focus {
-    box-shadow: 0 0 0 1px var(--accent-active);
+    box-shadow: 0 0 0 1px var(--accent-text-active);
   }
 
   .btn-primary {
@@ -2269,11 +2269,11 @@
   }
 
   .ct-favorite-star:hover {
-    color: var(--accent-hover);
+    color: var(--accent-text-hover);
   }
 
   .ct-favorite-star:focus {
-    color: var(--accent-active);
+    color: var(--accent-text-active);
   }
 
   .ct-favorite-star.favorited {
@@ -2298,11 +2298,11 @@
   }
 
   .ct-photo-avatar:hover {
-    border-color: var(--accent-hover);
+    border-color: var(--accent-text-hover);
   }
 
   .ct-photo-avatar:focus {
-    border-color: var(--accent-active);
+    border-color: var(--accent-text-active);
   }
 
   .ct-photo-img {
@@ -2349,11 +2349,11 @@
   }
 
   .ct-photo-action-btn:hover {
-    color: var(--accent-hover);
+    color: var(--accent-text-hover);
   }
 
   .ct-photo-action-btn:focus {
-    color: var(--accent-active);
+    color: var(--accent-text-active);
   }
 
   .icon-action-btn {
@@ -2374,7 +2374,7 @@
 
   .icon-action-btn:hover {
     background: var(--bg-hover);
-    border-color: var(--accent-hover);
+    border-color: var(--accent-text-hover);
   }
 
   /* ── Contact Lists ── */
@@ -2489,7 +2489,7 @@
     padding: 4px 0;
     font-size: 12px;
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
     margin-top: 4px;
   }

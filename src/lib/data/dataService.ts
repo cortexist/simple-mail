@@ -7,6 +7,7 @@ import type { Account, Email, Theme } from '$lib/types';
 import { mockAccounts } from '$lib/data/mockData';
 import { incNetwork, decNetwork } from '$lib/networkActivity.svelte';
 import { buildSearchText } from '$lib/searchQuery';
+import { DEFAULT_ACCENT_ID } from '$lib/theme';
 import { invoke as rawInvoke } from '@tauri-apps/api/core';
 
 // ── Tauri detection ─────────────────────────────────────
@@ -122,7 +123,7 @@ export async function saveAccentColor(colorId: string): Promise<void> {
 /** Load persisted accent color preference. */
 export async function loadAccentColor(): Promise<string> {
   const val = await loadSetting('accentColor');
-  return val || 'blue';
+  return val || DEFAULT_ACCENT_ID;
 }
 
 /** Persist language/locale preference. */

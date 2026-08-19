@@ -163,8 +163,8 @@
   }
 
   .modal-input:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 1px var(--accent-text);
   }
 
   .modal-actions {

@@ -152,14 +152,38 @@ export function buildMailDocument(body: string, opts: MailDocumentOptions = {}):
   // e.g. dark-theme-editor pastes. Native-dark mail manages its own colors.
   const content = deferImageLoading(ensureReadableTextColors(unwrapped));
   // Dark theme renders the white document through an invert, then inverts
-  // pictorial content back. `filter` on the root puts the whole document into
-  // its own render surface, so every height change repaints through the filter.
-  // Measured on a 4631px, 79-image digest in Chromium: +2ms on initial render
-  // and +1.2ms per resize versus light, essentially all of it from the
-  // per-image counter-filter rather than the root one. Small, but it is why the
-  // resize path is worth keeping quiet (see makeResizeScheduler).
+  // pictorial content back — but only the *counter*-filter lives here. The
+  // document-wide invert is applied by the reading pane, to the scroller that
+  // holds this iframe (`.email-scroll.inverted`).
+  //
+  // It has to be applied out there, to a viewport-sized box. A filter on an
+  // element *inside* this document makes WebKitGTK render the filtered result
+  // into a single surface covering the whole mail, and the pane sizes this
+  // iframe to the full message — a Medium digest is ~4700px tall, which on a 2x display is a
+  // ~9400px surface. Past a size threshold WebKit stops painting most of it and
+  // nothing invalidates it afterwards: the mail shows blank or half-blank,
+  // stays that way, and returns the moment something forces a real repaint —
+  // dragging a selection over it, resizing the window, or moving it between
+  // sway workspaces, which unmaps and remaps the surface. Light theme never
+  // sees it, having no filter.
+  //
+  // Confirmed on WebKitGTK 2.52 / 2x display, in this order: `html{filter}`
+  // fails; `body{filter}` fails the same way, so it is not about the frame
+  // root; on the iframe element from the parent it paints correctly but is
+  // re-rasterized by every unrelated repaint in the app, so hovering the
+  // message list blinks the mail. Only a filter on a box clipped to the
+  // viewport is both correct and cheap. The threshold tracks the pane's area,
+  // not the mail's: halving the window's width cures it, and so does halving
+  // its height. Do not move this back inside the document.
+  //
+  // The two filters must stay in step: this one and the pane's are inverses of
+  // each other, so an image comes out of the pair as authored.
+  //
+  // Cost, measured on a 4631px, 79-image digest in Chromium: +2ms on initial
+  // render and +1.2ms per resize versus light, essentially all of it from this
+  // per-image counter-filter rather than the document-wide one. Small, but it
+  // is why the resize path is worth keeping quiet (see makeResizeScheduler).
   const darkCss = darkMode ? `
-      html{filter:invert(0.9) hue-rotate(170deg);}
       img,video,picture,svg,canvas,[style*="background-image"]{filter:invert(0.9) hue-rotate(170deg);}
     ` : '';
   // CSP is what stops mail from running scripts, and it is emitted before any

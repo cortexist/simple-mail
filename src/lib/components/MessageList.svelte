@@ -28,7 +28,6 @@
   let activeTab = $state<'focused' | 'other'>('focused');
   let filterSort = $state<'date' | 'starred' | 'unread'>('date');
   let showFilterMenu = $state(false);
-  let hoveredEmailId = $state<string | null>(null);
 
   let isInbox = $derived(currentFolder === 'inbox');
   let isSent = $derived(currentFolder === 'sent');
@@ -282,8 +281,6 @@
         onclick={() => onSelectEmail(email)}
         ondblclick={() => { if (email.folder === 'drafts') onOpenDraft?.(email); }}
         onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectEmail(email); } }}
-        onmouseenter={() => (hoveredEmailId = email.id)}
-        onmouseleave={() => (hoveredEmailId = null)}
       >
         <!-- Avatar / Checkbox (hidden for Sent folder) -->
         {#if !isSent}
@@ -345,26 +342,24 @@
                     <path d="m16.243 2.932l4.825 4.826a2.75 2.75 0 0 1-.715 4.404l-4.87 2.435a.75.75 0 0 0-.374.426l-1.44 4.166a1.25 1.25 0 0 1-2.065.476L8.5 16.561L4.06 21H3v-1.062L7.44 15.5l-3.105-3.104a1.25 1.25 0 0 1 .476-2.066l4.166-1.439a.75.75 0 0 0 .426-.374l2.435-4.87a2.75 2.75 0 0 1 4.405-.715m3.765 5.886l-4.826-4.825a1.25 1.25 0 0 0-2.002.324l-2.435 4.871a2.25 2.25 0 0 1-1.278 1.12l-3.789 1.31l6.705 6.704l1.308-3.788a2.25 2.25 0 0 1 1.12-1.278l4.872-2.436a1.25 1.25 0 0 0 .325-2.002"/>
                   </svg>
                 </button>
-                {#if hoveredEmailId === email.id}
-                  {#if isInbox}
-                    <button class="hover-btn" tabindex="-1" aria-label="Focus" data-tooltip={(email.isFocused ?? true) ? t('messageList.moveToRegular') : t('messageList.moveToPriority')} data-tooltip-position="bottom" onclick={(e) => handleAction(e, () => onToggleFocused?.(email))}>
-                      {#if email.isFocused ?? true}
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                          <circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/>
-                        </svg>
-                      {:else}
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                          <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
-                        </svg>
-                      {/if}
-                    </button>
-                  {/if}
-                  <button class="hover-btn delete-btn" tabindex="-1" aria-label="Delete" data-tooltip={t('common.delete')} data-tooltip-position="bottom" onclick={(e) => handleAction(e, () => onDeleteEmail?.(email))}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                      <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2" />
-                    </svg>
+                {#if isInbox}
+                  <button class="hover-btn" tabindex="-1" aria-label="Focus" data-tooltip={(email.isFocused ?? true) ? t('messageList.moveToRegular') : t('messageList.moveToPriority')} data-tooltip-position="bottom" onclick={(e) => handleAction(e, () => onToggleFocused?.(email))}>
+                    {#if email.isFocused ?? true}
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/>
+                      </svg>
+                    {:else}
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
+                      </svg>
+                    {/if}
                   </button>
                 {/if}
+                <button class="hover-btn delete-btn" tabindex="-1" aria-label="Delete" data-tooltip={t('common.delete')} data-tooltip-position="bottom" onclick={(e) => handleAction(e, () => onDeleteEmail?.(email))}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2" />
+                  </svg>
+                </button>
               </div>
           </div>
           <div class="email-subject-row">
@@ -449,7 +444,7 @@
     left: 20px;
     right: 20px;
     height: 2px;
-    background: var(--accent-active);
+    background: var(--accent-text-active);
   }
 
   .tab-badge {
@@ -505,7 +500,7 @@
   }
 
   .filter-btn.filter-active {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   .filter-menu {
@@ -539,7 +534,7 @@
   }
 
   .filter-option.active {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
   }
 
@@ -584,7 +579,7 @@
   }
 
   .email-item.selected:hover {
-    border-left-color: var(--accent);
+    border-left-color: var(--accent-text);
   }
 
   .email-item.selected:hover .sender-name {
@@ -593,11 +588,11 @@
 
   .email-items.active .email-item.selected,
   .email-items.active .email-item.selected:hover {
-    border-left-color: var(--accent-active);
+    border-left-color: var(--accent-text-active);
   }
 
   .email-item.unread:not(:hover) {
-    border-left-color: var(--accent);
+    border-left-color: var(--accent-text);
   }
 
   /* ── Avatar / Checkbox ── */
@@ -754,7 +749,7 @@
 
   .unread .email-subject, 
   .unread .email-date {
-    color: var(--accent-active);
+    color: var(--accent-text-active);
     font-weight: 600;
   }
 
@@ -799,7 +794,7 @@
   .hover-btn.active {
     opacity: 1;
     pointer-events: auto;
-    color: var(--accent-active);
+    color: var(--accent-text-active);
   }
 
   .email-item:hover .hover-btn {

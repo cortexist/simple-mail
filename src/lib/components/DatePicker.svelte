@@ -124,8 +124,8 @@
     text-align: left;
     transition: border-color 0.15s;
   }
-  .dp-trigger:hover  { border-color: var(--accent); }
-  .dp-trigger:focus  { outline: none; border-color: var(--accent-active); }
+  .dp-trigger:hover  { border-color: var(--accent-text); }
+  .dp-trigger:focus  { outline: none; border-color: var(--accent-text-active); }
   .dp-trigger svg    { color: var(--text-secondary); flex-shrink: 0; }
   .dp-placeholder    { color: var(--text-tertiary); }
 

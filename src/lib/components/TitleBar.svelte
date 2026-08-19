@@ -300,7 +300,7 @@
   .app-name {
     font-size: 14px;
     font-weight: 600;
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /* ── Center zone: search ── */
@@ -328,8 +328,8 @@
   }
 
   .search-box:focus-within {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 1px var(--accent-text);
   }
 
   .search-icon {
@@ -373,7 +373,7 @@
     color: var(--text-tertiary);
   }
   .search-info:hover {
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /* ── Right zone ── */

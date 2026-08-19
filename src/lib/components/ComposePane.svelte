@@ -1090,7 +1090,7 @@
   }
 
   .compose-header-btn:hover {
-    color: var(--accent-hover);
+    color: var(--accent-text-hover);
   }
 
   /* ── Address Fields ── */
@@ -1214,7 +1214,7 @@
 
   .field-toggle:hover {
     background: var(--bg-hover);
-    color: var(--accent);
+    color: var(--accent-text);
   }
 
   /* ── Autocomplete Suggestions ── */
@@ -1582,8 +1582,8 @@
   }
 
   .link-dialog-input:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 1px var(--accent-text);
   }
 
   .link-dialog-input::placeholder {
@@ -1612,13 +1612,13 @@
   .link-dialog-btn.primary {
     background: var(--accent);
     color: var(--text-on-accent);
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     font-weight: 600;
   }
 
   .link-dialog-btn.primary:hover {
     background: var(--accent-hover);
-    border-color: var(--accent-hover);
+    border-color: var(--accent-text-hover);
   }
 
   /* ── Emoji Picker ── */

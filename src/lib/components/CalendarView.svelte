@@ -1795,7 +1795,7 @@
   }
 
   .mini-cal-title.active {
-    color: var(--accent-active);
+    color: var(--accent-text-active);
   }
 
   .mini-cal-nav {
@@ -1898,7 +1898,7 @@
   }
 
   .mini-cal-day.has-event:not(.today) {
-    border-bottom: 2px solid var(--accent);
+    border-bottom: 2px solid var(--accent-text);
   }
 
   .mini-cal-day:focus{
@@ -1923,7 +1923,7 @@
   }
 
   .calendar-list:has(.item-focused) .sidebar-section-title {
-    color: var(--accent-active);
+    color: var(--accent-text-active);
   }
 
   .calendar-item.item-focused {
@@ -2004,7 +2004,7 @@
   }
 
     .calendar-main.pane-focused .calendar-header {
-        color: var(--accent-active);
+        color: var(--accent-text-active);
     }
 
   .cal-header-color {
@@ -2124,7 +2124,7 @@
 
   .day-column-header.today .day-weekday,
   .day-column-header.today .day-number {
-    color: var(--accent-active);
+    color: var(--accent-text-active);
   }
 
   /* Month view today circle */
@@ -2325,7 +2325,7 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--accent-active);
+    background: var(--accent-text-active);
   }
 
   .now-line {
@@ -2333,7 +2333,7 @@
     left: 0;
     right: 0;
     height: 2px;
-    background: var(--accent-active);
+    background: var(--accent-text-active);
   }
 
   /* ── Month View ── */
@@ -2384,7 +2384,7 @@
   }
 
   .month-cell.today {
-    border: 1px solid var(--accent-active);
+    border: 1px solid var(--accent-text-active);
   }
 
   .month-cell-day {
@@ -2511,7 +2511,7 @@
   }
 
   .event-detail-link {
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
   }
 
@@ -2601,7 +2601,7 @@
   }
 
   .btn:focus {
-    border: 1px solid var(--accent-active);
+    border: 1px solid var(--accent-text-active);
   }
 
   .btn:disabled {
@@ -2731,7 +2731,7 @@
 
   .ev-input:focus {
     outline: none;
-    border-color: var(--accent-active);
+    border-color: var(--accent-text-active);
   }
 
   .ev-textarea {
@@ -2765,7 +2765,7 @@
   }
 
   .ev-checkbox-label .toggle-switch:focus {
-    border: 1px solid var(--accent-active);
+    border: 1px solid var(--accent-text-active);
   }
 
   .ev-modal-footer {
@@ -2997,7 +2997,7 @@
     transition: border-color 0.15s;
   }
   .ev-byday-opt input[type="radio"]:checked {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
   }
   .ev-byday-opt input[type="radio"]:checked::after {
     content: '';
@@ -3060,7 +3060,7 @@
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    color: var(--accent);
+    color: var(--accent-text);
     border-bottom: 1px solid var(--border-light);    
     gap: 2px;
   }

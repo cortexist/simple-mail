@@ -330,9 +330,9 @@
     transition: border-color 0.15s;
   }
 
-  .sel-trigger:hover:not(:disabled) { border-color: var(--accent-hover); }
+  .sel-trigger:hover:not(:disabled) { border-color: var(--accent-text-hover); }
   .sel-trigger:focus-visible,
-  .sel-trigger.open                 { border-color: var(--accent-active); }
+  .sel-trigger.open                 { border-color: var(--accent-text-active); }
 
   .sel-trigger:disabled {
     cursor: default;
@@ -398,7 +398,7 @@
     white-space: nowrap;
   }
 
-  .sel-option svg      { flex: 0 0 auto; color: var(--accent); }
+  .sel-option svg      { flex: 0 0 auto; color: var(--accent-text); }
   .sel-option.active   { background: var(--bg-hover); }
   .sel-option.selected { font-weight: 600; }
 

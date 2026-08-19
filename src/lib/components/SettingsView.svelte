@@ -4,6 +4,7 @@
   import type { Account, MailServerSettings, CalDavSettings, CardDavSettings, Theme, AiConfigInput, AccountAiFeatures } from '$lib/types';
   import { discoverMailSettings } from '$lib/data/dataService';
   import type { StorageInfo } from '$lib/data/dataService';
+  import { ACCENT_PRESETS, accentPreset, accentSwatch } from '$lib/theme';
   import {
     fireStartDavServer,
     fireStopDavServer,
@@ -147,19 +148,35 @@
     '#81c784', '#aed581', '#dce775', '#fff176', '#ffd54f', '#ffb74d',
     '#a1887f', '#90a4ae', '#78909c', '#607d8b', '#455a64', '#263238',
   ];
-  let colorPickerOpen = $state<'add' | 'edit' | null>(null);
+  let colorPickerOpen = $state<'add' | 'edit' | 'accent' | null>(null);
   let colorPickerPos = $state({ top: 0, left: 0 });
 
-  function openColorPicker(which: 'add' | 'edit', e: MouseEvent) {
+  /** Position a swatch popup, left-aligned to the right edge of its trigger.
+   *
+   *  `cols` sizes the grid — the avatar palette is 6x6, the accent palette 3x3,
+   *  and both are square. `prefer` is which side of the trigger to try first,
+   *  and it flips when there is no room: the avatar swatches sit low in a
+   *  scrolling form so they open upward, while the accent swatch sits mid-panel
+   *  with the theme cards above it, so it opens downward. */
+  function openColorPicker(
+    which: 'add' | 'edit' | 'accent',
+    e: MouseEvent,
+    cols = 6,
+    prefer: 'above' | 'below' = 'above',
+  ) {
     const btn = e.currentTarget as HTMLElement;
     const rect = btn.getBoundingClientRect();
-    // popup is ~160px wide (6*24 + 5*2 + 12 padding), position above and to the left of the button
-    const popupW = 164;
-    const popupH = 164;
-    let left = rect.left - popupW + rect.width;
-    let top = rect.top - popupH - 4;
+    // cols * cell(24) + gaps(2) + padding(6 each side)
+    const size = cols * 24 + (cols - 1) * 2 + 12;
+    let left = rect.left - size + rect.width;
     if (left < 4) left = 4;
-    if (top < 4) top = rect.bottom + 4;
+
+    const above = rect.top - size - 4;
+    const below = rect.bottom + 4;
+    let top = prefer === 'above' ? above : below;
+    if (prefer === 'above' && above < 4) top = below;
+    if (prefer === 'below' && below + size > window.innerHeight - 4) top = Math.max(4, above);
+
     colorPickerPos = { top, left };
     colorPickerOpen = colorPickerOpen === which ? null : which;
   }
@@ -248,14 +265,6 @@
   }
 
   let selectedAccount = $derived(accounts.find(a => a.id === selectedAccountId) ?? null);
-
-  const ACCENT_COLORS = [
-    { id: 'blue', color: '#0078d4', label: 'Blue' },
-    { id: 'green', color: '#35a37d', label: 'Green' },
-    { id: 'purple', color: '#6b69d6', label: 'Purple' },
-    { id: 'gold', color: '#d5b014', label: 'Gold' },
-    { id: 'magenta', color: '#d0489d', label: 'Magenta' },
-  ];
 
   function selectAccount(account: Account) {
     selectedAccountId = account.id;
@@ -1611,18 +1620,33 @@
 
             <div class="settings-section-spacer"></div>
             
-            <div class="color-grid">
-              {#each ACCENT_COLORS as c (c.id)}
-                <button
-                  class="color-swatch"
-                  class:selected={accentColor === c.id}
-                  style="background: {c.color}"
-                  aria-label={c.label}
-                  data-tooltip={c.label}
-                  onclick={() => onChangeAccentColor(c.id)}
-                >
-                </button>
-              {/each}
+            <div class="accent-row">
+              <span class="form-label">{t('settings.colorTheme')}</span>
+              <button
+                type="button"
+                class="color-swatch-btn"
+                style="background: {accentSwatch(accentPreset(accentColor))}"
+                aria-label={t('settings.colorTheme')}
+                aria-haspopup="true"
+                aria-expanded={colorPickerOpen === 'accent'}
+                onclick={(e) => openColorPicker('accent', e, 3, 'below')}
+              ></button>
+              {#if colorPickerOpen === 'accent'}
+                <div class="color-picker-popup accent-popup" style="top:{colorPickerPos.top}px;left:{colorPickerPos.left}px">
+                  {#each ACCENT_PRESETS as c (c.id)}
+                    {@const label = t(`settings.${c.labelKey}`)}
+                    <button
+                      type="button"
+                      class="color-picker-cell"
+                      class:selected={accentColor === c.id}
+                      style="background: {accentSwatch(c)}"
+                      aria-label={label}
+                      data-tooltip={label}
+                      onclick={() => { onChangeAccentColor(c.id); colorPickerOpen = null; }}
+                    ></button>
+                  {/each}
+                </div>
+              {/if}
             </div>
           </section>
 
@@ -2454,7 +2478,7 @@
   .settings-nav-item.selected {
     color: var(--text-primary);
     background: var(--bg-selected);
-    border-left-color: var(--accent-active);
+    border-left-color: var(--accent-text-active);
     font-weight: 600;
   }
 
@@ -2477,7 +2501,7 @@
 
   .settings-nav-account-row.selected {
     background: var(--bg-selected);
-    border-left-color: var(--accent-active);
+    border-left-color: var(--accent-text-active);
   }
 
   .settings-nav-account-row.selected:hover .settings-nav-account-name {
@@ -2603,12 +2627,12 @@
   .settings-nav-sub-item.selected {
     color: var(--text-primary);
     background: var(--bg-selected);
-    border-left-color: var(--accent-active);
+    border-left-color: var(--accent-text-active);
     font-weight: 600;
   }
 
   .settings-nav-sub-item.selected:hover {
-    border-left-color: var(--accent);
+    border-left-color: var(--accent-text);
   }
 
   /* ── Right Content ── */
@@ -2735,7 +2759,7 @@
   }
 
   .theme-option.selected {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     background: var(--bg-selected);
   }
 
@@ -2801,7 +2825,7 @@
   }
 
   .language-option.selected {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     background: var(--accent-light);
     color: var(--text-primary);
     font-weight: 600;
@@ -2822,32 +2846,20 @@
     text-align: center;
   }
 
-  /* ── Color swatches ── */
-  .color-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
-  .color-swatch {
-    width: 48px;
-    height: 48px;
-    border-radius: 1px;
-    cursor: pointer;
+  /* ── Accent colour ── */
+  /* Same shape as the avatar colour picker in Accounts: a swatch showing the
+     current choice, which opens the palette. */
+  .accent-row {
     display: flex;
     align-items: center;
-    justify-content: center;
-    transition: border-color 0.15s, transform 0.1s, box-shadow 0.15s;
+    gap: 12px;
   }
 
-  .color-swatch:hover {
-    transform: scale(1.08);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  }
-
-  .color-swatch.selected {
-    border-color: var(--text-primary);
-    box-shadow: 0 0 0 2px var(--bg-primary), 0 0 0 4px var(--accent);
+  /* Two classes, to outrank .color-picker-popup's own 6x6 grid regardless of
+     which of the two rules the bundler emits last. */
+  .color-picker-popup.accent-popup {
+    grid-template-columns: repeat(3, 24px);
+    grid-template-rows: repeat(3, 24px);
   }
 
   /* ── Detail form ── */
@@ -2908,7 +2920,7 @@
   }
 
   .form-input:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
   }
 
   .form-input[type="number"],
@@ -3113,7 +3125,7 @@
   }
 
   .acct-photo-avatar:hover {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
   }
 
   .acct-photo-img {
@@ -3271,7 +3283,7 @@
     font-family: inherit;
   }
   .storage-readout-input:focus {
-    border-bottom-color: var(--accent);
+    border-bottom-color: var(--accent-text);
   }
   .storage-readout-unit {
     font-size: 12px;

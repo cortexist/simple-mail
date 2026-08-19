@@ -367,7 +367,7 @@
   <div class="reading-pane-indicator"></div>
   {#if email}
     <!-- Email Content -->
-    <div class="email-content" bind:this={contentEl} class:pane-focused={focused}>
+    <div class="email-content" class:pane-focused={focused}>
       <!-- Header -->
       <div class="email-header">
         <div class="email-subject-row">
@@ -512,34 +512,41 @@
       <hr class="divider" />
 
       <!-- Body -->
-      <div class="email-body">
-        {#if loadingBody && !email.body}
-          <div class="body-loading">
-            <svg class="spinner" width="20" height="20" viewBox="0 0 20 20">
-              <circle cx="10" cy="10" r="8" fill="none" stroke="var(--border)" stroke-width="2" />
-              <circle cx="10" cy="10" r="8" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="28 22" stroke-linecap="round" />
-            </svg>
-            <span>{t('readingPane.loadingMessage')}</span>
-          </div>
-        {:else}
-          <!-- allow-scripts is required for the app's own listeners (link
-               interception, key forwarding, hover preview) to run at all:
-               WebKitGTK blocks every listener on a script-less sandboxed
-               document, parent-registered ones included. Mail's own scripts are
-               blocked by the CSP that buildMailDocument emits instead — see the
-               note there. Deliberately absent: allow-top-navigation,
-               allow-popups, allow-forms, allow-modals. -->
-          <iframe
-            bind:this={iframeEl}
-            sandbox="allow-same-origin allow-scripts"
-            scrolling="no"
-            title={t('readingPane.emailBody')}
-            class="body-iframe"
-          ></iframe>
-          <!-- Print-only: render body directly in DOM so it paginates correctly
-               (iframes can't break across pages). Hidden on screen, visible in print. -->
-          <div class="print-body">{@html printBody(email.body)}</div>
-        {/if}
+      <!-- The scroller, and the element the dark-theme invert hangs on. Its box is
+           viewport-sized, which is the whole point: a filter over the full mail was
+           ~9400px of surface on a 2x display, which WebKitGTK either failed to paint
+           or re-rasterized on every unrelated repaint. See .email-scroll.inverted. -->
+      <div class="email-scroll" bind:this={contentEl} class:inverted={darkMode}>
+        <div class="email-body">
+          {#if loadingBody && !email.body}
+            <div class="body-loading">
+              <svg class="spinner" width="20" height="20" viewBox="0 0 20 20">
+                <circle cx="10" cy="10" r="8" fill="none" stroke="var(--border)" stroke-width="2" />
+                <circle cx="10" cy="10" r="8" fill="none" stroke="var(--accent-text)" stroke-width="2" stroke-dasharray="28 22" stroke-linecap="round" />
+              </svg>
+              <span>{t('readingPane.loadingMessage')}</span>
+            </div>
+          {:else}
+            <!-- allow-scripts is required for the app's own listeners (link
+                 interception, key forwarding, hover preview) to run at all:
+                 WebKitGTK blocks every listener on a script-less sandboxed
+                 document, parent-registered ones included. Mail's own scripts are
+                 blocked by the CSP that buildMailDocument emits instead — see the
+                 note there. Deliberately absent: allow-top-navigation,
+                 allow-popups, allow-forms, allow-modals. -->
+            <iframe
+              bind:this={iframeEl}
+              sandbox="allow-same-origin allow-scripts"
+              scrolling="no"
+              title={t('readingPane.emailBody')}
+              class="body-iframe"
+              class:inverted={darkMode}
+            ></iframe>
+            <!-- Print-only: render body directly in DOM so it paginates correctly
+                 (iframes can't break across pages). Hidden on screen, visible in print. -->
+            <div class="print-body">{@html printBody(email.body)}</div>
+          {/if}
+        </div>
       </div>
     </div>
     {#if hoveredLink}
@@ -584,14 +591,57 @@
   }
 
   /* ── Email Content ── */
+  /* Pins the header: this column no longer scrolls, .email-scroll inside it does. */
   .email-content {
     flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    outline: none;
+  }
+
+  .email-scroll {
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
     outline: none;
   }
 
+  /* Dark theme's document-wide invert.
+     It hangs here, on the scroller, and that is load-bearing. A filter applies
+     to the element's painted box, and this box is clipped to the viewport — so
+     however tall the mail is, WebKit only ever filters a screenful. Hung on the
+     mail instead it covers the whole message: a Medium digest is ~4700px, or
+     ~9400px of surface on a 2x display, and past some size WebKitGTK stops
+     painting most of it and never invalidates it — the mail goes blank until
+     something forces a real repaint. Hung on the iframe element from the parent
+     document it paints correctly but is re-rasterized by every unrelated repaint
+     in the app, so hovering the message list visibly blinks the mail. Confirmed
+     in that order on WebKitGTK 2.52; buildMailDocument's darkCss has the detail.
+     The threshold tracks the pane's area, so it appears only when the window is
+     large — alone on a sway workspace, not tiled.
+     Must stay the inverse of the per-image counter-filter darkCss emits inside
+     the document; the pair is what leaves pictures as authored.
+     The backdrop is not affected by a filter, so the pane's own background still
+     shows through unfiltered around the mail. */
+  .email-scroll.inverted {
+    filter: invert(0.9) hue-rotate(170deg);
+  }
+
+  /* The scrollbar is painted as part of the filtered element, so it has to be
+     authored pre-inverted to come out looking like the app's. */
+  .email-scroll.inverted::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.15);
+  }
+
+  .email-scroll.inverted::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.25);
+  }
+
   /* ── Header ── */
   .email-header {
+    flex-shrink: 0;
     max-width: 1000px;
     display: flex;
     flex-direction: column;
@@ -865,6 +915,7 @@
 
   /* ── Divider ── */
   .divider {
+    flex-shrink: 0;
     border: none;
     border-top: 1px solid var(--border-light);
     margin-left: 32px;

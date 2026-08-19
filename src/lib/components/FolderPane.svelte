@@ -305,12 +305,12 @@
   }
 
   .folder-item.selected:hover {
-    border-left-color: var(--accent);
+    border-left-color: var(--accent-text);
     color: var(--text-secondary); 
   }
 
   .folder-pane.active .folder-item.selected {
-    border-left-color: var(--accent-active);
+    border-left-color: var(--accent-text-active);
   }
 
   .folder-item:focus {
@@ -341,7 +341,7 @@
   .unread-badge {
     font-size: 11px;
     font-weight: 600;
-    color: var(--accent-active);
+    color: var(--accent-text-active);
     min-width: 16px;
     text-align: right;
     flex-shrink: 0;
@@ -351,7 +351,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: var(--accent-active);
+    color: var(--accent-text-active);
     flex-shrink: 0;
   }
 
