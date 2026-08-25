@@ -1420,15 +1420,42 @@
   // `query_emails`), so every path that moves the selection depends on this,
   // and one effect on the selection is the only way to be sure none is
   // missed. Drafts are the exception: the composer path below fetches those.
+  //
+  // The fetch waits for the selection to rest. A body that is not in SQLite
+  // costs an IMAP connection, and the arrow keys move the selection through
+  // every row on the way to the one wanted; fetching each as it passed opened
+  // a connection per row and kept the network indicator lit long after the
+  // keys stopped. A short pause after the last move is below what a reader
+  // notices and skips the rows only passed through.
+  const BODY_FETCH_SETTLE_MS = 250;
   $effect(() => {
     const email = selectedEmail;
     if (!email || email.body || email.folder === 'drafts') return;
     if (!activeAccountId || fetchingBodyId === email.id) return;
     const accountId = activeAccountId;
     const id = email.id;
-    fetchingBodyId = id;
-    untrack(() => fireFetchEmailBody(accountId, id));
+    const timer = setTimeout(() => {
+      // Re-check on the live state: the selection may have moved on, or the
+      // body may have arrived by another route (a scroll window, the
+      // downloader) while waiting.
+      const current = emails.find((e) => e.id === id);
+      if (selectedEmailId !== id || !current || current.body || fetchingBodyId === id) return;
+      fetchingBodyId = id;
+      bodyFetchFailedId = null;
+      void fireFetchEmailBody(accountId, id).then((accepted) => {
+        // A rejected fetch would otherwise leave the pane loading for ever:
+        // nothing clears `fetchingBodyId`, and this effect will not fire again
+        // while it names the message. Clear it and say so.
+        if (!accepted && fetchingBodyId === id) {
+          fetchingBodyId = null;
+          bodyFetchFailedId = id;
+        }
+      });
+    }, BODY_FETCH_SETTLE_MS);
+    return () => clearTimeout(timer);
   });
+  /** Message whose last body fetch was rejected; the pane shows why it is empty. */
+  let bodyFetchFailedId = $state<string | null>(null);
 
   let unreadCounts = $derived(
     emails.reduce(
@@ -3165,7 +3192,7 @@
             {/key}
           {:else}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div style="display:contents" onmousedown={() => (focusedPane = 'reading')}><ReadingPane bind:this={readingPaneRef} email={selectedEmail} loadingBody={fetchingBodyId === selectedEmailId} darkMode={resolvedTheme === 'dark'} isJunk={activeFolder === 'junk'} focused={focusedPane === 'reading'} onFocus={() => (focusedPane = 'reading')} onOpenAttachment={handleOpenAttachment} onSaveAttachment={handleSaveAttachment} onOpenDraftAttachment={handleOpenDraftAttachment} bind:showAllHeaders {multiSelectCount} onLabelClick={handleLabelClick} /></div>
+            <div style="display:contents" onmousedown={() => (focusedPane = 'reading')}><ReadingPane bind:this={readingPaneRef} email={selectedEmail} loadingBody={fetchingBodyId === selectedEmailId} bodyFailed={bodyFetchFailedId === selectedEmailId} darkMode={resolvedTheme === 'dark'} isJunk={activeFolder === 'junk'} focused={focusedPane === 'reading'} onFocus={() => (focusedPane = 'reading')} onOpenAttachment={handleOpenAttachment} onSaveAttachment={handleSaveAttachment} onOpenDraftAttachment={handleOpenDraftAttachment} bind:showAllHeaders {multiSelectCount} onLabelClick={handleLabelClick} /></div>
           {/if}
         {:else if activeNav === 'calendar'}
           <CalendarView

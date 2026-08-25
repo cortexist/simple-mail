@@ -11,6 +11,8 @@
   interface Props {
     email: Email | null;
     loadingBody?: boolean;
+    /** The last fetch for this message was rejected; nothing will arrive. */
+    bodyFailed?: boolean;
     darkMode?: boolean;
     isJunk?: boolean;
     focused?: boolean;
@@ -27,7 +29,7 @@
     onLabelClick?: (label: string) => void;
   }
 
-  let { email, loadingBody = false, darkMode = false, isJunk = false, focused = false, onFocus, onOpenAttachment, onSaveAttachment, onOpenDraftAttachment, showAllHeaders = $bindable(false), multiSelectCount = 0, onLabelClick }: Props = $props();
+  let { email, loadingBody = false, bodyFailed = false, darkMode = false, isJunk = false, focused = false, onFocus, onOpenAttachment, onSaveAttachment, onOpenDraftAttachment, showAllHeaders = $bindable(false), multiSelectCount = 0, onLabelClick }: Props = $props();
 
   // ── Attachment context menu ──
   let attachMenu: { x: number; y: number; index: number; filename: string; unsafe: boolean } | null = $state(null);
@@ -246,25 +248,47 @@
   function freezeAnimatedImage(img: HTMLImageElement) {
     const doc = img.ownerDocument;
     if (!img.isConnected || img.naturalWidth === 0 || img.naturalHeight === 0) return;
-    let canvas: HTMLCanvasElement;
+    const canvas = doc.createElement('canvas');
+
+    // Presentation first, bitmap last: assigning a canvas's `width` or
+    // `height` — attribute or property — discards its drawing, so nothing
+    // below may touch them after drawImage. The image's own `width`/`height`
+    // attributes are therefore not copied as attributes; where the inline
+    // style does not already size the element they become CSS instead, which
+    // is how they sized the image, with `height:auto` in the document CSS
+    // keeping the bitmap's aspect either way.
+    for (const name of ['style', 'class', 'id', 'title', 'align']) {
+      const value = img.getAttribute(name);
+      if (value !== null) canvas.setAttribute(name, value);
+    }
+    const widthAttr = img.getAttribute('width');
+    const heightAttr = img.getAttribute('height');
+    if (widthAttr && !canvas.style.width && /^\d+$/.test(widthAttr)) canvas.style.width = `${widthAttr}px`;
+    if (heightAttr && !canvas.style.height && /^\d+$/.test(heightAttr)) canvas.style.height = `${heightAttr}px`;
+    // What the mail's stylesheet did to the image by tag — `td img{display:
+    // block}` is boilerplate — will not reach a canvas, so the resolved values
+    // of the layout-affecting properties are pinned inline.
+    const computed = doc.defaultView?.getComputedStyle(img);
+    if (computed) {
+      for (const prop of ['display', 'float', 'vertical-align', 'margin-top', 'margin-right',
+                          'margin-bottom', 'margin-left', 'border-radius', 'object-fit'] as const) {
+        if (!canvas.style.getPropertyValue(prop)) canvas.style.setProperty(prop, computed.getPropertyValue(prop));
+      }
+    }
+    const alt = img.getAttribute('alt');
+    if (alt) canvas.setAttribute('aria-label', alt);
+    canvas.setAttribute('role', 'img');
+    canvas.dataset.frozenFrom = img.currentSrc || img.src;
+
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
     try {
-      canvas = doc.createElement('canvas');
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       ctx.drawImage(img, 0, 0);
     } catch {
       return; // leave the image as it is rather than blank it
     }
-    for (const name of ['width', 'height', 'style', 'class', 'id', 'title', 'align']) {
-      const value = img.getAttribute(name);
-      if (value !== null) canvas.setAttribute(name, value);
-    }
-    const alt = img.getAttribute('alt');
-    if (alt) canvas.setAttribute('aria-label', alt);
-    canvas.setAttribute('role', 'img');
-    canvas.dataset.frozenFrom = img.currentSrc || img.src;
     img.replaceWith(canvas);
   }
 
@@ -602,6 +626,10 @@
                 <circle cx="10" cy="10" r="8" fill="none" stroke="var(--accent-text)" stroke-width="2" stroke-dasharray="28 22" stroke-linecap="round" />
               </svg>
               <span>{t('readingPane.loadingMessage')}</span>
+            </div>
+          {:else if bodyFailed && !email.body}
+            <div class="body-loading" role="status">
+              <span>{t('readingPane.bodyUnavailable')}</span>
             </div>
           {:else}
             <!-- allow-scripts is required for the app's own listeners (link

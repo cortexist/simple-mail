@@ -509,13 +509,19 @@ export function fireAiDraftReply(
 }
 
 /** Fetch a single email body. Completion via `subscribeBodyFetched`. */
-export function fireFetchEmailBody(accountId: string, emailId: string): void {
+/** Resolves `true` once the fetch was accepted — the body itself arrives via
+ *  `subscribeBodyFetched` — and `false` if it was rejected, so the caller can
+ *  drop its loading state and let the message be tried again. */
+export function fireFetchEmailBody(accountId: string, emailId: string): Promise<boolean> {
   const opKey = seqKey(`body:${emailId}`, '');
   incOp(opKey);
-  invoke('fetch_email_body', { accountId, emailId }).catch((err) => {
-    console.error('fetch_email_body rejected at invoke-time:', err);
-    decOp(opKey);
-  });
+  return invoke('fetch_email_body', { accountId, emailId })
+    .then(() => true)
+    .catch((err) => {
+      console.error('fetch_email_body rejected at invoke-time:', err);
+      decOp(opKey);
+      return false;
+    });
 }
 
 /** Fill previews near a viewport anchor. Completion via `subscribePreviewsFetched`. */
