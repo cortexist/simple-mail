@@ -130,6 +130,7 @@
   import { networkActivity } from '$lib/networkActivity.svelte';
   import type { Email, Contact, NavItem, CalendarViewMode, ComposeMode, Theme, Account, CalendarEvent, FullContact, ComposeDraft, ContactList } from '$lib/types';
   import { parseSearchQuery, emailMatchesQuery, buildSearchText } from '$lib/searchQuery';
+  import { retainBody, releaseBody } from '$lib/bodyRetention';
   import { ensureReadableTextColors } from '$lib/readableColors';
   import { applyAccent, DEFAULT_ACCENT_ID } from '$lib/theme';
   import { setLocale, detectLocale, locale, LANGUAGE_NAMES, t } from '$lib/i18n/index.svelte';
@@ -479,9 +480,12 @@
       emails = emails.map((e) => {
         const u = byId.get(e.id);
         if (!u) return e;
+        // Index the downloaded text but keep only the body already in hand. The
+        // downloader runs unattended for hours; retaining every body it delivers
+        // is what let the array grow with nobody at the keyboard. The HTML stays
+        // in SQLite and is re-fetched if the message is opened.
         return {
           ...e,
-          body: u.body,
           searchText: buildSearchText(u.body),
           preview: u.preview || e.preview,
           authResults: u.authResults || e.authResults,
@@ -1448,24 +1452,32 @@
     }
   }
 
-  /** Patch the active emails array when the backend has fetched a body. */
+  /** Patch the active emails array when the backend has fetched a body.
+   *  This is the one path that retains a body: it runs because the user opened
+   *  the message. Retaining it evicts the least-recently-viewed body, whose
+   *  `searchText` stays behind so search coverage is unaffected. */
   function applyBodyEcho(ev: EmailBodyFetchedEvent) {
-    const patch = (e: Email): Email => ({
-      ...e,
-      body: ev.body,
-      searchText: buildSearchText(ev.body),
-      preview: e.preview || ev.preview,
-      authResults: ev.authResults || e.authResults,
-      hasAttachment: ev.hasAttachment ?? e.hasAttachment,
-      attachments: ev.attachments ?? e.attachments,
-    });
+    const evicted = new Set(retainBody(ev.emailId));
+    const patch = (e: Email): Email => {
+      if (e.id === ev.emailId) {
+        return {
+          ...e,
+          body: ev.body,
+          searchText: buildSearchText(ev.body),
+          preview: e.preview || ev.preview,
+          authResults: ev.authResults || e.authResults,
+          hasAttachment: ev.hasAttachment ?? e.hasAttachment,
+          attachments: ev.attachments ?? e.attachments,
+        };
+      }
+      if (e.body && evicted.has(e.id)) return { ...e, body: '' };
+      return e;
+    };
     if (ev.accountId === activeAccountId) {
-      emails = emails.map((e) => (e.id === ev.emailId ? patch(e) : e));
+      emails = emails.map(patch);
     } else {
       accounts = accounts.map((a) =>
-        a.id === ev.accountId
-          ? { ...a, emails: a.emails.map((e) => (e.id === ev.emailId ? patch(e) : e)) }
-          : a);
+        a.id === ev.accountId ? { ...a, emails: a.emails.map(patch) } : a);
     }
     if (fetchingBodyId === ev.emailId) fetchingBodyId = null;
   }
@@ -1491,10 +1503,11 @@
     const patchAccountEmails = (list: Email[]): Email[] => list.map((e) => {
       const u = byId.get(e.id);
       if (!u) return e;
-      const nextBody = u.body || e.body;
+      // Scrolling fetches a window of messages around the anchor. Index their
+      // text, but leave `body` as-is — these were never opened, and keeping 30
+      // bodies per scroll is what the retention set exists to avoid.
       return {
         ...e,
-        body: nextBody,
         searchText: u.body ? buildSearchText(u.body) : e.searchText,
         preview: u.preview || e.preview,
         authResults: u.authResults ?? e.authResults,
@@ -1994,6 +2007,7 @@
     const ids = new Set(ev.emailIds);
     // Removal fans out like the other echoes: a deleted message must disappear
     // from every view on the login, not just the account that deleted it.
+    for (const id of ids) releaseBody(id);
     emails = emails.filter((e) => !ids.has(e.id));
     if (selectedEmailId && ids.has(selectedEmailId)) selectedEmailId = '';
     accounts = accounts.map((a) =>

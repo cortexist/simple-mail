@@ -45,7 +45,10 @@ function hydrateAccountDates(account: Account): Account {
     emails: account.emails.map((e) => ({
       ...ensureFocusedFlag(e),
       date: new Date(e.date),
-      searchText: e.body ? buildSearchText(e.body) : undefined,
+      // The backend sends the search text ready-made and leaves `body` empty;
+      // bodies load on open. The fallback covers the web-only mock data, which
+      // carries bodies and nothing else.
+      searchText: e.searchText ?? (e.body ? buildSearchText(e.body) : undefined),
     })),
     calendarEvents: account.calendarEvents.map((ev) => ({
       ...ev,

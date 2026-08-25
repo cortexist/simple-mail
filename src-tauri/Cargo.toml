@@ -51,6 +51,12 @@ ical = "0.11"
 # vCard parsing
 vcard_parser = "0.2"
 
+# Allocator. glibc gives every thread its own 64 MB heap and keeps it once it has
+# grown, so the IMAP fetch and body-download batches — which run across the tokio
+# pool for the life of the session — ratchet resident memory up and never give it
+# back. mimalloc returns pages to the OS. Installed in `main.rs`.
+mimalloc = "0.1"
+
 # Utilities
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
