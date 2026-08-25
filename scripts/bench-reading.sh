@@ -30,6 +30,12 @@ export AGENTIC_MAIL_BENCH=1
 # logs to its own file.
 export AGENTIC_MAIL_CACHE_MODEL="${AGENTIC_MAIL_CACHE_MODEL:-browser}"
 export AGENTIC_MAIL_BENCH_LOG="${AGENTIC_MAIL_BENCH_LOG:-$HOME/.cortexist/mail/bench-reading-$AGENTIC_MAIL_CACHE_MODEL.csv}"
+# Never overwrite an earlier run: it is the comparison point.
+if [[ -s "$AGENTIC_MAIL_BENCH_LOG" ]]; then
+  keep="${AGENTIC_MAIL_BENCH_LOG%.csv}.$(date -r "$AGENTIC_MAIL_BENCH_LOG" +%Y%m%d-%H%M).csv"
+  mv "$AGENTIC_MAIL_BENCH_LOG" "$keep"
+  echo "previous log kept as $keep"
+fi
 : > "$AGENTIC_MAIL_BENCH_LOG"
 max_minutes="${AGENTIC_MAIL_BENCH_MAX_MINUTES:-120}"
 
