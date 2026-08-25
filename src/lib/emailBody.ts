@@ -213,7 +213,7 @@ export function buildMailDocument(body: string, opts: MailDocumentOptions = {}):
     // colours (form controls, default text) must match the light design too.
     `html{color-scheme:light;}html,body{background-color:${canvasColor(body)};}` +
     'body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.65;color:#242424;overflow-wrap:break-word;}' +
-    'img{max-width:100%;height:auto;}a{color:#0078d4;}' + darkCss;
+    'img,canvas{max-width:100%;height:auto;}a{color:#0078d4;}' + darkCss;
   // The geometry rules repeat AFTER the content. The email's own stylesheets
   // land between the two, so on equal-specificity ties (`body{height:100%
   // !important}` is boilerplate in real mail) source order decides — and

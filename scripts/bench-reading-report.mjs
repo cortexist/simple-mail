@@ -24,9 +24,9 @@ const rows = lines.slice(startAt + 1).map((l) => {
   const cells = l.split(',');
   const r = {};
   header.forEach((h, i) => { r[h] = cells[i] === '' || cells[i] === undefined ? null : cells[i]; });
-  for (const k of ['round', 'idx', 'body_bytes', 'img_count', 'render_load_ms', 'render_settled_ms',
+  for (const k of ['round', 'idx', 'body_bytes', 'img_count', 'anim_img_count', 'render_load_ms', 'render_settled_ms',
                    'main_anon_kb', 'main_rss_kb', 'web_anon_kb', 'web_rss_kb', 'net_anon_kb', 'web_procs']) {
-    if (r[k] !== null) r[k] = Number(r[k]);
+    if (r[k] !== null && r[k] !== undefined) r[k] = Number(r[k]);   // older logs lack newer columns
   }
   return r;
 }).filter((r) => r.phase);
@@ -107,9 +107,9 @@ for (const round of rounds) {
 }
 const top = [...deltas].sort((a, b) => b.delta - a.delta).slice(0, 12);
 console.log('largest single-message growth (web anon):');
-console.log('  Δ            round  imgs   body KB   settled ms  email_id');
+console.log('  Δ            round  imgs  anim   body KB   settled ms  email_id');
 for (const r of top) {
-  console.log(`  ${mb(r.delta)}  ${String(r.round).padStart(5)}  ${String(r.img_count).padStart(4)}  ${String(Math.round(r.body_bytes / 1024)).padStart(8)}  ${String(r.render_settled_ms ?? '').padStart(10)}  ${r.email_id}`);
+  console.log(`  ${mb(r.delta)}  ${String(r.round).padStart(5)}  ${String(r.img_count).padStart(4)}  ${String(r.anim_img_count ?? '').padStart(4)}  ${String(Math.round(r.body_bytes / 1024)).padStart(8)}  ${String(r.render_settled_ms ?? '').padStart(10)}  ${r.email_id}`);
 }
 console.log();
 

@@ -58,7 +58,7 @@ interface RenderTraceConsole {
 
 const COLUMNS = [
   'ts_ms', 'phase', 'round', 'account', 'idx', 'email_id', 'status',
-  'body_bytes', 'img_count', 'render_load_ms', 'render_settled_ms',
+  'body_bytes', 'img_count', 'anim_img_count', 'render_load_ms', 'render_settled_ms',
   'main_anon_kb', 'main_rss_kb', 'web_anon_kb', 'web_rss_kb', 'net_anon_kb', 'web_procs',
 ];
 
@@ -88,12 +88,12 @@ async function sampleRow(
   cfg: BenchConfig,
   phase: string,
   fields: { round?: number; account?: string; idx?: number; emailId?: string; status?: string;
-            bodyBytes?: number; imgCount?: number; load?: number | null; settled?: number | null },
+            bodyBytes?: number; imgCount?: number; animImgCount?: number; load?: number | null; settled?: number | null },
 ) {
   const s = await invoke<BenchSample>('bench_sample');
   const line = csv([
     s.tsMs, phase, fields.round, fields.account, fields.idx, fields.emailId, fields.status,
-    fields.bodyBytes, fields.imgCount,
+    fields.bodyBytes, fields.imgCount, fields.animImgCount,
     fields.load == null ? null : Math.round(fields.load),
     fields.settled == null ? null : Math.round(fields.settled),
     s.mainAnonKb, s.mainRssKb, s.webAnonKb, s.webRssKb, s.netAnonKb, s.webProcessCount,
@@ -177,6 +177,7 @@ async function run(host: BenchHost, cfg: BenchConfig) {
             round, account: account.id, idx, emailId: id, status,
             bodyBytes: body.length,
             imgCount: (body.match(/<img/gi) || []).length,
+            animImgCount: (body.match(/<img[^>]+src\s*=\s*["']?[^"'\s>]*\.(gif|webp|apng)(\?|["'\s>])/gi) || []).length,
             load: last?.load ?? null, settled: last?.settled ?? null,
           });
         }
