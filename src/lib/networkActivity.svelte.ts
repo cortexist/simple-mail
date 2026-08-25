@@ -44,6 +44,40 @@ export const networkActivity = $state({
   active: [] as PendingActivity[],
 });
 
+/** Completed operations with how long they took, newest last, for answering
+ *  "why did the indicator light?" from the console: `__mailActivity.recent()`.
+ *  Not reactive; nothing renders from it. */
+export interface CompletedActivity extends Activity {
+  ms: number;
+  finishedAt: number;
+  expired: boolean;
+}
+const recent: CompletedActivity[] = [];
+const RECENT_MAX = 50;
+
+function remember(p: PendingActivity, expired: boolean) {
+  const now = Date.now();
+  recent.push({ kind: p.kind, accountId: p.accountId, ms: now - p.startedAt, finishedAt: now, expired });
+  if (recent.length > RECENT_MAX) recent.shift();
+}
+
+let consoleInstalled = false;
+/** Register `__mailActivity` on the global for a running build. */
+export function installActivityConsole() {
+  if (consoleInstalled) return;
+  consoleInstalled = true;
+  Object.defineProperty(globalThis, '__mailActivity', {
+    configurable: true,
+    value: {
+      /** Pending now, with age in ms. */
+      pending: () => pending.map((p) => ({ kind: p.kind, accountId: p.accountId, ms: Date.now() - p.startedAt })),
+      /** The last 50 completed, newest last. */
+      recent: () => recent.slice(),
+      clear() { recent.length = 0; },
+    },
+  });
+}
+
 const STALE_MS = 3 * 60 * 1000;
 const SWEEP_MS = 30 * 1000;
 
@@ -68,7 +102,7 @@ function sweep() {
   const cutoff = Date.now() - STALE_MS;
   let expired = 0;
   while (pending.length > 0 && pending[0].startedAt < cutoff) {
-    pending.shift();
+    remember(pending.shift()!, true);
     expired++;
   }
   if (expired > 0) {
@@ -94,9 +128,9 @@ export function decNetwork(token?: number) {
   if (at === -1) {
     // Unknown or absent token: the entry may already have been swept. Fall
     // back to the oldest so the count still comes down.
-    pending.shift();
+    remember(pending.shift()!, false);
   } else {
-    pending.splice(at, 1);
+    remember(pending.splice(at, 1)[0], false);
   }
   publish();
   stopSweeperIfIdle();
