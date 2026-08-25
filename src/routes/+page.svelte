@@ -130,6 +130,9 @@
   import { networkActivity } from '$lib/networkActivity.svelte';
   import type { Email, Contact, NavItem, CalendarViewMode, ComposeMode, Theme, Account, CalendarEvent, FullContact, ComposeDraft, ContactList } from '$lib/types';
   import { parseSearchQuery, emailMatchesQuery, buildSearchText } from '$lib/searchQuery';
+  import { retainBody, releaseBody } from '$lib/bodyRetention';
+  import type { PendingActivity } from '$lib/networkActivity.svelte';
+  import { startBenchIfConfigured, installBenchConsole } from '$lib/bench';
   import { ensureReadableTextColors } from '$lib/readableColors';
   import { applyAccent, DEFAULT_ACCENT_ID } from '$lib/theme';
   import { setLocale, detectLocale, locale, LANGUAGE_NAMES, t } from '$lib/i18n/index.svelte';
@@ -305,6 +308,78 @@
   let toastMessage = $state<string | null>(null);
   let toastTimerId: ReturnType<typeof setTimeout> | null = null;
 
+  // ── Activity toast ──────────────────────────────────────
+  // The titlebar indicator says that something is on the wire; this says what.
+  // It lists the pending operations that leave the machine, by server and
+  // account, and appears only once activity has lasted long enough to be
+  // wondered about — a flag toggle that echoes in a moment never shows it.
+  const ACTIVITY_TOAST_DELAY_MS = 600;
+  const ACTIVITY_TOAST_MAX_LINES = 3;
+  let activityToastShown = $state(false);
+  let activityToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function hostOf(url: string | undefined): string {
+    if (!url) return '';
+    try { return new URL(url).host; } catch { return url; }
+  }
+
+  /** Server settings for an account, or for the login it is a view onto. */
+  function serverSettingsFor(account: Account | undefined) {
+    if (!account) return undefined;
+    if (account.serverSettings) return account.serverSettings;
+    return accounts.find((a) => a.loginId && a.loginId === account.loginId && a.serverSettings)?.serverSettings;
+  }
+  function davSettingsFor(account: Account | undefined, which: 'calDavSettings' | 'cardDavSettings') {
+    if (!account) return undefined;
+    if (account[which]) return account[which];
+    return accounts.find((a) => a.loginId && a.loginId === account.loginId && a[which])?.[which];
+  }
+
+  function describeActivity(kind: PendingActivity['kind'], accountId: string | undefined): string | null {
+    const account = accounts.find((a) => a.id === accountId);
+    const who = account?.alias || account?.email || '';
+    const mail = serverSettingsFor(account);
+    switch (kind) {
+      case 'imap-fetch':
+        return t('activity.receiving', { host: mail ? `${mail.incomingServer}:${mail.incomingPort}` : '…', account: who });
+      case 'imap-update':
+        return t('activity.updating', { host: mail ? `${mail.incomingServer}:${mail.incomingPort}` : '…', account: who });
+      case 'smtp':
+        return t('activity.sending', { host: mail ? `${mail.smtpServer}:${mail.smtpPort}` : '…', account: who });
+      case 'caldav':
+        return t('activity.calendar', { host: hostOf(davSettingsFor(account, 'calDavSettings')?.url) || '…', account: who });
+      case 'carddav':
+        return t('activity.contacts', { host: hostOf(davSettingsFor(account, 'cardDavSettings')?.url) || '…', account: who });
+      case 'ai':
+        return t('activity.ai');
+      default:
+        return null;   // local database work: counts, but is not worth a toast
+    }
+  }
+
+  const activityLines = $derived.by(() => {
+    const seen = new Map<string, number>();
+    for (const op of networkActivity.active) {
+      const line = describeActivity(op.kind, op.accountId);
+      if (line) seen.set(line, (seen.get(line) ?? 0) + 1);
+    }
+    const lines = [...seen.keys()];
+    if (lines.length <= ACTIVITY_TOAST_MAX_LINES) return lines;
+    return [...lines.slice(0, ACTIVITY_TOAST_MAX_LINES), t('activity.more', { count: lines.length - ACTIVITY_TOAST_MAX_LINES })];
+  });
+
+  $effect(() => {
+    const busy = activityLines.length > 0;
+    if (busy) {
+      if (!activityToastShown && activityToastTimer === null) {
+        activityToastTimer = setTimeout(() => { activityToastShown = true; activityToastTimer = null; }, ACTIVITY_TOAST_DELAY_MS);
+      }
+    } else {
+      if (activityToastTimer !== null) { clearTimeout(activityToastTimer); activityToastTimer = null; }
+      activityToastShown = false;
+    }
+  });
+
   function pushUndo(entry: UndoEntry, message: string) {
     if (entry.view === 'mail')     undoMail = entry;
     if (entry.view === 'calendar') undoCalendar = entry;
@@ -479,9 +554,12 @@
       emails = emails.map((e) => {
         const u = byId.get(e.id);
         if (!u) return e;
+        // Index the downloaded text but keep only the body already in hand. The
+        // downloader runs unattended for hours; retaining every body it delivers
+        // is what let the array grow with nobody at the keyboard. The HTML stays
+        // in SQLite and is re-fetched if the message is opened.
         return {
           ...e,
-          body: u.body,
           searchText: buildSearchText(u.body),
           preview: u.preview || e.preview,
           authResults: u.authResults || e.authResults,
@@ -879,6 +957,20 @@
         applyAccountState(accounts[0].id, accounts);
         contactLists = await getContactLists(accounts[0].id);
         startupStatus = 'ready';
+        // Reading-path memory bench (debug builds, opt-in). Drives selection
+        // directly so it never marks mail read or touches IMAP.
+        const benchHost = {
+          accounts: () => accounts.map((a) => ({ id: a.id })),
+          activeAccountId: () => activeAccountId,
+          selectAccount: (id: string) => handleSelectAccount(id),
+          emails: () => emails,
+          select: (id: string) => { selectedEmailId = id; },
+          fetchBody: (accountId: string, id: string) => {
+            if (fetchingBodyId !== id) { fetchingBodyId = id; fireFetchEmailBody(accountId, id); }
+          },
+        };
+        installBenchConsole(benchHost);
+        void startBenchIfConfigured(benchHost);
         // Trigger initial sync for configured accounts (non-blocking)
         handleSyncAll();
         // Set up periodic per-account sync check (every 60s)
@@ -1395,6 +1487,49 @@
 
   let selectedEmail = $derived(emails.find((e) => e.id === selectedEmailId) ?? null);
 
+  // The body loads for whatever is selected, however it came to be selected
+  // — click, arrow keys, a folder or account change, a sync reload, undo —
+  // not only on click. Bodies are no longer in memory at launch (see
+  // `query_emails`), so every path that moves the selection depends on this,
+  // and one effect on the selection is the only way to be sure none is
+  // missed. Drafts are the exception: the composer path below fetches those.
+  //
+  // The fetch waits for the selection to rest. A body that is not in SQLite
+  // costs an IMAP connection, and the arrow keys move the selection through
+  // every row on the way to the one wanted; fetching each as it passed opened
+  // a connection per row and kept the network indicator lit long after the
+  // keys stopped. A short pause after the last move is below what a reader
+  // notices and skips the rows only passed through.
+  const BODY_FETCH_SETTLE_MS = 250;
+  $effect(() => {
+    const email = selectedEmail;
+    if (!email || email.body || email.folder === 'drafts') return;
+    if (!activeAccountId || fetchingBodyId === email.id) return;
+    const accountId = activeAccountId;
+    const id = email.id;
+    const timer = setTimeout(() => {
+      // Re-check on the live state: the selection may have moved on, or the
+      // body may have arrived by another route (a scroll window, the
+      // downloader) while waiting.
+      const current = emails.find((e) => e.id === id);
+      if (selectedEmailId !== id || !current || current.body || fetchingBodyId === id) return;
+      fetchingBodyId = id;
+      bodyFetchFailedId = null;
+      void fireFetchEmailBody(accountId, id).then((accepted) => {
+        // A rejected fetch would otherwise leave the pane loading for ever:
+        // nothing clears `fetchingBodyId`, and this effect will not fire again
+        // while it names the message. Clear it and say so.
+        if (!accepted && fetchingBodyId === id) {
+          fetchingBodyId = null;
+          bodyFetchFailedId = id;
+        }
+      });
+    }, BODY_FETCH_SETTLE_MS);
+    return () => clearTimeout(timer);
+  });
+  /** Message whose last body fetch was rejected; the pane shows why it is empty. */
+  let bodyFetchFailedId = $state<string | null>(null);
+
   let unreadCounts = $derived(
     emails.reduce(
       (acc, e) => {
@@ -1440,32 +1575,36 @@
       fireMarkRead(activeAccountId, email.id, true);
     }
 
-    // Lazy-load full body if not yet fetched. The backend caches; the echo
-    // arrives via mail:email-body-fetched (applyBodyEcho).
-    if (!email.body && activeAccountId && email.id !== fetchingBodyId) {
-      fetchingBodyId = email.id;
-      fireFetchEmailBody(activeAccountId, email.id);
-    }
+    // The body fetch follows the selection itself — see the effect on
+    // `selectedEmail` — so it is not repeated here.
   }
 
-  /** Patch the active emails array when the backend has fetched a body. */
+  /** Patch the active emails array when the backend has fetched a body.
+   *  This is the one path that retains a body: it runs because the user opened
+   *  the message. Retaining it evicts the least-recently-viewed body, whose
+   *  `searchText` stays behind so search coverage is unaffected. */
   function applyBodyEcho(ev: EmailBodyFetchedEvent) {
-    const patch = (e: Email): Email => ({
-      ...e,
-      body: ev.body,
-      searchText: buildSearchText(ev.body),
-      preview: e.preview || ev.preview,
-      authResults: ev.authResults || e.authResults,
-      hasAttachment: ev.hasAttachment ?? e.hasAttachment,
-      attachments: ev.attachments ?? e.attachments,
-    });
+    const evicted = new Set(retainBody(ev.emailId));
+    const patch = (e: Email): Email => {
+      if (e.id === ev.emailId) {
+        return {
+          ...e,
+          body: ev.body,
+          searchText: buildSearchText(ev.body),
+          preview: e.preview || ev.preview,
+          authResults: ev.authResults || e.authResults,
+          hasAttachment: ev.hasAttachment ?? e.hasAttachment,
+          attachments: ev.attachments ?? e.attachments,
+        };
+      }
+      if (e.body && evicted.has(e.id)) return { ...e, body: '' };
+      return e;
+    };
     if (ev.accountId === activeAccountId) {
-      emails = emails.map((e) => (e.id === ev.emailId ? patch(e) : e));
+      emails = emails.map(patch);
     } else {
       accounts = accounts.map((a) =>
-        a.id === ev.accountId
-          ? { ...a, emails: a.emails.map((e) => (e.id === ev.emailId ? patch(e) : e)) }
-          : a);
+        a.id === ev.accountId ? { ...a, emails: a.emails.map(patch) } : a);
     }
     if (fetchingBodyId === ev.emailId) fetchingBodyId = null;
   }
@@ -1491,10 +1630,11 @@
     const patchAccountEmails = (list: Email[]): Email[] => list.map((e) => {
       const u = byId.get(e.id);
       if (!u) return e;
-      const nextBody = u.body || e.body;
+      // Scrolling fetches a window of messages around the anchor. Index their
+      // text, but leave `body` as-is — these were never opened, and keeping 30
+      // bodies per scroll is what the retention set exists to avoid.
       return {
         ...e,
-        body: nextBody,
         searchText: u.body ? buildSearchText(u.body) : e.searchText,
         preview: u.preview || e.preview,
         authResults: u.authResults ?? e.authResults,
@@ -1994,6 +2134,7 @@
     const ids = new Set(ev.emailIds);
     // Removal fans out like the other echoes: a deleted message must disappear
     // from every view on the login, not just the account that deleted it.
+    for (const id of ids) releaseBody(id);
     emails = emails.filter((e) => !ids.has(e.id));
     if (selectedEmailId && ids.has(selectedEmailId)) selectedEmailId = '';
     accounts = accounts.map((a) =>
@@ -3124,7 +3265,7 @@
             {/key}
           {:else}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div style="display:contents" onmousedown={() => (focusedPane = 'reading')}><ReadingPane bind:this={readingPaneRef} email={selectedEmail} loadingBody={fetchingBodyId === selectedEmailId} darkMode={resolvedTheme === 'dark'} isJunk={activeFolder === 'junk'} focused={focusedPane === 'reading'} onFocus={() => (focusedPane = 'reading')} onOpenAttachment={handleOpenAttachment} onSaveAttachment={handleSaveAttachment} onOpenDraftAttachment={handleOpenDraftAttachment} bind:showAllHeaders {multiSelectCount} onLabelClick={handleLabelClick} /></div>
+            <div style="display:contents" onmousedown={() => (focusedPane = 'reading')}><ReadingPane bind:this={readingPaneRef} email={selectedEmail} loadingBody={fetchingBodyId === selectedEmailId} bodyFailed={bodyFetchFailedId === selectedEmailId} darkMode={resolvedTheme === 'dark'} isJunk={activeFolder === 'junk'} focused={focusedPane === 'reading'} onFocus={() => (focusedPane = 'reading')} onOpenAttachment={handleOpenAttachment} onSaveAttachment={handleSaveAttachment} onOpenDraftAttachment={handleOpenDraftAttachment} bind:showAllHeaders {multiSelectCount} onLabelClick={handleLabelClick} /></div>
           {/if}
         {:else if activeNav === 'calendar'}
           <CalendarView
@@ -3288,6 +3429,17 @@
   />
 {/if}
 
+{#if activityToastShown && activityLines.length > 0}
+  <div class="undo-toast activity-toast" class:stacked={toastMessage !== null} role="status" aria-live="polite">
+    <svg class="activity-spinner" width="16" height="16" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="10" r="8" fill="none" stroke="var(--border)" stroke-width="2" />
+      <circle cx="10" cy="10" r="8" fill="none" stroke="var(--accent-text)" stroke-width="2" stroke-dasharray="28 22" stroke-linecap="round" />
+    </svg>
+    <div class="activity-lines">
+      {#each activityLines as line (line)}<div>{line}</div>{/each}
+    </div>
+  </div>
+{/if}
 {#if toastMessage}
   <div class="undo-toast" role="status">
     <span>{toastMessage}</span>
@@ -3466,6 +3618,28 @@
   .undo-toast-dismiss:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
+  }
+
+  .activity-toast {
+    pointer-events: none;
+    color: var(--text-secondary, var(--text-primary));
+  }
+  /* Sits above the undo toast when both are up. */
+  .activity-toast.stacked {
+    bottom: 76px;
+  }
+  .activity-lines {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .activity-spinner {
+    flex: none;
+    animation: activity-spin 0.9s linear infinite;
+  }
+  @keyframes activity-spin {
+    to { transform: rotate(360deg); }
   }
 
   @keyframes toast-slide-up {

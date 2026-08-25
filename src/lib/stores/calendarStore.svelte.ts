@@ -8,7 +8,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from './safeListen';
-import { incNetwork, decNetwork } from '$lib/networkActivity.svelte';
+import { incNetwork, decNetwork, type Activity } from '$lib/networkActivity.svelte';
 import type { CalendarEvent } from '$lib/types';
 
 export interface CalendarEventUpsertedEvent {
@@ -41,15 +41,21 @@ export interface CalendarSyncCompletedEvent {
 const inFlightCounts = new Map<string, number>();
 const seqKey = (scope: string, id: string) => `${scope}:${id}`;
 
-function incOp(key: string) {
+/** Network-activity tokens per op key, so an echo releases its own entry. */
+const activityTokens = new Map<string, number[]>();
+
+function incOp(key: string, activity: Activity) {
   inFlightCounts.set(key, (inFlightCounts.get(key) ?? 0) + 1);
-  incNetwork();
+  activityTokens.set(key, [...(activityTokens.get(key) ?? []), incNetwork(activity)]);
 }
 
 function decOp(key: string) {
   const next = (inFlightCounts.get(key) ?? 0) - 1;
   if (next <= 0) inFlightCounts.delete(key); else inFlightCounts.set(key, next);
-  decNetwork();
+  const list = activityTokens.get(key);
+  const token = list?.shift();
+  if (list && list.length === 0) activityTokens.delete(key);
+  decNetwork(token);
 }
 
 // ── Subscriptions ───────────────────────────────────────
@@ -106,7 +112,7 @@ export interface SaveCalendarEventArgs {
 
 export function fireSaveCalendarEvent(args: SaveCalendarEventArgs): void {
   const k = seqKey('event', args.eventId);
-  incOp(k);
+  incOp(k, { kind: 'caldav', accountId: args.accountId });
   invoke('save_calendar_event', {
     accountId: args.accountId,
     eventId: args.eventId,
@@ -130,7 +136,7 @@ export function fireSaveCalendarEvent(args: SaveCalendarEventArgs): void {
 
 export function fireDeleteCalendarEvent(accountId: string, eventId: string): void {
   const k = seqKey('event', eventId);
-  incOp(k);
+  incOp(k, { kind: 'caldav', accountId });
   invoke('delete_calendar_event', { accountId, eventId }).catch((err) => {
     console.error('delete_calendar_event rejected:', err);
     decOp(k);
@@ -139,7 +145,7 @@ export function fireDeleteCalendarEvent(accountId: string, eventId: string): voi
 
 export function fireSyncCalendars(accountId: string): void {
   const k = seqKey('sync', accountId);
-  incOp(k);
+  incOp(k, { kind: 'caldav', accountId });
   invoke('sync_calendars', { accountId }).catch((err) => {
     console.error('sync_calendars rejected:', err);
     decOp(k);

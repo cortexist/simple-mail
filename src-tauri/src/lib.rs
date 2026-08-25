@@ -17,6 +17,8 @@ mod ai_service;
 mod agent_mcp;
 mod llm_client;
 mod mail_service;
+mod search_text;
+mod bench;
 
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -145,6 +147,11 @@ pub struct Email {
     pub subject: String,
     pub preview: String,
     pub body: String,
+    /// Lowercased, HTML-stripped body text for free-text search. Sent in place
+    /// of `body` by `query_emails`, so search covers every message while the
+    /// HTML itself stays in SQLite until the message is opened.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub search_text: String,
     pub date: String,
     pub is_read: bool,
     pub is_starred: bool,
@@ -5225,6 +5232,8 @@ fn query_folders(conn: &Connection, login: &login::LoginId) -> Vec<Folder> {
 /// all derive from that array, so filtering once covers them all.
 fn query_emails(conn: &Connection, view: &login::View) -> Vec<Email> {
     let login_id = view.login.as_str();
+    let mailbox_clause = login::mailbox_clause(view.mailbox.as_deref(), 2);
+    let params = view.params();
 
     // Build a lookup of contact photos by email address (lowercased).
     // Includes both the primary contacts.email and every entry in contact_emails,
@@ -5250,18 +5259,30 @@ fn query_emails(conn: &Connection, view: &login::View) -> Vec<Email> {
         .collect()
     };
 
+    // The child tables are read once each for the whole result set rather than
+    // once per message. Three queries per row was fine at a few hundred
+    // messages and is tens of thousands of queries at a large mailbox.
+    let in_view = format!("(SELECT id FROM emails WHERE account_id = ?1{mailbox_clause})");
+    let mut recipients_by_email = query_recipients_for(conn, &in_view, params.as_slice());
+    let mut attachments_by_email = query_attachments_for(conn, &in_view, params.as_slice());
+    let mut labels_by_email = query_user_labels_for(conn, &in_view, params.as_slice());
+
+    // `body` is read to derive `search_text` and is not sent. The frontend only
+    // ever used it at load time as the raw material for exactly this text, and
+    // it fetches the HTML on open — so shipping it meant paying the markup
+    // across IPC for every message to keep it resident for the few that are
+    // read. The stripped text is a small fraction of the size.
     let sql = format!(
         "SELECT id, from_name, from_email, from_initials, from_color, subject, preview, body, date,
                 is_read, is_starred, has_attachment, folder, is_pinned, is_focused,
                 COALESCE(reply_to, ''), COALESCE(message_id, ''), COALESCE(auth_results, ''),
                 is_replied, replied_at, draft_data
-         FROM emails WHERE account_id = ?1{}
+         FROM emails WHERE account_id = ?1{mailbox_clause}
          ORDER BY is_pinned DESC, date DESC",
-        login::mailbox_clause(view.mailbox.as_deref(), 2),
     );
     let mut stmt = conn.prepare(&sql).unwrap();
 
-    stmt.query_map(view.params().as_slice(), |row| {
+    stmt.query_map(params.as_slice(), |row| {
         let email_id: String = row.get(0)?;
         Ok((email_id, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
             row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
@@ -5273,10 +5294,11 @@ fn query_emails(conn: &Connection, view: &login::View) -> Vec<Email> {
     .unwrap()
     .filter_map(|r| r.ok())
     .map(|(id, fn_, fe, fi, fc, subj, prev, body, date, read, star, att, folder, pinned, focused, reply_to, message_id, auth_results, replied, replied_at, draft_data): (String, String, String, String, String, String, String, String, String, i32, i32, i32, String, i32, i32, String, String, String, i32, Option<String>, Option<String>)| {
-        let (to_recipients, cc_recipients) = query_email_recipients(conn, &id);
+        let (to_recipients, cc_recipients) = recipients_by_email.remove(&id).unwrap_or_default();
         let photo_url = contact_photos.get(&fe.to_lowercase()).cloned();
-        let attachments = query_email_attachments(conn, &id);
-        let labels = query_email_user_labels(conn, &id);
+        let attachments = attachments_by_email.remove(&id).unwrap_or_default();
+        let labels = labels_by_email.remove(&id).unwrap_or_default();
+        let search_text = search_text::build(&body);
         Email {
             id,
             from: Contact { name: imap_client::decode_mime_header(&fn_), email: fe, initials: fi, color: fc, photo_url },
@@ -5284,7 +5306,8 @@ fn query_emails(conn: &Connection, view: &login::View) -> Vec<Email> {
             cc: cc_recipients,
             subject: imap_client::decode_mime_header(&subj),
             preview: prev,
-            body,
+            body: String::new(),
+            search_text,
             date,
             is_read: read != 0,
             is_starred: star != 0,
@@ -5305,26 +5328,100 @@ fn query_emails(conn: &Connection, view: &login::View) -> Vec<Email> {
     .collect()
 }
 
-/// Return user-visible labels for `email_id`, stripping IMAP / Gmail
-/// internal markers that would clutter the chip row in the reading pane.
-/// The leading `\` on any system marker that survives filtering (e.g.
-/// `\Important`) is dropped for display — chip text reads as `Important`,
-/// and a `label:Important` search still matches because the frontend
-/// compares against the same transformed list.
-fn query_email_user_labels(conn: &Connection, email_id: &str) -> Vec<String> {
-    let mut stmt = match conn.prepare(
-        "SELECT label FROM email_labels WHERE email_id = ?1 ORDER BY label"
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    stmt.query_map(rusqlite::params![email_id], |row| row.get::<_, String>(0))
-        .map(|rows| rows
-            .filter_map(|r| r.ok())
-            .filter(|l| !is_internal_label(l))
-            .map(|l| l.trim_start_matches('\\').to_string())
-            .collect())
-        .unwrap_or_default()
+/// Recipients for every message matching `in_view`, split into (to, cc) per id.
+fn query_recipients_for(
+    conn: &Connection,
+    in_view: &str,
+    params: &[&dyn rusqlite::ToSql],
+) -> std::collections::HashMap<String, (Vec<Contact>, Vec<Contact>)> {
+    let mut by_email: std::collections::HashMap<String, (Vec<Contact>, Vec<Contact>)> =
+        std::collections::HashMap::new();
+    let sql = format!(
+        "SELECT email_id, name, email, initials, color, type
+         FROM email_recipients WHERE email_id IN {in_view}"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else { return by_email };
+    let rows = stmt.query_map(params, |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            Contact {
+                name: row.get(1)?,
+                photo_url: None,
+                email: row.get(2)?,
+                initials: row.get(3)?,
+                color: row.get(4)?,
+            },
+            row.get::<_, String>(5)?,
+        ))
+    });
+    let Ok(rows) = rows else { return by_email };
+    for (email_id, contact, kind) in rows.filter_map(|r| r.ok()) {
+        let entry = by_email.entry(email_id).or_default();
+        match kind.as_str() {
+            "to" => entry.0.push(contact),
+            "cc" => entry.1.push(contact),
+            _ => {}
+        }
+    }
+    by_email
+}
+
+/// Attachments for every message matching `in_view`, in index order per id.
+fn query_attachments_for(
+    conn: &Connection,
+    in_view: &str,
+    params: &[&dyn rusqlite::ToSql],
+) -> std::collections::HashMap<String, Vec<AttachmentEntry>> {
+    let mut by_email: std::collections::HashMap<String, Vec<AttachmentEntry>> =
+        std::collections::HashMap::new();
+    let sql = format!(
+        "SELECT email_id, idx, filename, mime_type, size
+         FROM email_attachments WHERE email_id IN {in_view} ORDER BY email_id, idx"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else { return by_email };
+    let rows = stmt.query_map(params, |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            AttachmentEntry {
+                index: row.get(1)?,
+                filename: row.get(2)?,
+                mime_type: row.get(3)?,
+                size: row.get(4)?,
+            },
+        ))
+    });
+    let Ok(rows) = rows else { return by_email };
+    for (email_id, attachment) in rows.filter_map(|r| r.ok()) {
+        by_email.entry(email_id).or_default().push(attachment);
+    }
+    by_email
+}
+
+/// User-visible labels for every message matching `in_view`, sorted per id.
+/// Internal IMAP / Gmail markers are dropped and the leading `\\` stripped for display.
+fn query_user_labels_for(
+    conn: &Connection,
+    in_view: &str,
+    params: &[&dyn rusqlite::ToSql],
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut by_email: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let sql = format!(
+        "SELECT email_id, label FROM email_labels
+         WHERE email_id IN {in_view} ORDER BY email_id, label"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else { return by_email };
+    let rows = stmt.query_map(params, |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    });
+    let Ok(rows) = rows else { return by_email };
+    for (email_id, label) in rows.filter_map(|r| r.ok()) {
+        if is_internal_label(&label) {
+            continue;
+        }
+        by_email.entry(email_id).or_default().push(label.trim_start_matches('\\').to_string());
+    }
+    by_email
 }
 
 /// True for Gmail / IMAP labels we never want to show as chips. This is an
@@ -5354,45 +5451,6 @@ fn is_internal_label(label: &str) -> bool {
         | "CATEGORY_RESERVATIONS"
         | "CATEGORY_PURCHASES"
     )
-}
-
-fn query_email_attachments(conn: &Connection, email_id: &str) -> Vec<AttachmentEntry> {
-    let mut stmt = conn
-        .prepare("SELECT idx, filename, mime_type, size FROM email_attachments WHERE email_id = ?1 ORDER BY idx")
-        .unwrap();
-    stmt.query_map(rusqlite::params![email_id], |row| {
-        Ok(AttachmentEntry {
-            index: row.get(0)?,
-            filename: row.get(1)?,
-            mime_type: row.get(2)?,
-            size: row.get(3)?,
-        })
-    })
-    .unwrap()
-    .filter_map(|r| r.ok())
-    .collect()
-}
-
-fn query_email_recipients(conn: &Connection, email_id: &str) -> (Vec<Contact>, Vec<Contact>) {
-    let mut stmt = conn
-        .prepare("SELECT name, email, initials, color, type FROM email_recipients WHERE email_id = ?1")
-        .unwrap();
-    let rows: Vec<(Contact, String)> = stmt.query_map(rusqlite::params![email_id], |row| {
-        Ok((Contact {
-            name: row.get(0)?,
-            photo_url: None,
-            email: row.get(1)?,
-            initials: row.get(2)?,
-            color: row.get(3)?,
-        }, row.get::<_, String>(4)?))
-    })
-    .unwrap()
-    .filter_map(|r| r.ok())
-    .collect();
-
-    let to_list = rows.iter().filter(|(_, t)| t == "to").map(|(c, _)| c.clone()).collect();
-    let cc_list = rows.iter().filter(|(_, t)| t == "cc").map(|(c, _)| c.clone()).collect();
-    (to_list, cc_list)
 }
 
 /// Lightweight recipient suggestion for the compose autocomplete.
@@ -5964,6 +6022,52 @@ fn recurrence_to_rrule(r: &RecurrenceParam) -> String {
     rrule
 }
 
+/// WebKit cache model override for experiments. Debug builds only; release
+/// builds leave wry's default (`WEB_BROWSER`) untouched.
+///
+/// This exists because the obvious fix was tried and measured, and it was
+/// wrong: a reading bench over the whole mailbox at `DOCUMENT_VIEWER` peaked
+/// at 1,028 MB against 432 MB for the default, with the memory then released
+/// in bulk (‑672 MB, ‑406 MB) when WebKit's memory-pressure handler fired.
+/// The growth is decoded image data held until pressure, and the cache model
+/// changes when that pressure arrives, not how much is held. Kept as a knob so
+/// the next experiment does not have to re-add it.
+///
+/// `AGENTIC_MAIL_CACHE_MODEL=viewer|document-browser|browser`.
+#[cfg(target_os = "linux")]
+fn install_webview_cache_model<R: tauri::Runtime>(app: &tauri::App<R>) {
+    use webkit2gtk::{CacheModel, WebContextExt, WebViewExt};
+
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let model = match std::env::var("AGENTIC_MAIL_CACHE_MODEL").ok().as_deref() {
+        Some("viewer") => CacheModel::DocumentViewer,
+        Some("document-browser") => CacheModel::DocumentBrowser,
+        Some("browser") => CacheModel::WebBrowser,
+        _ => return,
+    };
+    let Some(window) = app.get_webview_window("main") else {
+        log::warn!("cache model: no main window yet; leaving WebKit default");
+        return;
+    };
+    let result = window.with_webview(move |webview| {
+        match webview.inner().context() {
+            Some(context) => {
+                context.set_cache_model(model);
+                log::info!("webkit cache model set to {model:?}");
+            }
+            None => log::warn!("cache model: webview has no context; leaving WebKit default"),
+        }
+    });
+    if let Err(error) = result {
+        log::warn!("cache model: could not reach the webview: {error}");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn install_webview_cache_model<R: tauri::Runtime>(_app: &tauri::App<R>) {}
+
 fn resolve_storage_dir<R: tauri::Runtime>(app: &tauri::App<R>) -> PathBuf {
     let home_dir = app.path().home_dir().expect("failed to get user home directory");
     home_dir.join(".cortexist").join("mail")
@@ -6243,9 +6347,14 @@ pub fn run() {
             // toggle enabled in a previous session — provided the app-wide
             // quota is still set.
             resume_offline_workers(app.handle().clone(), db.clone(), storage_dir.clone());
+            install_webview_cache_model(app);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            bench::bench_config,
+            bench::bench_sample,
+            bench::bench_append,
             get_all_accounts,
             window_chrome,
             get_setting,

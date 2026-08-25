@@ -11,6 +11,8 @@
   interface Props {
     email: Email | null;
     loadingBody?: boolean;
+    /** The last fetch for this message was rejected; nothing will arrive. */
+    bodyFailed?: boolean;
     darkMode?: boolean;
     isJunk?: boolean;
     focused?: boolean;
@@ -27,7 +29,7 @@
     onLabelClick?: (label: string) => void;
   }
 
-  let { email, loadingBody = false, darkMode = false, isJunk = false, focused = false, onFocus, onOpenAttachment, onSaveAttachment, onOpenDraftAttachment, showAllHeaders = $bindable(false), multiSelectCount = 0, onLabelClick }: Props = $props();
+  let { email, loadingBody = false, bodyFailed = false, darkMode = false, isJunk = false, focused = false, onFocus, onOpenAttachment, onSaveAttachment, onOpenDraftAttachment, showAllHeaders = $bindable(false), multiSelectCount = 0, onLabelClick }: Props = $props();
 
   // ── Attachment context menu ──
   let attachMenu: { x: number; y: number; index: number; filename: string; unsafe: boolean } | null = $state(null);
@@ -218,6 +220,100 @@
   /** Write HTML into the iframe via document.write() instead of srcdoc.
    *  This forces synchronous parsing and avoids Chromium srcdoc rendering
    *  bugs where content isn't fully painted on first load. */
+  /** Replace an animated image with its first frame.
+   *
+   *  WebKit decodes an animated GIF frame by frame as it plays and keeps the
+   *  frames: a marketing mail with three animated headers measured +475 MB in
+   *  the web process, held until memory pressure that a large machine never
+   *  reaches. Nothing in mail needs to move, so the image is drawn once to a
+   *  canvas — the frame showing at load, which is the first — and the canvas
+   *  takes its place. The GIF then has no client and no further frame is
+   *  decoded.
+   *
+   *  The canvas replaces the element rather than feeding a re-encoded still
+   *  back into `src`, because a remote image taints the canvas and its pixels
+   *  cannot be read back; it can still be displayed. Sizing attributes and
+   *  inline style carry over, and the document CSS sizes `canvas` like `img`.
+   *  Mail CSS that selects `img` by tag will not reach the canvas — an
+   *  accepted difference for an image that was going to animate.
+   *
+   *  Only images whose URL names a frame-based animated format — GIF, WebP,
+   *  APNG — are frozen: the bytes cannot be sniffed cross-origin, and freezing
+   *  every image would break the mail CSS that selects `img` for no memory
+   *  gain, since a still image decodes to one frame either way. A WebP or PNG
+   *  may of course be still; freezing one costs nothing. An animated PNG
+   *  served as plain `.png` slips through, as does any animation served
+   *  without an extension. SVG is left alone: its animations re-rasterize a
+   *  single bitmap rather than caching frames, so they cost CPU, not memory. */
+  function freezeAnimatedImage(img: HTMLImageElement) {
+    const doc = img.ownerDocument;
+    if (!img.isConnected || img.naturalWidth === 0 || img.naturalHeight === 0) return;
+    const canvas = doc.createElement('canvas');
+
+    // Presentation first, bitmap last: assigning a canvas's `width` or
+    // `height` — attribute or property — discards its drawing, so nothing
+    // below may touch them after drawImage. The image's own `width`/`height`
+    // attributes are therefore not copied as attributes; where the inline
+    // style does not already size the element they become CSS instead, which
+    // is how they sized the image, with `height:auto` in the document CSS
+    // keeping the bitmap's aspect either way.
+    for (const name of ['style', 'class', 'id', 'title', 'align']) {
+      const value = img.getAttribute(name);
+      if (value !== null) canvas.setAttribute(name, value);
+    }
+    const widthAttr = img.getAttribute('width');
+    const heightAttr = img.getAttribute('height');
+    if (widthAttr && !canvas.style.width && /^\d+$/.test(widthAttr)) canvas.style.width = `${widthAttr}px`;
+    if (heightAttr && !canvas.style.height && /^\d+$/.test(heightAttr)) canvas.style.height = `${heightAttr}px`;
+    // What the mail's stylesheet did to the image by tag — `td img{display:
+    // block}` is boilerplate — will not reach a canvas, so the resolved values
+    // of the layout-affecting properties are pinned inline.
+    const computed = doc.defaultView?.getComputedStyle(img);
+    if (computed) {
+      for (const prop of ['display', 'float', 'vertical-align', 'margin-top', 'margin-right',
+                          'margin-bottom', 'margin-left', 'border-radius', 'object-fit'] as const) {
+        if (!canvas.style.getPropertyValue(prop)) canvas.style.setProperty(prop, computed.getPropertyValue(prop));
+      }
+    }
+    const alt = img.getAttribute('alt');
+    if (alt) canvas.setAttribute('aria-label', alt);
+    canvas.setAttribute('role', 'img');
+    canvas.dataset.frozenFrom = img.currentSrc || img.src;
+
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    try {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(img, 0, 0);
+    } catch {
+      return; // leave the image as it is rather than blank it
+    }
+    img.replaceWith(canvas);
+  }
+
+  function isAnimatedImageCandidate(img: HTMLImageElement): boolean {
+    try {
+      return /\.(gif|webp|apng)$/i.test(new URL(img.currentSrc || img.src, 'https://mail.invalid/').pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Freeze every candidate in `doc` that has loaded, and arrange for the
+   *  rest to be frozen as they load. Safe to run more than once. */
+  function freezeAnimatedImages(doc: Document) {
+    doc.querySelectorAll('img').forEach((img) => {
+      if (img.dataset.freezeArmed === '1' || !isAnimatedImageCandidate(img)) return;
+      img.dataset.freezeArmed = '1';
+      if (img.complete) {
+        freezeAnimatedImage(img);
+      } else {
+        img.addEventListener('load', () => freezeAnimatedImage(img), { once: true });
+      }
+    });
+  }
+
   function writeIframeContent(iframe: HTMLIFrameElement, html: string) {
     try {
       const doc = iframe.contentDocument;
@@ -256,8 +352,13 @@
         // in the DOM yet when we queried.
         doc.defaultView?.addEventListener('load', () => {
           trace.mark('load');
+          freezeAnimatedImages(doc);   // images the parser emitted after the first pass
           schedule();
         }, { once: true });
+
+        // Animated images are frozen to their first frame as they load; see
+        // freezeAnimatedImage for why.
+        freezeAnimatedImages(doc);
 
         // Watch all images (only those the parser has emitted so far — the
         // load event above covers the rest)
@@ -525,6 +626,10 @@
                 <circle cx="10" cy="10" r="8" fill="none" stroke="var(--accent-text)" stroke-width="2" stroke-dasharray="28 22" stroke-linecap="round" />
               </svg>
               <span>{t('readingPane.loadingMessage')}</span>
+            </div>
+          {:else if bodyFailed && !email.body}
+            <div class="body-loading" role="status">
+              <span>{t('readingPane.bodyUnavailable')}</span>
             </div>
           {:else}
             <!-- allow-scripts is required for the app's own listeners (link

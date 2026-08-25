@@ -14,7 +14,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from './safeListen';
-import { incNetwork, decNetwork } from '$lib/networkActivity.svelte';
+import { incNetwork, decNetwork, type Activity } from '$lib/networkActivity.svelte';
 import type { ComposeDraft } from '$lib/types';
 
 export type EmailFlagField = 'read' | 'starred' | 'replied' | 'pinned' | 'focused';
@@ -164,12 +164,21 @@ function clearPending(emailId: string, field: EmailFlagField) {
 
 const inFlightCounts = new Map<string, number>();
 const seqKey = (emailId: string, key: string) => `${emailId}:${key}`;
+/** Network-activity tokens per op key, so an echo releases its own entry. */
+const activityTokens = new Map<string, number[]>();
 
-function incInFlight(emailId: string, key: string) {
+function takeToken(k: string): number | undefined {
+  const list = activityTokens.get(k);
+  const token = list?.shift();
+  if (list && list.length === 0) activityTokens.delete(k);
+  return token;
+}
+
+function incInFlight(emailId: string, key: string, activity: Activity) {
   const k = seqKey(emailId, key);
   inFlightCounts.set(k, (inFlightCounts.get(k) ?? 0) + 1);
   if (isFlagField(key)) markPending(emailId, key);
-  incNetwork();
+  activityTokens.set(k, [...(activityTokens.get(k) ?? []), incNetwork(activity)]);
 }
 
 function decInFlight(emailId: string, key: string) {
@@ -181,7 +190,7 @@ function decInFlight(emailId: string, key: string) {
   } else {
     inFlightCounts.set(k, next);
   }
-  decNetwork();
+  decNetwork(takeToken(k));
 }
 
 function isFlagField(key: string): key is EmailFlagField {
@@ -273,7 +282,10 @@ function fireFlag(
   command: string,
   payload: Record<string, unknown>,
 ): void {
-  incInFlight(emailId, field);
+  // A flag with an account behind it is stored on the IMAP server; pinned and
+  // focused are local-only rows.
+  const accountId = typeof payload.accountId === 'string' ? payload.accountId : undefined;
+  incInFlight(emailId, field, accountId ? { kind: 'imap-update', accountId } : { kind: 'local' });
   invoke(command, payload).catch((err) => {
     console.error(`${command} failed before backgrounding:`, err);
     decInFlight(emailId, field);
@@ -313,7 +325,7 @@ export function fireToggleFocused(emailId: string, isFocused: boolean): void {
 
 /** Move an email to a target folder. */
 export function fireMoveEmail(accountId: string, emailId: string, targetFolder: string): void {
-  incInFlight(emailId, FOLDER_KEY);
+  incInFlight(emailId, FOLDER_KEY, { kind: 'imap-update', accountId });
   invoke('move_email', { accountId, emailId, targetFolder }).catch((err) => {
     console.error('move_email failed before backgrounding:', err);
     decInFlight(emailId, FOLDER_KEY);
@@ -324,7 +336,7 @@ export function fireMoveEmail(accountId: string, emailId: string, targetFolder: 
  * if already there. Soft delete echoes `mail:email-folder-changed`;
  * permanent delete echoes `mail:email-removed`. */
 export function fireDeleteEmail(accountId: string, emailId: string): void {
-  incInFlight(emailId, FOLDER_KEY);
+  incInFlight(emailId, FOLDER_KEY, { kind: 'imap-update', accountId });
   invoke('delete_email', { accountId, emailId }).catch((err) => {
     console.error('delete_email failed before backgrounding:', err);
     decInFlight(emailId, FOLDER_KEY);
@@ -336,12 +348,12 @@ export function fireDeleteEmail(accountId: string, emailId: string): void {
 export function fireEmptyFolder(accountId: string, folder: string): void {
   // No per-email in-flight bookkeeping — the batch echo doesn't carry
   // individual seq numbers, just the list of ids to remove.
-  incNetwork();
+  const token = incNetwork({ kind: 'imap-update', accountId });
   invoke('empty_folder', { accountId, folder })
-    .then(() => decNetwork())
+    .then(() => decNetwork(token))
     .catch((err) => {
       console.error('empty_folder failed:', err);
-      decNetwork();
+      decNetwork(token);
     });
 }
 
@@ -365,11 +377,7 @@ export async function subscribeSyncCompleted(handler: SyncCompletedHandler): Pro
   return listen<MailSyncCompletedEvent>('mail:sync-completed', (event) => {
     const ev = event.payload;
     const k = seqKey(`sync:${ev.accountId}`, '');
-    if (inFlightCounts.has(k)) {
-      const next = (inFlightCounts.get(k) ?? 0) - 1;
-      if (next <= 0) inFlightCounts.delete(k); else inFlightCounts.set(k, next);
-      decNetwork();
-    }
+    if (inFlightCounts.has(k)) decOp(k);
     handler(ev);
   });
 }
@@ -381,11 +389,7 @@ export async function subscribeSendFailed(handler: SendFailedHandler): Promise<U
   return listen<MailSendFailedEvent>('mail:send-failed', (event) => {
     const ev = event.payload;
     const k = seqKey(`send:${ev.accountId}`, '');
-    if (inFlightCounts.has(k)) {
-      const next = (inFlightCounts.get(k) ?? 0) - 1;
-      if (next <= 0) inFlightCounts.delete(k); else inFlightCounts.set(k, next);
-      decNetwork();
-    }
+    if (inFlightCounts.has(k)) decOp(k);
     handler(ev);
   });
 }
@@ -397,11 +401,7 @@ export async function subscribeSent(handler: SentHandler): Promise<UnlistenFn> {
   return listen<string>('mail:sent', (event) => {
     const accountId = event.payload;
     const k = seqKey(`send:${accountId}`, '');
-    if (inFlightCounts.has(k)) {
-      const next = (inFlightCounts.get(k) ?? 0) - 1;
-      if (next <= 0) inFlightCounts.delete(k); else inFlightCounts.set(k, next);
-      decNetwork();
-    }
+    if (inFlightCounts.has(k)) decOp(k);
     handler(accountId);
   });
 }
@@ -411,11 +411,7 @@ export async function subscribeBodyFetched(handler: BodyFetchedHandler): Promise
   return listen<EmailBodyFetchedEvent>('mail:email-body-fetched', (event) => {
     const ev = event.payload;
     const k = seqKey(`body:${ev.emailId}`, '');
-    if (inFlightCounts.has(k)) {
-      const next = (inFlightCounts.get(k) ?? 0) - 1;
-      if (next <= 0) inFlightCounts.delete(k); else inFlightCounts.set(k, next);
-      decNetwork();
-    }
+    if (inFlightCounts.has(k)) decOp(k);
     if (!acceptSeq(`body:${ev.emailId}`, '', ev.seq)) return;
     handler(ev);
   });
@@ -442,22 +438,22 @@ export async function subscribeDraftGenerated(handler: DraftGeneratedHandler): P
   });
 }
 
-function incOp(key: string) {
+function incOp(key: string, activity: Activity) {
   inFlightCounts.set(key, (inFlightCounts.get(key) ?? 0) + 1);
-  incNetwork();
+  activityTokens.set(key, [...(activityTokens.get(key) ?? []), incNetwork(activity)]);
 }
 
 function decOp(key: string) {
   const next = (inFlightCounts.get(key) ?? 0) - 1;
   if (next <= 0) inFlightCounts.delete(key); else inFlightCounts.set(key, next);
-  decNetwork();
+  decNetwork(takeToken(key));
 }
 
 /** Send an email. Completion is signaled by `subscribeSent` on success or
  * `subscribeSendFailed` on SMTP failure. */
 export function fireSendEmail(accountId: string, email: OutboundEmailPayload): void {
   const opKey = seqKey(`send:${accountId}`, '');
-  incOp(opKey);
+  incOp(opKey, { kind: 'smtp', accountId });
   invoke('send_email', { accountId, email }).catch((err) => {
     // The catch covers errors thrown before backgrounding (e.g. no settings).
     // Real SMTP failures come via mail:send-failed.
@@ -489,7 +485,7 @@ export function fireDeleteDraft(accountId: string, emailId: string): void {
 /** Trigger an IMAP sync. Completion via `subscribeSyncCompleted`. */
 export function fireSyncMail(accountId: string): void {
   const opKey = seqKey(`sync:${accountId}`, '');
-  incOp(opKey);
+  incOp(opKey, { kind: 'imap-fetch', accountId });
   invoke('sync_mail', { accountId }).catch((err) => {
     console.error('sync_mail rejected at invoke-time:', err);
     decOp(opKey);
@@ -509,13 +505,19 @@ export function fireAiDraftReply(
 }
 
 /** Fetch a single email body. Completion via `subscribeBodyFetched`. */
-export function fireFetchEmailBody(accountId: string, emailId: string): void {
+/** Resolves `true` once the fetch was accepted — the body itself arrives via
+ *  `subscribeBodyFetched` — and `false` if it was rejected, so the caller can
+ *  drop its loading state and let the message be tried again. */
+export function fireFetchEmailBody(accountId: string, emailId: string): Promise<boolean> {
   const opKey = seqKey(`body:${emailId}`, '');
-  incOp(opKey);
-  invoke('fetch_email_body', { accountId, emailId }).catch((err) => {
-    console.error('fetch_email_body rejected at invoke-time:', err);
-    decOp(opKey);
-  });
+  incOp(opKey, { kind: 'imap-fetch', accountId });
+  return invoke('fetch_email_body', { accountId, emailId })
+    .then(() => true)
+    .catch((err) => {
+      console.error('fetch_email_body rejected at invoke-time:', err);
+      decOp(opKey);
+      return false;
+    });
 }
 
 /** Fill previews near a viewport anchor. Completion via `subscribePreviewsFetched`. */
@@ -527,8 +529,8 @@ export function fireFetchPreviewsAround(
 ): void {
   // No seq-based dedup for previews — multiple concurrent calls produce
   // non-overlapping batches and we want all of them applied.
-  incNetwork();
+  const token = incNetwork({ kind: 'imap-fetch', accountId });
   invoke('fetch_previews_around', { accountId, emailId, ahead, behind })
     .catch((err) => console.error('fetch_previews_around rejected at invoke-time:', err))
-    .finally(() => decNetwork());
+    .finally(() => decNetwork(token));
 }

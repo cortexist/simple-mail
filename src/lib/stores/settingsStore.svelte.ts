@@ -12,7 +12,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from './safeListen';
-import { incNetwork, decNetwork } from '$lib/networkActivity.svelte';
+import { incNetwork, decNetwork, type Activity } from '$lib/networkActivity.svelte';
 import type { Account, AiConfigView, AiConfigInput, AccountAiFeatures } from '$lib/types';
 import type { MailServerSettings, DavSettings } from '$lib/data/dataService';
 
@@ -98,15 +98,23 @@ export interface SettingsAiFeaturesChangedEvent {
 const inFlightCounts = new Map<string, number>();
 const seqKey = (scope: string, id: string) => `${scope}:${id}`;
 
-function incOp(key: string) {
+/** Network-activity tokens per op key, so an echo releases its own entry.
+ *  Settings writes are local database work, so they count toward the
+ *  indicator without a toast. */
+const activityTokens = new Map<string, number[]>();
+
+function incOp(key: string, activity: Activity = { kind: 'local' }) {
   inFlightCounts.set(key, (inFlightCounts.get(key) ?? 0) + 1);
-  incNetwork();
+  activityTokens.set(key, [...(activityTokens.get(key) ?? []), incNetwork(activity)]);
 }
 
 function decOp(key: string) {
   const next = (inFlightCounts.get(key) ?? 0) - 1;
   if (next <= 0) inFlightCounts.delete(key); else inFlightCounts.set(key, next);
-  decNetwork();
+  const list = activityTokens.get(key);
+  const token = list?.shift();
+  if (list && list.length === 0) activityTokens.delete(key);
+  decNetwork(token);
 }
 
 // ── Subscriptions ───────────────────────────────────────
