@@ -1414,6 +1414,22 @@
 
   let selectedEmail = $derived(emails.find((e) => e.id === selectedEmailId) ?? null);
 
+  // The body loads for whatever is selected, however it came to be selected
+  // — click, arrow keys, a folder or account change, a sync reload, undo —
+  // not only on click. Bodies are no longer in memory at launch (see
+  // `query_emails`), so every path that moves the selection depends on this,
+  // and one effect on the selection is the only way to be sure none is
+  // missed. Drafts are the exception: the composer path below fetches those.
+  $effect(() => {
+    const email = selectedEmail;
+    if (!email || email.body || email.folder === 'drafts') return;
+    if (!activeAccountId || fetchingBodyId === email.id) return;
+    const accountId = activeAccountId;
+    const id = email.id;
+    fetchingBodyId = id;
+    untrack(() => fireFetchEmailBody(accountId, id));
+  });
+
   let unreadCounts = $derived(
     emails.reduce(
       (acc, e) => {
@@ -1459,12 +1475,8 @@
       fireMarkRead(activeAccountId, email.id, true);
     }
 
-    // Lazy-load full body if not yet fetched. The backend caches; the echo
-    // arrives via mail:email-body-fetched (applyBodyEcho).
-    if (!email.body && activeAccountId && email.id !== fetchingBodyId) {
-      fetchingBodyId = email.id;
-      fireFetchEmailBody(activeAccountId, email.id);
-    }
+    // The body fetch follows the selection itself — see the effect on
+    // `selectedEmail` — so it is not repeated here.
   }
 
   /** Patch the active emails array when the backend has fetched a body.
