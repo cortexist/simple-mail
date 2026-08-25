@@ -5,7 +5,7 @@
 
 import type { Account, Email, Theme } from '$lib/types';
 import { mockAccounts } from '$lib/data/mockData';
-import { incNetwork, decNetwork } from '$lib/networkActivity.svelte';
+import { incNetwork, decNetwork, type Activity } from '$lib/networkActivity.svelte';
 import { buildSearchText } from '$lib/searchQuery';
 import { DEFAULT_ACCENT_ID } from '$lib/theme';
 import { invoke as rawInvoke } from '@tauri-apps/api/core';
@@ -17,10 +17,22 @@ let invoke: ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) 
 async function getInvoke() {
   if (invoke) return invoke;
   invoke = ((cmd: string, args?: Record<string, unknown>) => {
-    incNetwork();
-    return (rawInvoke(cmd, args) as Promise<unknown>).finally(() => decNetwork());
+    const token = incNetwork(activityFor(cmd, args));
+    return (rawInvoke(cmd, args) as Promise<unknown>).finally(() => decNetwork(token));
   }) as typeof rawInvoke;
   return invoke;
+}
+
+/** What an awaited command does on the wire, for the activity toast. Anything
+ *  not named here is local database work. */
+function activityFor(cmd: string, args?: Record<string, unknown>): Activity {
+  const accountId = typeof args?.accountId === 'string' ? args.accountId : undefined;
+  if (cmd === 'sync_mail' || cmd === 'fetch_email_body' || cmd === 'fetch_previews_around') return { kind: 'imap-fetch', accountId };
+  if (cmd === 'sync_calendars') return { kind: 'caldav', accountId };
+  if (cmd === 'sync_contacts') return { kind: 'carddav', accountId };
+  if (cmd === 'send_email') return { kind: 'smtp', accountId };
+  if (cmd.startsWith('ai_')) return { kind: 'ai', accountId };
+  return { kind: 'local', accountId };
 }
 
 function isTauri(): boolean {

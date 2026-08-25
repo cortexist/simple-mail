@@ -544,5 +544,14 @@
     "selectTime": "時刻を選択",
     "am": "午前",
     "pm": "午後"
+  },
+  "activity": {
+    "receiving": "{host} から受信中 · {account}",
+    "updating": "{host} を更新中 · {account}",
+    "sending": "{host} 経由で送信中 · {account}",
+    "calendar": "{host} とカレンダーを同期中 · {account}",
+    "contacts": "{host} と連絡先を同期中 · {account}",
+    "ai": "AI サービスを処理中",
+    "more": "他 {count} 件"
   }
 }

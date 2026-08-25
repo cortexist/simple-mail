@@ -544,5 +544,14 @@
     "selectTime": "Uhrzeit auswählen",
     "am": "AM",
     "pm": "PM"
+  },
+  "activity": {
+    "receiving": "Empfange von {host} · {account}",
+    "updating": "Aktualisiere {host} · {account}",
+    "sending": "Sende über {host} · {account}",
+    "calendar": "Kalender wird mit {host} synchronisiert · {account}",
+    "contacts": "Kontakte werden mit {host} synchronisiert · {account}",
+    "ai": "KI-Dienst wird verwendet",
+    "more": "+{count} weitere"
   }
 }

@@ -544,5 +544,14 @@
     "selectTime": "Seleziona un'ora",
     "am": "AM",
     "pm": "PM"
+  },
+  "activity": {
+    "receiving": "Ricezione da {host} · {account}",
+    "updating": "Aggiornamento di {host} · {account}",
+    "sending": "Invio tramite {host} · {account}",
+    "calendar": "Sincronizzazione del calendario con {host} · {account}",
+    "contacts": "Sincronizzazione dei contatti con {host} · {account}",
+    "ai": "Elaborazione con il servizio IA",
+    "more": "+{count} altri"
   }
 }

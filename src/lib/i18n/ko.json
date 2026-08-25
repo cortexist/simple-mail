@@ -544,5 +544,14 @@
     "selectTime": "시간 선택",
     "am": "오전",
     "pm": "오후"
+  },
+  "activity": {
+    "receiving": "{host}에서 수신 중 · {account}",
+    "updating": "{host} 업데이트 중 · {account}",
+    "sending": "{host}을(를) 통해 보내는 중 · {account}",
+    "calendar": "{host}과(와) 캘린더 동기화 중 · {account}",
+    "contacts": "{host}과(와) 연락처 동기화 중 · {account}",
+    "ai": "AI 서비스 처리 중",
+    "more": "외 {count}개"
   }
 }

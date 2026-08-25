@@ -544,5 +544,14 @@
     "selectTime": "選擇時間",
     "am": "上午",
     "pm": "下午"
+  },
+  "activity": {
+    "receiving": "正在從 {host} 接收 · {account}",
+    "updating": "正在更新 {host} · {account}",
+    "sending": "正在透過 {host} 傳送 · {account}",
+    "calendar": "正在與 {host} 同步行事曆 · {account}",
+    "contacts": "正在與 {host} 同步聯絡人 · {account}",
+    "ai": "正在使用 AI 服務",
+    "more": "還有 {count} 項"
   }
 }

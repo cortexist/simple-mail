@@ -131,6 +131,7 @@
   import type { Email, Contact, NavItem, CalendarViewMode, ComposeMode, Theme, Account, CalendarEvent, FullContact, ComposeDraft, ContactList } from '$lib/types';
   import { parseSearchQuery, emailMatchesQuery, buildSearchText } from '$lib/searchQuery';
   import { retainBody, releaseBody } from '$lib/bodyRetention';
+  import type { PendingActivity } from '$lib/networkActivity.svelte';
   import { startBenchIfConfigured, installBenchConsole } from '$lib/bench';
   import { ensureReadableTextColors } from '$lib/readableColors';
   import { applyAccent, DEFAULT_ACCENT_ID } from '$lib/theme';
@@ -306,6 +307,78 @@
   let undoContacts = $state<UndoEntry | null>(null);
   let toastMessage = $state<string | null>(null);
   let toastTimerId: ReturnType<typeof setTimeout> | null = null;
+
+  // ── Activity toast ──────────────────────────────────────
+  // The titlebar indicator says that something is on the wire; this says what.
+  // It lists the pending operations that leave the machine, by server and
+  // account, and appears only once activity has lasted long enough to be
+  // wondered about — a flag toggle that echoes in a moment never shows it.
+  const ACTIVITY_TOAST_DELAY_MS = 600;
+  const ACTIVITY_TOAST_MAX_LINES = 3;
+  let activityToastShown = $state(false);
+  let activityToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function hostOf(url: string | undefined): string {
+    if (!url) return '';
+    try { return new URL(url).host; } catch { return url; }
+  }
+
+  /** Server settings for an account, or for the login it is a view onto. */
+  function serverSettingsFor(account: Account | undefined) {
+    if (!account) return undefined;
+    if (account.serverSettings) return account.serverSettings;
+    return accounts.find((a) => a.loginId && a.loginId === account.loginId && a.serverSettings)?.serverSettings;
+  }
+  function davSettingsFor(account: Account | undefined, which: 'calDavSettings' | 'cardDavSettings') {
+    if (!account) return undefined;
+    if (account[which]) return account[which];
+    return accounts.find((a) => a.loginId && a.loginId === account.loginId && a[which])?.[which];
+  }
+
+  function describeActivity(kind: PendingActivity['kind'], accountId: string | undefined): string | null {
+    const account = accounts.find((a) => a.id === accountId);
+    const who = account?.alias || account?.email || '';
+    const mail = serverSettingsFor(account);
+    switch (kind) {
+      case 'imap-fetch':
+        return t('activity.receiving', { host: mail ? `${mail.incomingServer}:${mail.incomingPort}` : '…', account: who });
+      case 'imap-update':
+        return t('activity.updating', { host: mail ? `${mail.incomingServer}:${mail.incomingPort}` : '…', account: who });
+      case 'smtp':
+        return t('activity.sending', { host: mail ? `${mail.smtpServer}:${mail.smtpPort}` : '…', account: who });
+      case 'caldav':
+        return t('activity.calendar', { host: hostOf(davSettingsFor(account, 'calDavSettings')?.url) || '…', account: who });
+      case 'carddav':
+        return t('activity.contacts', { host: hostOf(davSettingsFor(account, 'cardDavSettings')?.url) || '…', account: who });
+      case 'ai':
+        return t('activity.ai');
+      default:
+        return null;   // local database work: counts, but is not worth a toast
+    }
+  }
+
+  const activityLines = $derived.by(() => {
+    const seen = new Map<string, number>();
+    for (const op of networkActivity.active) {
+      const line = describeActivity(op.kind, op.accountId);
+      if (line) seen.set(line, (seen.get(line) ?? 0) + 1);
+    }
+    const lines = [...seen.keys()];
+    if (lines.length <= ACTIVITY_TOAST_MAX_LINES) return lines;
+    return [...lines.slice(0, ACTIVITY_TOAST_MAX_LINES), t('activity.more', { count: lines.length - ACTIVITY_TOAST_MAX_LINES })];
+  });
+
+  $effect(() => {
+    const busy = activityLines.length > 0;
+    if (busy) {
+      if (!activityToastShown && activityToastTimer === null) {
+        activityToastTimer = setTimeout(() => { activityToastShown = true; activityToastTimer = null; }, ACTIVITY_TOAST_DELAY_MS);
+      }
+    } else {
+      if (activityToastTimer !== null) { clearTimeout(activityToastTimer); activityToastTimer = null; }
+      activityToastShown = false;
+    }
+  });
 
   function pushUndo(entry: UndoEntry, message: string) {
     if (entry.view === 'mail')     undoMail = entry;
@@ -3356,6 +3429,17 @@
   />
 {/if}
 
+{#if activityToastShown && activityLines.length > 0}
+  <div class="undo-toast activity-toast" class:stacked={toastMessage !== null} role="status" aria-live="polite">
+    <svg class="activity-spinner" width="16" height="16" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="10" r="8" fill="none" stroke="var(--border)" stroke-width="2" />
+      <circle cx="10" cy="10" r="8" fill="none" stroke="var(--accent-text)" stroke-width="2" stroke-dasharray="28 22" stroke-linecap="round" />
+    </svg>
+    <div class="activity-lines">
+      {#each activityLines as line (line)}<div>{line}</div>{/each}
+    </div>
+  </div>
+{/if}
 {#if toastMessage}
   <div class="undo-toast" role="status">
     <span>{toastMessage}</span>
@@ -3534,6 +3618,28 @@
   .undo-toast-dismiss:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
+  }
+
+  .activity-toast {
+    pointer-events: none;
+    color: var(--text-secondary, var(--text-primary));
+  }
+  /* Sits above the undo toast when both are up. */
+  .activity-toast.stacked {
+    bottom: 76px;
+  }
+  .activity-lines {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .activity-spinner {
+    flex: none;
+    animation: activity-spin 0.9s linear infinite;
+  }
+  @keyframes activity-spin {
+    to { transform: rotate(360deg); }
   }
 
   @keyframes toast-slide-up {

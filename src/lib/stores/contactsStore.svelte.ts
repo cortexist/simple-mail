@@ -7,7 +7,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from './safeListen';
-import { incNetwork, decNetwork } from '$lib/networkActivity.svelte';
+import { incNetwork, decNetwork, type Activity } from '$lib/networkActivity.svelte';
 import type { FullContact, ContactList, ContactListMember } from '$lib/types';
 
 export interface ContactUpsertedEvent {
@@ -56,15 +56,21 @@ export interface ContactListRemovedEvent {
 const inFlightCounts = new Map<string, number>();
 const seqKey = (scope: string, id: string) => `${scope}:${id}`;
 
-function incOp(key: string) {
+/** Network-activity tokens per op key, so an echo releases its own entry. */
+const activityTokens = new Map<string, number[]>();
+
+function incOp(key: string, activity: Activity) {
   inFlightCounts.set(key, (inFlightCounts.get(key) ?? 0) + 1);
-  incNetwork();
+  activityTokens.set(key, [...(activityTokens.get(key) ?? []), incNetwork(activity)]);
 }
 
 function decOp(key: string) {
   const next = (inFlightCounts.get(key) ?? 0) - 1;
   if (next <= 0) inFlightCounts.delete(key); else inFlightCounts.set(key, next);
-  decNetwork();
+  const list = activityTokens.get(key);
+  const token = list?.shift();
+  if (list && list.length === 0) activityTokens.delete(key);
+  decNetwork(token);
 }
 
 // ── Subscriptions ───────────────────────────────────────
@@ -129,7 +135,7 @@ export async function subscribeContactListRemoved(handler: ContactListRemovedHan
 
 export function fireSaveContactEntry(accountId: string, contact: FullContact): void {
   const k = seqKey('contact', contact.id);
-  incOp(k);
+  incOp(k, { kind: 'carddav', accountId });
   invoke('save_contact_entry', {
     accountId,
     contactId: contact.id,
@@ -157,7 +163,7 @@ export function fireSaveContactEntry(accountId: string, contact: FullContact): v
 
 export function fireDeleteContactEntry(accountId: string, contactId: string): void {
   const k = seqKey('contact', contactId);
-  incOp(k);
+  incOp(k, { kind: 'carddav', accountId });
   invoke('delete_contact_entry', { accountId, contactId }).catch((err) => {
     console.error('delete_contact_entry rejected:', err);
     decOp(k);
@@ -172,7 +178,7 @@ export function fireToggleContactFavorite(contactId: string, isFavorite: boolean
 
 export function fireSyncContacts(accountId: string): void {
   const k = seqKey('sync', accountId);
-  incOp(k);
+  incOp(k, { kind: 'carddav', accountId });
   invoke('sync_contacts', { accountId }).catch((err) => {
     console.error('sync_contacts rejected:', err);
     decOp(k);
@@ -186,7 +192,7 @@ export function fireSaveContactList(
   members: ContactListMember[],
 ): void {
   const k = seqKey('list', id);
-  incOp(k);
+  incOp(k, { kind: 'carddav', accountId });
   invoke('save_contact_list', { accountId, id, name, members })
     .catch((err) => {
       console.error('save_contact_list rejected:', err);
@@ -196,7 +202,7 @@ export function fireSaveContactList(
 
 export function fireDeleteContactList(id: string): void {
   const k = seqKey('list', id);
-  incOp(k);
+  incOp(k, { kind: 'local' });
   invoke('delete_contact_list', { id })
     .catch((err) => {
       console.error('delete_contact_list rejected:', err);

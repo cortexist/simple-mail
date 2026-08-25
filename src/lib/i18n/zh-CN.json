@@ -545,5 +545,14 @@
     "selectTime": "选择时间",
     "am": "上午",
     "pm": "下午"
+  },
+  "activity": {
+    "receiving": "正在从 {host} 接收 · {account}",
+    "updating": "正在更新 {host} · {account}",
+    "sending": "正在通过 {host} 发送 · {account}",
+    "calendar": "正在与 {host} 同步日历 · {account}",
+    "contacts": "正在与 {host} 同步联系人 · {account}",
+    "ai": "正在使用 AI 服务",
+    "more": "还有 {count} 项"
   }
 }
