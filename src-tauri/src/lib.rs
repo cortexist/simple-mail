@@ -18,6 +18,7 @@ mod agent_mcp;
 mod llm_client;
 mod mail_service;
 mod search_text;
+mod bench;
 
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -6021,6 +6022,52 @@ fn recurrence_to_rrule(r: &RecurrenceParam) -> String {
     rrule
 }
 
+/// WebKit cache model override for experiments. Debug builds only; release
+/// builds leave wry's default (`WEB_BROWSER`) untouched.
+///
+/// This exists because the obvious fix was tried and measured, and it was
+/// wrong: a reading bench over the whole mailbox at `DOCUMENT_VIEWER` peaked
+/// at 1,028 MB against 432 MB for the default, with the memory then released
+/// in bulk (‑672 MB, ‑406 MB) when WebKit's memory-pressure handler fired.
+/// The growth is decoded image data held until pressure, and the cache model
+/// changes when that pressure arrives, not how much is held. Kept as a knob so
+/// the next experiment does not have to re-add it.
+///
+/// `AGENTIC_MAIL_CACHE_MODEL=viewer|document-browser|browser`.
+#[cfg(target_os = "linux")]
+fn install_webview_cache_model<R: tauri::Runtime>(app: &tauri::App<R>) {
+    use webkit2gtk::{CacheModel, WebContextExt, WebViewExt};
+
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let model = match std::env::var("AGENTIC_MAIL_CACHE_MODEL").ok().as_deref() {
+        Some("viewer") => CacheModel::DocumentViewer,
+        Some("document-browser") => CacheModel::DocumentBrowser,
+        Some("browser") => CacheModel::WebBrowser,
+        _ => return,
+    };
+    let Some(window) = app.get_webview_window("main") else {
+        log::warn!("cache model: no main window yet; leaving WebKit default");
+        return;
+    };
+    let result = window.with_webview(move |webview| {
+        match webview.inner().context() {
+            Some(context) => {
+                context.set_cache_model(model);
+                log::info!("webkit cache model set to {model:?}");
+            }
+            None => log::warn!("cache model: webview has no context; leaving WebKit default"),
+        }
+    });
+    if let Err(error) = result {
+        log::warn!("cache model: could not reach the webview: {error}");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn install_webview_cache_model<R: tauri::Runtime>(_app: &tauri::App<R>) {}
+
 fn resolve_storage_dir<R: tauri::Runtime>(app: &tauri::App<R>) -> PathBuf {
     let home_dir = app.path().home_dir().expect("failed to get user home directory");
     home_dir.join(".cortexist").join("mail")
@@ -6300,9 +6347,14 @@ pub fn run() {
             // toggle enabled in a previous session — provided the app-wide
             // quota is still set.
             resume_offline_workers(app.handle().clone(), db.clone(), storage_dir.clone());
+            install_webview_cache_model(app);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            bench::bench_config,
+            bench::bench_sample,
+            bench::bench_append,
             get_all_accounts,
             window_chrome,
             get_setting,

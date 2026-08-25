@@ -131,6 +131,7 @@
   import type { Email, Contact, NavItem, CalendarViewMode, ComposeMode, Theme, Account, CalendarEvent, FullContact, ComposeDraft, ContactList } from '$lib/types';
   import { parseSearchQuery, emailMatchesQuery, buildSearchText } from '$lib/searchQuery';
   import { retainBody, releaseBody } from '$lib/bodyRetention';
+  import { startBenchIfConfigured, installBenchConsole } from '$lib/bench';
   import { ensureReadableTextColors } from '$lib/readableColors';
   import { applyAccent, DEFAULT_ACCENT_ID } from '$lib/theme';
   import { setLocale, detectLocale, locale, LANGUAGE_NAMES, t } from '$lib/i18n/index.svelte';
@@ -883,6 +884,20 @@
         applyAccountState(accounts[0].id, accounts);
         contactLists = await getContactLists(accounts[0].id);
         startupStatus = 'ready';
+        // Reading-path memory bench (debug builds, opt-in). Drives selection
+        // directly so it never marks mail read or touches IMAP.
+        const benchHost = {
+          accounts: () => accounts.map((a) => ({ id: a.id })),
+          activeAccountId: () => activeAccountId,
+          selectAccount: (id: string) => handleSelectAccount(id),
+          emails: () => emails,
+          select: (id: string) => { selectedEmailId = id; },
+          fetchBody: (accountId: string, id: string) => {
+            if (fetchingBodyId !== id) { fetchingBodyId = id; fireFetchEmailBody(accountId, id); }
+          },
+        };
+        installBenchConsole(benchHost);
+        void startBenchIfConfigured(benchHost);
         // Trigger initial sync for configured accounts (non-blocking)
         handleSyncAll();
         // Set up periodic per-account sync check (every 60s)

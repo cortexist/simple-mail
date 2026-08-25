@@ -79,3 +79,7 @@ sha2 = "0.10"
 # Cross-platform disk free-space reader (for the storage-quota feature)
 fs4 = "0.8"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Already in the tree via tauri's Linux stack; used directly to set the WebKit
+# cache model, which wry leaves at the browser default. See `install_webview_cache_model`.
+webkit2gtk = "2.0"
