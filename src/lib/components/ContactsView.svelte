@@ -298,9 +298,12 @@
     return parts.join(' ') || ctOrganization.trim();
   }
 
+  // A contact needs a name (or an organisation) and, if it has emails, valid
+  // ones. It does NOT need an email: an address book holds phone-only and
+  // postal-only people too, and requiring one left every such CardDAV contact
+  // uneditable (Save greyed out, 2026-08-30). Mail-app habit, not a rule.
   let ctCanSave = $derived(
     !!buildFullName() &&
-    ctEmails.some(e => e.email.trim()) &&
     ctEmails.every(e => !e.email.trim() || isLikelyEmail(e.email))
   );
   let photoFileInput = $state<HTMLInputElement>(undefined!);
@@ -401,7 +404,7 @@
     const cleanedEmails = ctEmails
       .map(e => ({ email: e.email.trim(), label: e.label || 'work', isDefault: false }))
       .filter(e => e.email);
-    if (!fullName || cleanedEmails.length === 0) return;
+    if (!fullName) return;
     cleanedEmails.forEach((e, i) => { e.isDefault = i === 0; });
 
     const cleanedPhones = ctPhones
@@ -427,7 +430,7 @@
       .filter(a => a.street || a.city || a.region || a.postalCode || a.country);
     cleanedAddresses.forEach((a, i) => { a.isDefault = i === 0; });
 
-    const primaryEmail = cleanedEmails[0].email;
+    const primaryEmail = cleanedEmails[0]?.email ?? '';
     const existing = editingContactId ? contacts.find((c) => c.id === editingContactId) : null;
     const ct: FullContact = {
       id: editingContactId ?? crypto.randomUUID(),
