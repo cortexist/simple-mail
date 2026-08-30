@@ -4738,7 +4738,7 @@ async fn save_contact_entry(
             conn.execute(
                 "INSERT INTO contacts (id, account_id, name, first_name, last_name, middle_name, prefix, suffix, email, initials, color, phone, mobile, job_title, department, organization, address, birthday, notes, is_favorite, photo_url, rev)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
-                rusqlite::params![local_id, account_id, name, first_name, last_name, middle_name, prefix, suffix, primary_email, initials, color, primary_phone, primary_mobile, job_title, department, organization, address_scalar, birthday, notes, is_favorite as i32, photo_url, new_rev],
+                rusqlite::params![local_id, account_id, name, parsed.first_name, parsed.last_name, parsed.middle_name, parsed.prefix, parsed.suffix, primary_email, initials, color, primary_phone, primary_mobile, job_title, department, organization, address_scalar, birthday, notes, is_favorite as i32, photo_url, new_rev],
             ).map_err(|e| e.to_string())?;
 
             write_contact_children_local(&conn, &local_id, &emails, &phones, &addresses);
@@ -4754,7 +4754,7 @@ async fn save_contact_entry(
             let initials = make_initials(&name, &primary_email);
             conn.execute(
                 "UPDATE contacts SET name=?2, email=?3, initials=?4, first_name=?5, last_name=?6, middle_name=?7, prefix=?8, suffix=?9, phone=?10, mobile=?11, job_title=?12, department=?13, organization=?14, address=?15, birthday=?16, notes=?17, is_favorite=?18, photo_url=?19, rev=?20 WHERE id=?1",
-                rusqlite::params![contact_id, name, primary_email, initials, first_name, last_name, middle_name, prefix, suffix, primary_phone, primary_mobile, job_title, department, organization, address_scalar, birthday, notes, is_favorite as i32, photo_url, new_rev],
+                rusqlite::params![contact_id, name, primary_email, initials, parsed.first_name, parsed.last_name, parsed.middle_name, parsed.prefix, parsed.suffix, primary_phone, primary_mobile, job_title, department, organization, address_scalar, birthday, notes, is_favorite as i32, photo_url, new_rev],
             ).map_err(|e| e.to_string())?;
 
             write_contact_children_local(&conn, &contact_id, &emails, &phones, &addresses);
