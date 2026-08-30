@@ -4612,11 +4612,18 @@ async fn save_contact_entry(
     let event_account_id = account_id.clone();
     let event_requested_id = contact_id.clone();
     let result: Result<String, String> = async {
-    let dav_settings = {
+    // Per-login, like sync_contacts: `contacts` and `carddav_resource_state` rows
+    // are keyed by the LOGIN id, so `account_id` is rebound to it for the whole
+    // body. Looking them up by the account id (2026-08-30) found nothing for an
+    // identity sharing a login, so every edit became a "new" contact with a
+    // fresh UID -- a duplicate on the server, had the PUT not failed.
+    let (account_id, dav_settings) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::load_carddav_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
+        let login = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+        let settings = sync_state::load_carddav_settings(&conn, &login)
             .map_err(|e| e.to_string())?
-            .ok_or("No CardDAV settings configured")?
+            .ok_or("No CardDAV settings configured")?;
+        (login.to_string(), settings)
     };
 
     // Look up existing resource_url + etag + collection_url
@@ -4894,11 +4901,15 @@ async fn delete_contact_entry(
     let event_account_id = account_id.clone();
     let event_contact_id = contact_id.clone();
     let result: Result<(), String> = async {
-    let dav_settings = {
+    // Per-login, same reason as save_contact_entry: resource rows are keyed by
+    // the login id, not the account id.
+    let (account_id, dav_settings) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::load_carddav_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
+        let login = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+        let settings = sync_state::load_carddav_settings(&conn, &login)
             .map_err(|e| e.to_string())?
-            .ok_or("No CardDAV settings configured")?
+            .ok_or("No CardDAV settings configured")?;
+        (login.to_string(), settings)
     };
 
     let (resource_url, etag): (String, String) = {

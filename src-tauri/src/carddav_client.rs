@@ -947,31 +947,42 @@ pub async fn delete_contact(
 }
 
 /// Build a vCard 3.0 string from our contact model.
+/// RFC 6350 §3.4 text escaping. Every free-text value goes through this: an
+/// unescaped comma in `ORG:Values Based Psychiatry, LLC` made Radicale reject
+/// the whole card (400, "'list' object has no attribute 'replace'") on
+/// 2026-08-30 -- vobject reads a bare comma as a list separator.
+fn esc(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace(';', "\\;")
+        .replace(',', "\\,")
+        .replace("\r\n", "\\n")
+        .replace('\n', "\\n")
+}
+
 fn build_vcard(contact: &ParsedContact) -> String {
     let mut vcard = String::from("BEGIN:VCARD\r\nVERSION:3.0\r\n");
     vcard.push_str(&format!("UID:{}\r\n", contact.uid));
-    vcard.push_str(&format!("FN:{}\r\n", contact.full_name));
+    vcard.push_str(&format!("FN:{}\r\n", esc(&contact.full_name)));
     vcard.push_str(&format!("N:{};{};{};{};{}\r\n",
-        contact.last_name, contact.first_name, contact.middle_name,
-        contact.prefix, contact.suffix));
+        esc(&contact.last_name), esc(&contact.first_name), esc(&contact.middle_name),
+        esc(&contact.prefix), esc(&contact.suffix)));
 
     if !contact.organization.is_empty() {
         let dept = contact.department.as_deref().unwrap_or("");
         if dept.is_empty() {
-            vcard.push_str(&format!("ORG:{}\r\n", contact.organization));
+            vcard.push_str(&format!("ORG:{}\r\n", esc(&contact.organization)));
         } else {
-            vcard.push_str(&format!("ORG:{};{}\r\n", contact.organization, dept));
+            vcard.push_str(&format!("ORG:{};{}\r\n", esc(&contact.organization), esc(dept)));
         }
     }
     if !contact.title.is_empty() {
-        vcard.push_str(&format!("TITLE:{}\r\n", contact.title));
+        vcard.push_str(&format!("TITLE:{}\r\n", esc(&contact.title)));
     }
     for adr in &contact.addresses {
         let mut types: Vec<&str> = Vec::new();
         let label = if adr.label.is_empty() { "other" } else { adr.label.as_str() };
         types.push(label);
         if adr.is_default { types.push("pref"); }
-        let esc = |s: &str| s.replace('\\', "\\\\").replace(';', "\\;").replace(',', "\\,");
         vcard.push_str(&format!(
             "ADR;TYPE={}:;;{};{};{};{};{}\r\n",
             types.join(","),
