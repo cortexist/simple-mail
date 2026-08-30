@@ -908,7 +908,12 @@
       </div>
     {:else if selectedContact}
       <div class="contact-detail-card">
-        <!-- Header / Hero -->
+        <!-- Header / Hero. Keyed on the contact so the whole block remounts per
+             selection: WebKitGTK fails to repaint the name when only the
+             sibling avatar swaps from initials <div> to <img> (2026-08-30, a
+             stale "Carl Overhuls" over Caroline's photo). Fresh nodes always
+             paint; the DOM was correct in Chromium all along. -->
+        {#key selectedContact.id}
         <div class="contact-hero">
           {#if selectedContact.photoUrl}
             <img class="contact-hero-avatar contact-hero-avatar-img" src={selectedContact.photoUrl} alt={selectedContact.name} />
@@ -927,6 +932,7 @@
             {/if}
           </div>
         </div>
+        {/key}
 
         <!-- Quick Actions -->
         <div class="contact-actions">
