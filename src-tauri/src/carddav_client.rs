@@ -384,8 +384,15 @@ fn parse_addressbook_propfind(xml: &str, base_url: &str) -> Result<Vec<AddressBo
                         in_privilege_set = true;
                         saw_privilege_set = true;
                     }
-                    // RFC 3744 privileges
-                    "write" | "write-content" if in_privilege_set => has_write_privilege = true,
+                    // RFC 3744 privileges. `all` aggregates everything and `write`
+                    // aggregates write-content + write-properties + bind + unbind, so a
+                    // server may grant `write` without ever spelling out `bind` --
+                    // Radicale does exactly that, and requiring a literal `bind` made
+                    // every Radicale address book read-only (2026-08-30). privateemail
+                    // lists `bind` explicitly, which is why this passed there.
+                    "all" if in_privilege_set => { has_write_privilege = true; has_bind_privilege = true; }
+                    "write" if in_privilege_set => { has_write_privilege = true; has_bind_privilege = true; }
+                    "write-content" if in_privilege_set => has_write_privilege = true,
                     "bind" if in_privilege_set => has_bind_privilege = true,
                     _ => {}
                 }
