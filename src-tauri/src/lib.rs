@@ -4967,6 +4967,21 @@ async fn delete_contact_entry(
     result
 }
 
+// ── Frontend log sink ─────────────────────────────────────
+
+/// Uncaught JS errors, unhandled rejections and console.error from the webview,
+/// written to the same log file as the backend. Added 2026-08-30 after a modal
+/// that would not close could only be diagnosed by guesswork: a release build
+/// has no devtools, so this is the only window into the renderer.
+#[tauri::command]
+fn frontend_log(level: String, message: String) {
+    match level.as_str() {
+        "error" => log::error!("[frontend] {}", message),
+        "warn" => log::warn!("[frontend] {}", message),
+        _ => log::info!("[frontend] {}", message),
+    }
+}
+
 // ── Toggle Contact Favorite (local-only) ─────────────────
 
 #[tauri::command]
@@ -6457,6 +6472,7 @@ pub fn run() {
             save_contact_list,
             delete_contact_list,
             toggle_contact_favorite,
+            frontend_log,
             add_ignored_address,
             remove_ignored_address,
             get_ignored_addresses,
