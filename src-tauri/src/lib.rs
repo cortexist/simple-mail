@@ -4770,6 +4770,13 @@ async fn save_contact_entry(
     Ok(local_id)
     }.await;
 
+    match &result {
+        Ok(id) => log::info!("save_contact_entry: {} saved as {}", event_requested_id, id),
+        Err(e) => {
+            log::warn!("save_contact_entry: {} failed: {}", event_requested_id, e);
+            events::emit_contact_save_failed(&app, &event_account_id, &event_requested_id, "save", e, seq);
+        }
+    }
     if let Ok(canonical_id) = &result {
         let contact_opt: Option<FullContact> = {
             if let Ok(conn) = state.db.lock() {
@@ -4950,8 +4957,12 @@ async fn delete_contact_entry(
     Ok(())
     }.await;
 
-    if result.is_ok() {
-        events::emit_contact_removed(&app, &event_account_id, &event_contact_id, seq);
+    match &result {
+        Ok(()) => events::emit_contact_removed(&app, &event_account_id, &event_contact_id, seq),
+        Err(e) => {
+            log::warn!("delete_contact_entry: {} failed: {}", event_contact_id, e);
+            events::emit_contact_save_failed(&app, &event_account_id, &event_contact_id, "delete", e, seq);
+        }
     }
     result
 }

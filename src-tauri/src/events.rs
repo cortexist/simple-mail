@@ -31,6 +31,7 @@ pub const CALENDAR_SYNC_COMPLETED: &str = "calendar:sync-completed";
 
 pub const CONTACTS_CONTACT_UPSERTED: &str = "contacts:contact-upserted";
 pub const CONTACTS_CONTACT_REMOVED: &str = "contacts:contact-removed";
+pub const CONTACTS_CONTACT_SAVE_FAILED: &str = "contacts:contact-save-failed";
 pub const CONTACTS_FAVORITE_CHANGED: &str = "contacts:favorite-changed";
 pub const CONTACTS_SYNC_COMPLETED: &str = "contacts:sync-completed";
 pub const CONTACTS_LIST_UPSERTED: &str = "contacts:list-upserted";
@@ -323,6 +324,30 @@ pub struct ContactUpsertedEvent {
     pub requested_id: String,
     pub contact: FullContact,
     pub seq: u64,
+}
+
+/// A contact save or delete did not reach the CardDAV server (or the local DB).
+/// Contacts are applied optimistically in the UI, so this is the rollback
+/// signal; without it the earlier 400/409 failures were invisible (2026-08-30).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactSaveFailedEvent {
+    pub account_id: String,
+    pub contact_id: String,
+    /// "save" or "delete"
+    pub op: String,
+    pub error: String,
+    pub seq: u64,
+}
+
+pub fn emit_contact_save_failed(app: &AppHandle, account_id: &str, contact_id: &str, op: &str, error: &str, seq: u64) {
+    let payload = ContactSaveFailedEvent {
+        account_id: account_id.to_string(), contact_id: contact_id.to_string(),
+        op: op.to_string(), error: error.to_string(), seq,
+    };
+    if let Err(e) = app.emit(CONTACTS_CONTACT_SAVE_FAILED, payload) {
+        log::error!("Failed to emit {}: {}", CONTACTS_CONTACT_SAVE_FAILED, e);
+    }
 }
 
 pub fn emit_contact_upserted(app: &AppHandle, payload: ContactUpsertedEvent) {

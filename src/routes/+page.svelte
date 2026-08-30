@@ -81,11 +81,13 @@
     fireDeleteContactList,
     subscribeContactUpserted,
     subscribeContactRemoved,
+    subscribeContactSaveFailed,
     subscribeContactFavoriteChanged,
     subscribeContactListUpserted,
     subscribeContactListRemoved,
     type ContactUpsertedEvent,
     type ContactRemovedEvent,
+    type ContactSaveFailedEvent,
     type ContactFavoriteChangedEvent,
     type ContactListUpsertedEvent,
     type ContactListRemovedEvent,
@@ -196,6 +198,7 @@
   let unlistenEventRemoved: (() => void) | null = null;
   let unlistenContactUpserted: (() => void) | null = null;
   let unlistenContactRemoved: (() => void) | null = null;
+  let unlistenContactSaveFailed: (() => void) | null = null;
   let unlistenContactFavorite: (() => void) | null = null;
   let unlistenContactListUpserted: (() => void) | null = null;
   let unlistenContactListRemoved: (() => void) | null = null;
@@ -406,6 +409,12 @@
     if (entry.view === 'mail')     undoMail = entry;
     if (entry.view === 'calendar') undoCalendar = entry;
     if (entry.view === 'contacts') undoContacts = entry;
+    if (toastTimerId) clearTimeout(toastTimerId);
+    toastMessage = message;
+    toastTimerId = setTimeout(() => { toastMessage = null; toastTimerId = null; }, 5000);
+  }
+
+  function showToast(message: string) {
     if (toastTimerId) clearTimeout(toastTimerId);
     toastMessage = message;
     toastTimerId = setTimeout(() => { toastMessage = null; toastTimerId = null; }, 5000);
@@ -1025,6 +1034,7 @@
         // Phase 3: contact + list echoes.
         subscribeContactUpserted(applyContactUpsertedEcho).then((unlisten) => { unlistenContactUpserted = unlisten; });
         subscribeContactRemoved(applyContactRemovedEcho).then((unlisten) => { unlistenContactRemoved = unlisten; });
+        subscribeContactSaveFailed(applyContactSaveFailedEcho).then((unlisten) => { unlistenContactSaveFailed = unlisten; });
         subscribeContactFavoriteChanged(applyContactFavoriteEcho).then((unlisten) => { unlistenContactFavorite = unlisten; });
         subscribeContactListUpserted(applyContactListUpsertedEcho).then((unlisten) => { unlistenContactListUpserted = unlisten; });
         subscribeContactListRemoved(applyContactListRemovedEcho).then((unlisten) => { unlistenContactListRemoved = unlisten; });
@@ -1099,6 +1109,7 @@
     if (unlistenEventRemoved) unlistenEventRemoved();
     if (unlistenContactUpserted) unlistenContactUpserted();
     if (unlistenContactRemoved) unlistenContactRemoved();
+    if (unlistenContactSaveFailed) unlistenContactSaveFailed();
     if (unlistenContactFavorite) unlistenContactFavorite();
     if (unlistenContactListUpserted) unlistenContactListUpserted();
     if (unlistenContactListRemoved) unlistenContactListRemoved();
@@ -1722,7 +1733,34 @@
 
   // ── Contact echo handlers ───────────────────────────────
 
+  // Optimistic contact writes in flight, keyed by the contact id the UI used.
+  // `prev` is the contact as it was before the edit (null for a creation), so
+  // a contacts:contact-save-failed echo can put it back. Cleared by the
+  // upserted/removed echo that confirms the write.
+  const pendingContactOps = new Map<string, { accountId: string; prev: FullContact | null }>();
+
+  function applyContactSaveFailedEcho(ev: ContactSaveFailedEvent) {
+    const pending = pendingContactOps.get(ev.contactId);
+    pendingContactOps.delete(ev.contactId);
+    if (pending) {
+      accounts = accounts.map((a) => {
+        if (a.id !== pending.accountId) return a;
+        if (pending.prev === null) {
+          return { ...a, contacts: a.contacts.filter((c) => c.id !== ev.contactId) };
+        }
+        const prev = pending.prev;
+        const idx = a.contacts.findIndex((c) => c.id === prev.id);
+        const next = idx >= 0 ? a.contacts.map((c, i) => (i === idx ? prev : c)) : [...a.contacts, prev];
+        return { ...a, contacts: next };
+      });
+      if (ev.op === 'delete' && pending.prev) selectedContactId = pending.prev.id;
+    }
+    const what = pending?.prev?.name ?? 'contact';
+    showToast(`${ev.op === 'delete' ? 'Delete' : 'Save'} of ${what} failed — ${ev.error}`);
+  }
+
   function applyContactUpsertedEcho(ev: ContactUpsertedEvent) {
+    pendingContactOps.delete(ev.requestedId);
     accounts = accounts.map((a) => {
       if (a.id !== ev.accountId) return a;
       const idx = a.contacts.findIndex((c) => c.id === ev.requestedId || c.id === ev.contact.id);
@@ -1737,6 +1775,7 @@
   }
 
   function applyContactRemovedEcho(ev: ContactRemovedEvent) {
+    pendingContactOps.delete(ev.contactId);
     accounts = accounts.map((a) =>
       a.id === ev.accountId
         ? { ...a, contacts: a.contacts.filter((c) => c.id !== ev.contactId) }
@@ -3041,6 +3080,17 @@
       pushUndo({ view: 'contacts', action: 'createContact', contactId: contact.id }, 'Contact created — Ctrl+Z to undo');
     }
 
+    // Optimistic, like mail (operator ruling 2026-08-30): show the edit now,
+    // let the CardDAV PUT confirm it through the upserted echo, and roll back
+    // on contacts:contact-save-failed. Waiting for the echo left the old
+    // name on screen until the next sync.
+    pendingContactOps.set(contact.id, { accountId: acct.id, prev: existing >= 0 ? { ...acct.contacts[existing] } : null });
+    accounts = accounts.map((a) => {
+      if (a.id !== acct.id) return a;
+      const next = existing >= 0 ? a.contacts.map((c, i) => (i === existing ? contact : c)) : [...a.contacts, contact];
+      return { ...a, contacts: next };
+    });
+
     if (acct.cardDavSettings?.url) {
       fireSaveContactEntry(acct.id, contact);
     }
@@ -3053,6 +3103,9 @@
     const contactToDelete = acct.contacts.find((c) => c.id === contactId);
     if (contactToDelete) {
       pushUndo({ view: 'contacts', action: 'deleteContact', prevContact: { ...contactToDelete } }, 'Contact deleted — Ctrl+Z to undo');
+      // Optimistic removal; restored by the save-failed echo if the DELETE fails.
+      pendingContactOps.set(contactId, { accountId: acct.id, prev: { ...contactToDelete } });
+      accounts = accounts.map((a) => (a.id === acct.id ? { ...a, contacts: a.contacts.filter((c) => c.id !== contactId) } : a));
     }
 
     if (acct.cardDavSettings?.url) {
