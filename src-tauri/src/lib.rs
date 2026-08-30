@@ -4054,9 +4054,9 @@ async fn sync_contacts(
                     );
                     // Still track the resource_state so etag sync works for this book
                     conn.execute(
-                        "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id)
-                         VALUES (?1,?2,?3,?4,?5)",
-                        rusqlite::params![account_id, book.url, contact.resource_url, contact.etag, existing_id],
+                        "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id, vcard_uid)
+                         VALUES (?1,?2,?3,?4,?5,?6)",
+                        rusqlite::params![account_id, book.url, contact.resource_url, contact.etag, existing_id, contact.uid],
                     ).ok();
                     continue;
                 }
@@ -4100,9 +4100,9 @@ async fn sync_contacts(
                 write_contact_children(&conn, &contact_id, &contact.emails, &contact.phones, &contact.addresses);
 
                 conn.execute(
-                    "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id)
-                     VALUES (?1,?2,?3,?4,?5)",
-                    rusqlite::params![account_id, book.url, contact.resource_url, contact.etag, contact_id],
+                    "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id, vcard_uid)
+                     VALUES (?1,?2,?3,?4,?5,?6)",
+                    rusqlite::params![account_id, book.url, contact.resource_url, contact.etag, contact_id, contact.uid],
                 ).ok();
 
                 // Remember this UID so subsequent address books won't create duplicates
@@ -4118,9 +4118,9 @@ async fn sync_contacts(
                 if !contact.uid.is_empty() {
                     if let Some(existing_id) = synced_uids.get(&contact.uid) {
                         conn.execute(
-                            "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id)
-                             VALUES (?1,?2,?3,?4,?5)",
-                            rusqlite::params![account_id, book.url, contact.resource_url, contact.etag, existing_id],
+                            "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id, vcard_uid)
+                             VALUES (?1,?2,?3,?4,?5,?6)",
+                            rusqlite::params![account_id, book.url, contact.resource_url, contact.etag, existing_id, contact.uid],
                         ).ok();
                         continue;
                     }
@@ -4167,8 +4167,8 @@ async fn sync_contacts(
                     write_contact_children(&conn, &contact_id, &contact.emails, &contact.phones, &contact.addresses);
 
                     conn.execute(
-                        "UPDATE carddav_resource_state SET etag = ?3 WHERE account_id = ?1 AND resource_url = ?2",
-                        rusqlite::params![account_id, contact.resource_url, contact.etag],
+                        "UPDATE carddav_resource_state SET etag = ?3, vcard_uid = ?4 WHERE account_id = ?1 AND resource_url = ?2",
+                        rusqlite::params![account_id, contact.resource_url, contact.etag, contact.uid],
                     ).ok();
 
                     if !contact.uid.is_empty() {
@@ -4627,20 +4627,31 @@ async fn save_contact_entry(
     };
 
     // Look up existing resource_url + etag + collection_url
-    let existing: Option<(String, String, String)> = {
+    let existing: Option<(String, String, String, String)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT rs.resource_url, rs.etag, rs.collection_url FROM carddav_resource_state rs WHERE rs.account_id = ?1 AND rs.contact_id = ?2",
+            "SELECT rs.resource_url, rs.etag, rs.collection_url, rs.vcard_uid FROM carddav_resource_state rs WHERE rs.account_id = ?1 AND rs.contact_id = ?2",
             rusqlite::params![account_id, contact_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).ok()
     };
 
     let is_new = existing.is_none();
-    let uid = if is_new { uuid::Uuid::new_v4().to_string() } else { contact_id.clone() };
+    // The UID written into the card must be the one the server already holds:
+    // Radicale answers 409 to a PUT whose UID differs from the file's, and the
+    // local contact id never was that UID (2026-08-30). Rows synced before the
+    // vcard_uid column existed fall back to the href basename, which is the
+    // UID for Radicale/DAVx5-written files.
+    let uid = match &existing {
+        None => uuid::Uuid::new_v4().to_string(),
+        Some((res, _, _, vuid)) if !vuid.is_empty() => vuid.clone(),
+        Some((res, _, _, _)) => res.rsplit('/').next().unwrap_or("")
+            .trim_end_matches(".vcf").to_string(),
+    };
+    let uid = if uid.is_empty() { contact_id.clone() } else { uid };
 
     // For new contacts, pick the first address book
-    let book_url = if let Some((_, _, ref coll)) = existing {
+    let book_url = if let Some((_, _, ref coll, _)) = existing {
         coll.clone()
     } else {
         let normalized = normalize_url(&dav_settings.url);
@@ -4652,7 +4663,7 @@ async fn save_contact_entry(
         books.into_iter().next().map(|b| b.url).ok_or("No address books found")?
     };
 
-    let (resource_url, etag) = existing.map(|(r, e, _)| (r, e)).unwrap_or_default();
+    let (resource_url, etag) = existing.map(|(r, e, _, _)| (r, e)).unwrap_or_default();
 
     let fn_first = first_name.clone().unwrap_or_default();
     let fn_last = last_name.clone().unwrap_or_default();
@@ -4734,9 +4745,9 @@ async fn save_contact_entry(
 
             let res_url = format!("{}/{}.vcf", book_url.trim_end_matches('/'), uid);
             conn.execute(
-                "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id)
-                 VALUES (?1,?2,?3,?4,?5)",
-                rusqlite::params![account_id, book_url, res_url, new_etag, local_id],
+                "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id, vcard_uid)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![account_id, book_url, res_url, new_etag, local_id, uid],
             ).map_err(|e| e.to_string())?;
             local_id
         } else {

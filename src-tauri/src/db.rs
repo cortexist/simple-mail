@@ -211,6 +211,9 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     conn.execute("ALTER TABLE emails ADD COLUMN is_replied INTEGER NOT NULL DEFAULT 0", []).ok();
     conn.execute("ALTER TABLE emails ADD COLUMN replied_at TEXT", []).ok();
     conn.execute("ALTER TABLE contacts ADD COLUMN rev TEXT", []).ok();
+    // The server's vCard UID. A PUT must carry the UID already in the file
+    // (Radicale answers 409 otherwise), and the local contact id is not it.
+    conn.execute("ALTER TABLE carddav_resource_state ADD COLUMN vcard_uid TEXT NOT NULL DEFAULT ''", []).ok();
 
     // The login this account is a view onto. Seeded in run_migrations.
     conn.execute("ALTER TABLE accounts ADD COLUMN login_id TEXT NOT NULL DEFAULT ''", []).ok();
