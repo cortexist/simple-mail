@@ -1486,6 +1486,11 @@
     border-radius: 4px;
     top: 0;
     z-index: 1;
+    /* Sticky over scrolling rows: mostly opaque pane colour with a touch of
+       blur, so the letter stays legible without looking like a solid bar. */
+    background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
   }
 
   .contact-section-toggle {
