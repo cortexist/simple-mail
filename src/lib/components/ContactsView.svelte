@@ -966,7 +966,11 @@
         <div class="contact-info-section">
           <h3 class="contact-info-heading">{t('contacts.contactInfo')}</h3>
 
-          {#each selectedContact.emails ?? [] as e (e.email + e.label)}
+          <!-- Keyed by position, not by value: synced cards legitimately repeat an
+               entry (a phone gave Lindsay Esch two identical home addresses, 2026-08-30),
+               and a duplicate key throws each_key_duplicate, which kills the render
+               tree -- the editor could not close and nothing responded. -->
+          {#each selectedContact.emails ?? [] as e, i (i)}
             <div class="contact-info-row">
               <div class="contact-info-label">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -978,7 +982,7 @@
             </div>
           {/each}
 
-          {#each selectedContact.phones ?? [] as p (p.number + p.label)}
+          {#each selectedContact.phones ?? [] as p, i (i)}
             <div class="contact-info-row">
               <div class="contact-info-label">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1032,7 +1036,7 @@
             </div>
           {/if}
 
-          {#each selectedContact.addresses ?? [] as a (formatAddress(a) + a.label)}
+          {#each selectedContact.addresses ?? [] as a, i (i)}
             <div class="contact-info-row">
               <div class="contact-info-label">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
