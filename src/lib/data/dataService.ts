@@ -577,6 +577,7 @@ export interface OutboundEmail {
   subject: string;
   bodyHtml: string;
   attachments: { name: string; path: string }[];
+  replyToEmailId?: string | null;
 }
 
 /** Send an email via SMTP. Falls back to outbox queue on failure. */

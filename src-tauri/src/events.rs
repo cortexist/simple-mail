@@ -172,6 +172,10 @@ pub fn emit_mail_sync_completed(app: &AppHandle, payload: MailSyncCompletedEvent
 pub struct MailSendFailedEvent {
     pub account_id: String,
     pub error: String,
+    /// true: the message is still queued and will be retried -- inform, do not
+    /// alarm. false: retries are exhausted and the message went back to Drafts.
+    pub transient: bool,
+    pub subject: String,
     pub seq: u64,
 }
 
@@ -179,9 +183,17 @@ pub fn emit_mail_send_failed(
     app: &AppHandle,
     account_id: &str,
     error: &str,
+    transient: bool,
+    subject: &str,
     seq: u64,
 ) {
-    let payload = MailSendFailedEvent { account_id: account_id.to_string(), error: error.to_string(), seq };
+    let payload = MailSendFailedEvent {
+        account_id: account_id.to_string(),
+        error: error.to_string(),
+        transient,
+        subject: subject.to_string(),
+        seq,
+    };
     if let Err(e) = app.emit(MAIL_SEND_FAILED, payload) {
         log::error!("Failed to emit {}: {}", MAIL_SEND_FAILED, e);
     }

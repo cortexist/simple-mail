@@ -25,6 +25,10 @@ pub struct OutboundEmail {
     pub subject: String,
     pub body_html: String,
     pub attachments: Vec<AttachmentInfo>,
+    /// Local id of the message this one replies to. \Answered is set on it only
+    /// once SMTP has actually accepted the reply, which may be a retry hours later.
+    #[serde(default)]
+    pub reply_to_email_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,20 +252,76 @@ pub async fn send_invitation(
 /// stored in the full RFC 5322 form `<uuid@domain>` — it reaches the wire
 /// verbatim via [`build_message`], and a bare `uuid@domain` is a malformed
 /// header (SpamAssassin INVALID_MSGID, −1.167).
+/// Where a queued message's attachments are spooled: `<storage>/outbox/<queue id>/`.
+pub fn spool_dir(storage_dir: &std::path::Path, outbox_id: &str) -> std::path::PathBuf {
+    storage_dir.join("outbox").join(outbox_id)
+}
+
+/// Drop a queued message's spooled attachments. Called once the row is
+/// resolved (sent, or returned to Drafts with the files embedded).
+pub fn remove_spool(storage_dir: &std::path::Path, outbox_id: &str) {
+    let dir = spool_dir(storage_dir, outbox_id);
+    if dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            log::warn!("outbox: could not remove spool {}: {}", dir.display(), e);
+        }
+    }
+}
+
+/// Copy the composer's attachments into the queue's own spool and return the
+/// email with its attachment paths pointing there.
+///
+/// The composer hands us paths wherever the user picked the files -- a
+/// Downloads folder, a network mount of another machine. A queued message can
+/// wait hours for a retry, and by then that mount may be asleep or the file
+/// moved; reading it at retry time would fail the send for a reason that has
+/// nothing to do with mail. Copying now makes the queue self-contained. A file
+/// that cannot be read NOW is a real error and is reported before queueing.
+fn spool_attachments(
+    storage_dir: &std::path::Path,
+    outbox_id: &str,
+    email: &OutboundEmail,
+) -> Result<OutboundEmail> {
+    if email.attachments.is_empty() {
+        return Ok(email.clone());
+    }
+    let dir = spool_dir(storage_dir, outbox_id);
+    std::fs::create_dir_all(&dir).context("Failed to create outbox spool")?;
+
+    let mut spooled = Vec::with_capacity(email.attachments.len());
+    for (i, att) in email.attachments.iter().enumerate() {
+        // Index prefix: two attachments may share a display name.
+        let safe_name: String = att.name.chars()
+            .map(|c| if c == '/' || c == '\\' || c == '\0' { '_' } else { c })
+            .collect();
+        let dest = dir.join(format!("{:03}-{}", i, safe_name));
+        std::fs::copy(&att.path, &dest)
+            .with_context(|| format!("Failed to read attachment: {}", att.name))?;
+        spooled.push(AttachmentInfo {
+            name: att.name.clone(),
+            path: dest.to_string_lossy().into_owned(),
+        });
+    }
+    Ok(OutboundEmail { attachments: spooled, ..email.clone() })
+}
+
 pub fn queue_email(
     conn: &Connection,
+    storage_dir: &std::path::Path,
     account_id: &str,
     email: &OutboundEmail,
     from_email: &str,
-) -> Result<(String, String)> {
+) -> Result<(String, String, OutboundEmail)> {
     let id = uuid::Uuid::new_v4().to_string();
     let domain = from_email.rsplit('@').next().filter(|d| !d.is_empty()).unwrap_or("localhost");
     let message_id = format!("<{}@{}>", uuid::Uuid::new_v4(), domain);
     let now = chrono::Utc::now().to_rfc3339();
 
+    let email = spool_attachments(storage_dir, &id, email)?;
+
     conn.execute(
-        "INSERT INTO outbox_queue (id, account_id, to_addrs, cc_addrs, bcc_addrs, subject, body_html, attachments, created_at, status, message_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10)",
+        "INSERT INTO outbox_queue (id, account_id, to_addrs, cc_addrs, bcc_addrs, subject, body_html, attachments, created_at, status, message_id, reply_to_email_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?11)",
         rusqlite::params![
             id,
             account_id,
@@ -273,10 +333,22 @@ pub fn queue_email(
             serde_json::to_string(&email.attachments)?,
             now,
             message_id,
+            email.reply_to_email_id,
         ],
     )?;
 
-    Ok((id, message_id))
+    Ok((id, message_id, email))
+}
+
+/// The message as RFC 822 bytes, without sending it. Used to hand a message
+/// that could not be sent back to the Drafts folder with its attachments intact.
+pub async fn render_message(
+    from_email: &str,
+    from_name: &str,
+    email: &OutboundEmail,
+    message_id: Option<&str>,
+) -> Result<Vec<u8>> {
+    Ok(build_message(from_email, from_name, email, message_id).await?.formatted())
 }
 
 /// Reconcile outbox rows stuck in 'sending' status — typically because the app

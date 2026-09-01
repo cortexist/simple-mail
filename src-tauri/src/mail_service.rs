@@ -12,9 +12,206 @@
 
 use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, OptionalExtension};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{events, imap_client, smtp_client, sync_state};
+
+/// How long a message keeps retrying after its FIRST failure before it is given
+/// up on and returned to Drafts. Measured from the first failure, not from
+/// queue time: a laptop closed with the mail still queued must get a genuine
+/// attempt on wake. One hour absorbs a Bridge restart, a wifi drop, or one of
+/// this box's silent resets, while still surfacing a real misconfiguration
+/// within the same sitting rather than retrying invisibly for a day.
+const RETRY_WINDOW_SECS: i64 = 3600;
+
+/// Outcome of a send attempt that did not succeed.
+pub enum FailureOutcome {
+    /// Still within the retry window; row left 'pending' for the next flush.
+    Retrying,
+    /// Retry window elapsed; message rendered back to the Drafts folder and the
+    /// outbox row removed. The user resends from Drafts once the cause is fixed.
+    MovedToDrafts,
+}
+
+/// Set the \Answered flag on the message this send was replying to — locally and
+/// over IMAP — but only after SMTP has accepted. Best-effort: a reply that was
+/// sent must not be reported as failed just because the flag write hiccuped.
+pub async fn mark_original_replied(
+    db: &Arc<Mutex<Connection>>,
+    app: &AppHandle,
+    account_id: &str,
+    reply_to_email_id: &str,
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let (uid, folder, settings) = {
+        let conn = match db.lock() { Ok(c) => c, Err(_) => return };
+        let _ = conn.execute(
+            "UPDATE emails SET is_replied = 1, replied_at = ?2 WHERE id = ?1",
+            rusqlite::params![reply_to_email_id, now],
+        );
+        let uid_folder: Option<(u32, String)> = conn.query_row(
+            "SELECT uid, folder FROM imap_uid_map WHERE email_id = ?1",
+            rusqlite::params![reply_to_email_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).ok();
+        let settings = match crate::login::resolve(&conn, account_id)
+            .ok()
+            .and_then(|login| sync_state::load_mail_settings(&conn, &login).ok().flatten())
+        {
+            Some(s) => s,
+            None => return,
+        };
+        match uid_folder {
+            Some((u, f)) => (u, f, settings),
+            None => return,   // local-only message, nothing to flag on the server
+        }
+    };
+
+    let outcome = async {
+        let mut session = imap_client::connect(&settings).await?;
+        let remote = imap_client::list_folders(&mut session).await.unwrap_or_default();
+        let imap_folder = remote.iter().find(|(_, m)| *m == folder).map(|(n, _)| n.clone());
+        if let Some(imap_folder) = imap_folder {
+            let flags = &[async_imap::types::Flag::Answered];
+            let r = imap_client::set_flags(&mut session, &imap_folder, &[uid], flags).await;
+            let _ = session.logout().await;
+            r
+        } else {
+            let _ = session.logout().await;
+            Ok(())
+        }
+    }.await;
+
+    if let Err(e) = outcome {
+        // The local is_replied=1 stands regardless: the reply WAS sent. Only the
+        // server-side flag mirror failed, and the next sync reconciles it.
+        log::warn!("send: \\Answered flag not mirrored to server for {}: {}", reply_to_email_id, e);
+    }
+    // Tell the running UI to show the reply indicator now, rather than waiting
+    // for the next full sync.
+    let seq = app.state::<crate::AppState>().next_seq();
+    events::emit_email_flag_changed(app, account_id, reply_to_email_id, "replied", true, seq);
+}
+
+/// Record a failed attempt against an outbox row and decide its fate: keep
+/// retrying inside the window, or give up and hand the message back to Drafts.
+///
+/// Never loses the message. If returning to Drafts fails (e.g. IMAP is also
+/// down), the row is left 'pending' so a later flush tries again.
+pub async fn note_send_failure(
+    db: &Arc<Mutex<Connection>>,
+    storage_dir: &std::path::Path,
+    account_id: &str,
+    outbox_id: &str,
+    err: &str,
+) -> FailureOutcome {
+    let now = chrono::Utc::now();
+
+    // Stamp the first failure and read back whether the window has elapsed.
+    let (first_failed_at, give_up) = {
+        let conn = match db.lock() { Ok(c) => c, Err(_) => return FailureOutcome::Retrying };
+        let existing: Option<String> = conn.query_row(
+            "SELECT first_failed_at FROM outbox_queue WHERE id = ?1",
+            rusqlite::params![outbox_id],
+            |row| row.get(0),
+        ).ok().flatten();
+        let first = existing.unwrap_or_else(|| now.to_rfc3339());
+        let elapsed = chrono::DateTime::parse_from_rfc3339(&first)
+            .map(|t| now.signed_duration_since(t.with_timezone(&chrono::Utc)).num_seconds())
+            .unwrap_or(0);
+        (first, elapsed >= RETRY_WINDOW_SECS)
+    };
+
+    if !give_up {
+        if let Ok(conn) = db.lock() {
+            let _ = conn.execute(
+                "UPDATE outbox_queue SET status = 'pending', error = ?2, \
+                 retry_count = retry_count + 1, first_failed_at = ?3 WHERE id = ?1",
+                rusqlite::params![outbox_id, err, first_failed_at],
+            );
+        }
+        return FailureOutcome::Retrying;
+    }
+
+    // Window elapsed: render the message and APPEND it to Drafts, then drop the
+    // outbox row so it stops retrying. If any of this fails, leave the row as it
+    // was (pending) — the message is never dropped on the floor.
+    match move_outbox_row_to_drafts(db, account_id, outbox_id).await {
+        Ok(()) => {
+            if let Ok(conn) = db.lock() {
+                let _ = conn.execute("DELETE FROM outbox_queue WHERE id = ?1",
+                                     rusqlite::params![outbox_id]);
+            }
+            smtp_client::remove_spool(storage_dir, outbox_id);
+            FailureOutcome::MovedToDrafts
+        }
+        Err(e) => {
+            log::error!("outbox {}: give-up reached but Drafts move failed ({}); \
+                         keeping queued", outbox_id, e);
+            if let Ok(conn) = db.lock() {
+                let _ = conn.execute(
+                    "UPDATE outbox_queue SET status = 'pending', error = ?2 WHERE id = ?1",
+                    rusqlite::params![outbox_id, format!("{} (Drafts move failed: {})", err, e)],
+                );
+            }
+            FailureOutcome::Retrying
+        }
+    }
+}
+
+/// Build the outbox row's message and APPEND it to the account's Drafts folder
+/// with the \Draft flag and its attachments embedded.
+async fn move_outbox_row_to_drafts(
+    db: &Arc<Mutex<Connection>>,
+    account_id: &str,
+    outbox_id: &str,
+) -> Result<(), String> {
+    let (settings, from_email, from_name, email, message_id) = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let login = crate::login::resolve(&conn, account_id).map_err(|e| e.to_string())?;
+        let settings = sync_state::load_mail_settings(&conn, &login)
+            .map_err(|e| e.to_string())?
+            .ok_or("No mail settings configured")?;
+        let (from_name, from_email): (String, String) = conn.query_row(
+            "SELECT name, email FROM accounts WHERE id = ?1",
+            rusqlite::params![account_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| e.to_string())?;
+        let (to, cc, bcc, subject, body_html, atts, mid): (String, String, String, String, String, String, String) =
+            conn.query_row(
+                "SELECT to_addrs, cc_addrs, bcc_addrs, subject, body_html, attachments, message_id \
+                 FROM outbox_queue WHERE id = ?1",
+                rusqlite::params![outbox_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            ).map_err(|e| e.to_string())?;
+        let email = smtp_client::OutboundEmail {
+            to: serde_json::from_str(&to).unwrap_or_default(),
+            cc: serde_json::from_str(&cc).unwrap_or_default(),
+            bcc: serde_json::from_str(&bcc).unwrap_or_default(),
+            subject,
+            body_html,
+            attachments: serde_json::from_str(&atts).unwrap_or_default(),
+            reply_to_email_id: None,
+        };
+        (settings, from_email, from_name, email, mid)
+    };
+
+    let mid = if message_id.is_empty() { None } else { Some(message_id.as_str()) };
+    let raw = smtp_client::render_message(&from_email, &from_name, &email, mid)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut session = imap_client::connect(&settings).await.map_err(|e| e.to_string())?;
+    let result = async {
+        let remote = imap_client::list_folders(&mut session).await.unwrap_or_default();
+        let drafts = remote.iter().find(|(_, m)| m == "drafts").map(|(n, _)| n.clone())
+            .unwrap_or_else(|| "Drafts".to_string());
+        imap_client::append_to_mailbox(&mut session, &drafts, &raw, "(\\Seen \\Draft)")
+            .await.map_err(|e| e.to_string())
+    }.await;
+    let _ = session.logout().await;
+    result
+}
 
 /// Move an email to `target_folder`. Applies the local DB change up front, then
 /// performs the IMAP move in the background; on failure the folder is rolled
@@ -279,6 +476,51 @@ pub fn delete_email(
     Ok(())
 }
 
+/// APPEND a just-sent message to the account's Sent folder over IMAP.
+///
+/// Best-effort and self-contained (its own IMAP session), so it can run from
+/// both the interactive send and the outbox retry without threading a session
+/// through. Called for EVERY successful send — the retry path used to skip it,
+/// which left no Sent copy for providers that don't save server-side (Proton
+/// does; privateemail.com does not). Providers that DO auto-save dedup the
+/// APPEND on Message-ID, so calling it unconditionally is safe.
+pub async fn save_to_sent(
+    settings: &sync_state::MailServerSettings,
+    account_id: &str,
+    raw_message: &[u8],
+) {
+    match imap_client::connect(settings).await {
+        Ok(mut session) => {
+            let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
+            let sent_imap_name = remote_folders.iter()
+                .find(|(_, mapped)| mapped == "sent")
+                .map(|(name, _)| name.clone());
+
+            let sent_folder = match sent_imap_name {
+                Some(name) => name,
+                None => {
+                    let folder_name = "Sent";
+                    log::info!("No Sent folder found — creating '{}'", folder_name);
+                    if let Err(e) = session.create(folder_name).await {
+                        log::error!("Failed to create Sent folder: {}", e);
+                    }
+                    folder_name.to_string()
+                }
+            };
+
+            if let Err(e) = imap_client::append_to_mailbox(&mut session, &sent_folder, raw_message, "(\\Seen)").await {
+                log::error!("Failed to save sent message to '{}': {}", sent_folder, e);
+            } else {
+                log::info!("Sent message saved to IMAP folder '{}'", sent_folder);
+            }
+            let _ = session.logout().await;
+        }
+        Err(e) => {
+            log::error!("IMAP connect failed when saving to Sent for account {}: {}", account_id, e);
+        }
+    }
+}
+
 /// Send an email via SMTP, then APPEND it to the Sent folder over IMAP.
 ///
 /// Queues the message first (persisted record with a stable Message-ID) so a
@@ -316,12 +558,17 @@ pub async fn send_email(
 
     // Always queue first so there's a persisted record with a stable Message-ID.
     // If we crash between SMTP submission and the status update, reconcile_sending
-    // can verify against the Sent folder on the next startup.
-    let (outbox_id, message_id) = {
+    // can verify against the Sent folder on the next startup. queue_email also
+    // spools the attachments into the queue's own directory, so a later retry
+    // does not depend on the original file (a network mount, a Downloads folder)
+    // still being present — and returns the email rewritten to point there.
+    let storage_dir = app.state::<crate::AppState>().storage_dir.clone();
+    let (outbox_id, message_id, email) = {
         let conn = db.lock().map_err(|e| e.to_string())?;
-        smtp_client::queue_email(&conn, account_id, email, &from_email)
+        smtp_client::queue_email(&conn, &storage_dir, account_id, email, &from_email)
             .map_err(|e| e.to_string())?
     };
+    let email = &email;
     {
         let conn = db.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -333,64 +580,46 @@ pub async fn send_email(
 
     let raw_message = match smtp_client::send_email(&settings, &from_email, &from_name, email, Some(&message_id)).await {
         Ok(raw) => {
-            let conn = db.lock().map_err(|e| e.to_string())?;
-            conn.execute(
-                "UPDATE outbox_queue SET status = 'sent' WHERE id = ?1",
-                rusqlite::params![outbox_id],
-            )
-            .map_err(|e| e.to_string())?;
+            {
+                let conn = db.lock().map_err(|e| e.to_string())?;
+                conn.execute(
+                    "UPDATE outbox_queue SET status = 'sent' WHERE id = ?1",
+                    rusqlite::params![outbox_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            // The message is out; its spooled attachment copies are no longer needed.
+            smtp_client::remove_spool(&storage_dir, &outbox_id);
             raw
         }
         Err(e) => {
-            log::error!("SMTP send failed for account {}: {}", account_id, e);
-            let conn = db.lock().map_err(|e| e.to_string())?;
-            conn.execute(
-                "UPDATE outbox_queue SET status = 'pending', error = ?2, retry_count = retry_count + 1 WHERE id = ?1",
-                rusqlite::params![outbox_id, e.to_string()],
-            )
-            .map_err(|e| e.to_string())?;
-            let err_msg = format!("Send failed, queued for retry: {}", e);
-            events::emit_mail_send_failed(app, account_id, &err_msg, seq);
+            // {:#} prints the whole anyhow chain (e.g. "SMTP send failed:
+            // invalid peer certificate: UnknownIssuer") instead of just the
+            // outer context, so the log and the toast name the real cause.
+            let detail = format!("{:#}", e);
+            log::error!("SMTP send failed for account {}: {}", account_id, detail);
+            let outcome = note_send_failure(db, &storage_dir, account_id, &outbox_id, &detail).await;
+            let (transient, err_msg) = match outcome {
+                FailureOutcome::Retrying =>
+                    (true, format!("Sending delayed, will keep trying: {}", detail)),
+                FailureOutcome::MovedToDrafts =>
+                    (false, format!("Couldn't send — moved to Drafts: {}", detail)),
+            };
+            events::emit_mail_send_failed(app, account_id, &err_msg, transient, &email.subject, seq);
             return Err(err_msg);
         }
     };
 
+    // SMTP accepted: only now flag the message we replied to as answered. Doing
+    // it optimistically at compose time (as the UI did) mislabels a reply that
+    // in fact failed as "You replied".
+    if let Some(reply_id) = email.reply_to_email_id.as_deref() {
+        mark_original_replied(db, app, account_id, reply_id).await;
+    }
+
     // Save to Sent folder via IMAP APPEND. Best-effort: the message has been
     // SUBMITTED — whatever happens below must not leave the send unresolved.
-    match imap_client::connect(&settings).await {
-        Ok(mut session) => {
-            let remote_folders = imap_client::list_folders(&mut session).await.unwrap_or_default();
-            for (name, mapped) in &remote_folders {
-                log::info!("send_email: remote folder '{}' → mapped '{}'", name, mapped);
-            }
-            let sent_imap_name = remote_folders.iter()
-                .find(|(_, mapped)| mapped == "sent")
-                .map(|(name, _)| name.clone());
-
-            // If no Sent folder found, create one
-            let sent_folder = match sent_imap_name {
-                Some(name) => name,
-                None => {
-                    let folder_name = "Sent";
-                    log::info!("No Sent folder found — creating '{}'", folder_name);
-                    if let Err(e) = session.create(folder_name).await {
-                        log::error!("Failed to create Sent folder: {}", e);
-                    }
-                    folder_name.to_string()
-                }
-            };
-
-            if let Err(e) = imap_client::append_to_mailbox(&mut session, &sent_folder, &raw_message, "(\\Seen)").await {
-                log::error!("Failed to save sent message to '{}': {}", sent_folder, e);
-            } else {
-                log::info!("Sent message saved to IMAP folder '{}'", sent_folder);
-            }
-            let _ = session.logout().await;
-        }
-        Err(e) => {
-            log::error!("IMAP connect failed when saving to Sent for account {}: {}", account_id, e);
-        }
-    }
+    save_to_sent(&settings, account_id, &raw_message).await;
 
     // Emitted unconditionally once SMTP has accepted the message. This event
     // is what stops the compose spinner and clears the optimistic Sent
@@ -479,6 +708,7 @@ pub async fn upload_draft(
         subject: field("subject"),
         body_html: field("body"),
         attachments,
+        reply_to_email_id: None,
     };
 
     // Fresh Message-ID per save: the previous server copy is replaced, and

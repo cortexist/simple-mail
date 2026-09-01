@@ -27,6 +27,7 @@ use log::LevelFilter;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
+use tauri::Emitter;
 
 // ── Serde models (match the TypeScript types) ───────────
 
@@ -3184,6 +3185,7 @@ async fn send_email(
 /// Flush the outbox queue (retry pending sends).
 #[tauri::command]
 async fn flush_outbox(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
 ) -> Result<usize, String> {
@@ -3209,15 +3211,15 @@ async fn flush_outbox(
 
     // Read pending queue entries (after reconcile, these include anything we
     // flipped back from 'sending').
-    let conn_data: Vec<(String, String, String, String, String, String, String, String)> = {
+    let conn_data: Vec<(String, String, String, String, String, String, String, String, Option<String>)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(
-            "SELECT id, to_addrs, cc_addrs, bcc_addrs, subject, body_html, attachments, message_id
+            "SELECT id, to_addrs, cc_addrs, bcc_addrs, subject, body_html, attachments, message_id, reply_to_email_id
              FROM outbox_queue WHERE account_id = ?1 AND status = 'pending' ORDER BY created_at"
         ).map_err(|e| e.to_string())?;
-        let out: Vec<(String, String, String, String, String, String, String, String)> = stmt
+        let out = stmt
             .query_map(rusqlite::params![account_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?))
             })
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
@@ -3225,16 +3227,18 @@ async fn flush_outbox(
         out
     };
 
+    let storage_dir = state.storage_dir.clone();
     let mut sent_count = 0usize;
 
-    for (id, to_json, cc_json, bcc_json, subject, body_html, att_json, message_id) in conn_data {
+    for (id, to_json, cc_json, bcc_json, subject, body_html, att_json, message_id, reply_to) in conn_data {
         let email = smtp_client::OutboundEmail {
             to: serde_json::from_str(&to_json).unwrap_or_default(),
             cc: serde_json::from_str(&cc_json).unwrap_or_default(),
             bcc: serde_json::from_str(&bcc_json).unwrap_or_default(),
-            subject,
+            subject: subject.clone(),
             body_html,
             attachments: serde_json::from_str(&att_json).unwrap_or_default(),
+            reply_to_email_id: reply_to.clone(),
         };
 
         // Mark as sending before the SMTP call so a crash here is recoverable
@@ -3246,18 +3250,34 @@ async fn flush_outbox(
 
         let mid = if message_id.is_empty() { None } else { Some(message_id.as_str()) };
         match smtp_client::send_email(&settings, &from_email, &from_name, &email, mid).await {
-            Ok(_raw) => {
-                let conn = state.db.lock().map_err(|e| e.to_string())?;
-                conn.execute("UPDATE outbox_queue SET status = 'sent' WHERE id = ?1", rusqlite::params![id]).ok();
+            Ok(raw) => {
+                {
+                    let conn = state.db.lock().map_err(|e| e.to_string())?;
+                    conn.execute("UPDATE outbox_queue SET status = 'sent' WHERE id = ?1", rusqlite::params![id]).ok();
+                }
+                // Same Sent-folder save the interactive path does — the retry
+                // path used to omit it, leaving no Sent copy on non-Proton
+                // accounts after a retry-after-failure.
+                mail_service::save_to_sent(&settings, &account_id, &raw).await;
+                smtp_client::remove_spool(&storage_dir, &id);
+                if let Some(reply_id) = reply_to.as_deref() {
+                    mail_service::mark_original_replied(&state.db, &app, &account_id, reply_id).await;
+                }
+                let _ = app.emit("mail:sent", account_id.clone());
                 sent_count += 1;
             }
             Err(e) => {
-                log::error!("Outbox retry failed for account {} queue entry {}: {}", account_id, id, e);
-                let conn = state.db.lock().map_err(|e| e.to_string())?;
-                conn.execute(
-                    "UPDATE outbox_queue SET status = 'pending', error = ?2, retry_count = retry_count + 1 WHERE id = ?1",
-                    rusqlite::params![id, e.to_string()],
-                ).ok();
+                let detail = format!("{:#}", e);
+                log::error!("Outbox retry failed for account {} queue entry {}: {}", account_id, id, detail);
+                let outcome = mail_service::note_send_failure(&state.db, &storage_dir, &account_id, &id, &detail).await;
+                let (transient, msg) = match outcome {
+                    mail_service::FailureOutcome::Retrying =>
+                        (true, format!("Sending delayed, will keep trying: {}", detail)),
+                    mail_service::FailureOutcome::MovedToDrafts =>
+                        (false, format!("Couldn't send — moved to Drafts: {}", detail)),
+                };
+                let seq = state.next_seq();
+                events::emit_mail_send_failed(&app, &account_id, &msg, transient, &subject, seq);
             }
         }
     }

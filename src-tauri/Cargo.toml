@@ -37,7 +37,11 @@ async-imap = "0.11"
 async-native-tls = "0.5"
 
 # SMTP (sending)
-lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+# native-tls, NOT rustls: lettre's rustls build trusts only the bundled Mozilla
+# roots, never the OS store, so a STARTTLS server behind a private CA (Proton
+# Bridge under the LAN Root CA) fails with UnknownIssuer while the IMAP side
+# (async-native-tls, OS store) connects fine. Same trap reqwest hit with mkcert.
+lettre = { version = "0.11", default-features = false, features = ["tokio1-native-tls", "smtp-transport", "builder"] }
 
 # HTTP client for CalDAV / CardDAV
 # rustls-tls-native-roots, not rustls-tls: the plain feature trusts only the compiled-in Mozilla

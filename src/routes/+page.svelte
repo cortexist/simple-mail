@@ -38,7 +38,6 @@
   import {
     fireToggleStar,
     fireMarkRead,
-    fireToggleReplied,
     fireTogglePinned,
     fireToggleFocused,
     fireMoveEmail,
@@ -1684,19 +1683,33 @@
     }
   }
 
-  /** Surface SMTP failures as a console error + non-fatal sync toast. */
+  /** Surface an outbox send outcome. Transient (still queued, will retry) is an
+   *  informational notice, not an error — the mail is safe, so panicking the
+   *  user with a red banner over a Bridge blip or a wifi drop is wrong. Only a
+   *  terminal failure (retries exhausted, message returned to Drafts) is an
+   *  error and rolls the optimistic Sent placeholder back. */
   function applySendFailedEcho(ev: MailSendFailedEvent) {
+    const subject = ev.subject || '(no subject)';
+    if (ev.transient) {
+      console.warn(`Send delayed for ${ev.accountId}:`, ev.error);
+      showToast(`Sending "${subject}" — delayed, will keep trying.`);
+      // Leave the optimistic Sent placeholder in place: the message is still on
+      // its way, and it reappears from the server copy once it actually sends.
+      return;
+    }
     console.error(`Send failed for ${ev.accountId}:`, ev.error);
-    syncErrors = [...syncErrors, `${ev.accountId}: ${ev.error}`];
-    // Roll back the oldest optimistic Sent placeholder for this account
-    // (FIFO — send-failed doesn't carry the message id, and SMTP sends settle
-    // in order). The outbox row stays 'pending' for flush_outbox to retry.
+    showToast(`Couldn't send "${subject}" — moved to Drafts.`);
+    // Terminal: the message left the outbox for Drafts, so drop the oldest
+    // optimistic Sent placeholder for this account (FIFO — the event carries no
+    // message id, and SMTP sends settle in order). The Drafts copy arrives on
+    // the next sync.
     const idx = pendingSendIds.findIndex((p) => p.accountId === ev.accountId);
     if (idx >= 0) {
       const { id } = pendingSendIds[idx];
       pendingSendIds = pendingSendIds.filter((_, i) => i !== idx);
       emails = emails.filter((e) => e.id !== id);
     }
+    void handleSyncAccount(ev.accountId);
   }
 
   // ── Calendar echo handlers ──────────────────────────────
@@ -2639,6 +2652,10 @@
       subject: draft.subject,
       bodyHtml: draft.body,
       attachments: draft.attachments.map((a) => ({ name: a.name, path: a.path })),
+      replyToEmailId:
+        (composeMode === 'reply' || composeMode === 'replyAll') && composeReplyTo
+          ? composeReplyTo.id
+          : null,
     };
 
     // Capture state before closing the compose pane
@@ -2674,12 +2691,10 @@
     // triggered by the mail:sent listener wired in onMount.
     fireSendEmail(accountId, outbound);
 
-    // Mark the original email as replied (\Answered) when replying. Network-
-    // bearing — the echo updates isReplied when the IMAP write completes.
-    if ((mode === 'reply' || mode === 'replyAll') && replyTo) {
-      patchEmail(replyTo.id, { isReplied: true });
-      fireToggleReplied(accountId, replyTo.id, true);
-    }
+    // The \Answered flag is no longer set optimistically here: the backend sets
+    // it only once SMTP accepts (replyToEmailId on the outbound), then emits a
+    // 'replied' flag echo. Marking it at compose time mislabelled a reply that
+    // in fact failed to send as "You replied".
 
     // Remove the sent draft from the emails array and the DB copy (IMAP sync
     // will fetch the Sent copy). If the SMTP send fails, the outbox row stays

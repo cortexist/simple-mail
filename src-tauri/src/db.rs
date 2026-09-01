@@ -455,6 +455,13 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // "sending"-state rows after a crash by searching the Sent folder.
     conn.execute_batch("ALTER TABLE outbox_queue ADD COLUMN message_id TEXT NOT NULL DEFAULT ''").ok();
 
+    // Retry budget starts at the first failure, not at queue time: a laptop
+    // closed with the mail still queued must get a real attempt on wake before
+    // the message is given up on. reply_to_email_id lets the eventual success
+    // (possibly a retry, possibly next launch) set \Answered on the original.
+    conn.execute_batch("ALTER TABLE outbox_queue ADD COLUMN first_failed_at TEXT").ok();
+    conn.execute_batch("ALTER TABLE outbox_queue ADD COLUMN reply_to_email_id TEXT").ok();
+
     // Add position column to accounts (idempotent) and seed it from rowid
     // so existing accounts keep their current insertion order.
     if conn
