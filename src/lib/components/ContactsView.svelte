@@ -298,9 +298,12 @@
     return parts.join(' ') || ctOrganization.trim();
   }
 
+  // A contact needs a name (or an organisation) and, if it has emails, valid
+  // ones. It does NOT need an email: an address book holds phone-only and
+  // postal-only people too, and requiring one left every such CardDAV contact
+  // uneditable (Save greyed out, 2026-08-30). Mail-app habit, not a rule.
   let ctCanSave = $derived(
     !!buildFullName() &&
-    ctEmails.some(e => e.email.trim()) &&
     ctEmails.every(e => !e.email.trim() || isLikelyEmail(e.email))
   );
   let photoFileInput = $state<HTMLInputElement>(undefined!);
@@ -401,7 +404,7 @@
     const cleanedEmails = ctEmails
       .map(e => ({ email: e.email.trim(), label: e.label || 'work', isDefault: false }))
       .filter(e => e.email);
-    if (!fullName || cleanedEmails.length === 0) return;
+    if (!fullName) return;
     cleanedEmails.forEach((e, i) => { e.isDefault = i === 0; });
 
     const cleanedPhones = ctPhones
@@ -427,7 +430,7 @@
       .filter(a => a.street || a.city || a.region || a.postalCode || a.country);
     cleanedAddresses.forEach((a, i) => { a.isDefault = i === 0; });
 
-    const primaryEmail = cleanedEmails[0].email;
+    const primaryEmail = cleanedEmails[0]?.email ?? '';
     const existing = editingContactId ? contacts.find((c) => c.id === editingContactId) : null;
     const ct: FullContact = {
       id: editingContactId ?? crypto.randomUUID(),
@@ -908,7 +911,12 @@
       </div>
     {:else if selectedContact}
       <div class="contact-detail-card">
-        <!-- Header / Hero -->
+        <!-- Header / Hero. Keyed on the contact so the whole block remounts per
+             selection: WebKitGTK fails to repaint the name when only the
+             sibling avatar swaps from initials <div> to <img> (2026-08-30, a
+             stale "Carl Overhuls" over Caroline's photo). Fresh nodes always
+             paint; the DOM was correct in Chromium all along. -->
+        {#key selectedContact.id}
         <div class="contact-hero">
           {#if selectedContact.photoUrl}
             <img class="contact-hero-avatar contact-hero-avatar-img" src={selectedContact.photoUrl} alt={selectedContact.name} />
@@ -927,6 +935,7 @@
             {/if}
           </div>
         </div>
+        {/key}
 
         <!-- Quick Actions -->
         <div class="contact-actions">
@@ -957,7 +966,11 @@
         <div class="contact-info-section">
           <h3 class="contact-info-heading">{t('contacts.contactInfo')}</h3>
 
-          {#each selectedContact.emails ?? [] as e (e.email + e.label)}
+          <!-- Keyed by position, not by value: synced cards legitimately repeat an
+               entry (a phone gave Lindsay Esch two identical home addresses, 2026-08-30),
+               and a duplicate key throws each_key_duplicate, which kills the render
+               tree -- the editor could not close and nothing responded. -->
+          {#each selectedContact.emails ?? [] as e, i (i)}
             <div class="contact-info-row">
               <div class="contact-info-label">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -969,7 +982,7 @@
             </div>
           {/each}
 
-          {#each selectedContact.phones ?? [] as p (p.number + p.label)}
+          {#each selectedContact.phones ?? [] as p, i (i)}
             <div class="contact-info-row">
               <div class="contact-info-label">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1023,7 +1036,7 @@
             </div>
           {/if}
 
-          {#each selectedContact.addresses ?? [] as a (formatAddress(a) + a.label)}
+          {#each selectedContact.addresses ?? [] as a, i (i)}
             <div class="contact-info-row">
               <div class="contact-info-label">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1473,6 +1486,11 @@
     border-radius: 4px;
     top: 0;
     z-index: 1;
+    /* Sticky over scrolling rows: mostly opaque pane colour with a touch of
+       blur, so the letter stays legible without looking like a solid bar. */
+    background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
   }
 
   .contact-section-toggle {

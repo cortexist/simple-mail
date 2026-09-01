@@ -425,6 +425,7 @@ async fn execute_tool(state: &McpState, name: &str, args: &Value) -> Result<Valu
                 subject: arg_str(args, "subject")?,
                 body_html: arg_str(args, "bodyHtml")?,
                 attachments: Vec::new(),
+                reply_to_email_id: None,
             };
             if email.to.is_empty() {
                 return Err("'to' must contain at least one recipient".to_string());

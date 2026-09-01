@@ -38,7 +38,6 @@
   import {
     fireToggleStar,
     fireMarkRead,
-    fireToggleReplied,
     fireTogglePinned,
     fireToggleFocused,
     fireMoveEmail,
@@ -81,11 +80,13 @@
     fireDeleteContactList,
     subscribeContactUpserted,
     subscribeContactRemoved,
+    subscribeContactSaveFailed,
     subscribeContactFavoriteChanged,
     subscribeContactListUpserted,
     subscribeContactListRemoved,
     type ContactUpsertedEvent,
     type ContactRemovedEvent,
+    type ContactSaveFailedEvent,
     type ContactFavoriteChangedEvent,
     type ContactListUpsertedEvent,
     type ContactListRemovedEvent,
@@ -127,7 +128,7 @@
   import type { StorageInfo } from '$lib/data/dataService';
   import { onMount, onDestroy, untrack } from 'svelte';
   import { requestNotificationPermission, rebuildAlertQueue, clearAlertQueue } from '$lib/eventAlerts';
-  import { networkActivity } from '$lib/networkActivity.svelte';
+  import { networkActivity, installActivityConsole } from '$lib/networkActivity.svelte';
   import type { Email, Contact, NavItem, CalendarViewMode, ComposeMode, Theme, Account, CalendarEvent, FullContact, ComposeDraft, ContactList } from '$lib/types';
   import { parseSearchQuery, emailMatchesQuery, buildSearchText } from '$lib/searchQuery';
   import { retainBody, releaseBody } from '$lib/bodyRetention';
@@ -196,6 +197,7 @@
   let unlistenEventRemoved: (() => void) | null = null;
   let unlistenContactUpserted: (() => void) | null = null;
   let unlistenContactRemoved: (() => void) | null = null;
+  let unlistenContactSaveFailed: (() => void) | null = null;
   let unlistenContactFavorite: (() => void) | null = null;
   let unlistenContactListUpserted: (() => void) | null = null;
   let unlistenContactListRemoved: (() => void) | null = null;
@@ -313,10 +315,18 @@
   // It lists the pending operations that leave the machine, by server and
   // account, and appears only once activity has lasted long enough to be
   // wondered about — a flag toggle that echoes in a moment never shows it.
-  const ACTIVITY_TOAST_DELAY_MS = 600;
+  // Shown once activity has lasted DELAY, and then for at least MIN_SHOW even
+  // if the activity ends sooner, so a toast that appears can be read.
+  const ACTIVITY_TOAST_DELAY_MS = 350;
+  const ACTIVITY_TOAST_MIN_SHOW_MS = 1500;
   const ACTIVITY_TOAST_MAX_LINES = 3;
   let activityToastShown = $state(false);
   let activityToastTimer: ReturnType<typeof setTimeout> | null = null;
+  let activityToastHideTimer: ReturnType<typeof setTimeout> | null = null;
+  let activityToastShownAt = 0;
+  /** Lines to show; frozen at the last non-empty set while the minimum display
+   *  time runs out, so the toast does not blank before it hides. */
+  let activityToastLines = $state<string[]>([]);
 
   function hostOf(url: string | undefined): string {
     if (!url) return '';
@@ -369,14 +379,28 @@
   });
 
   $effect(() => {
-    const busy = activityLines.length > 0;
+    const lines = activityLines;
+    const busy = lines.length > 0;
     if (busy) {
+      activityToastLines = lines;
+      if (activityToastHideTimer !== null) { clearTimeout(activityToastHideTimer); activityToastHideTimer = null; }
       if (!activityToastShown && activityToastTimer === null) {
-        activityToastTimer = setTimeout(() => { activityToastShown = true; activityToastTimer = null; }, ACTIVITY_TOAST_DELAY_MS);
+        activityToastTimer = setTimeout(() => {
+          activityToastShown = true;
+          activityToastShownAt = Date.now();
+          activityToastTimer = null;
+        }, ACTIVITY_TOAST_DELAY_MS);
       }
     } else {
       if (activityToastTimer !== null) { clearTimeout(activityToastTimer); activityToastTimer = null; }
-      activityToastShown = false;
+      if (activityToastShown && activityToastHideTimer === null) {
+        const remaining = ACTIVITY_TOAST_MIN_SHOW_MS - (Date.now() - activityToastShownAt);
+        activityToastHideTimer = setTimeout(() => {
+          activityToastShown = false;
+          activityToastLines = [];
+          activityToastHideTimer = null;
+        }, Math.max(0, remaining));
+      }
     }
   });
 
@@ -384,6 +408,12 @@
     if (entry.view === 'mail')     undoMail = entry;
     if (entry.view === 'calendar') undoCalendar = entry;
     if (entry.view === 'contacts') undoContacts = entry;
+    if (toastTimerId) clearTimeout(toastTimerId);
+    toastMessage = message;
+    toastTimerId = setTimeout(() => { toastMessage = null; toastTimerId = null; }, 5000);
+  }
+
+  function showToast(message: string) {
     if (toastTimerId) clearTimeout(toastTimerId);
     toastMessage = message;
     toastTimerId = setTimeout(() => { toastMessage = null; toastTimerId = null; }, 5000);
@@ -969,6 +999,7 @@
             if (fetchingBodyId !== id) { fetchingBodyId = id; fireFetchEmailBody(accountId, id); }
           },
         };
+        installActivityConsole();
         installBenchConsole(benchHost);
         void startBenchIfConfigured(benchHost);
         // Trigger initial sync for configured accounts (non-blocking)
@@ -1002,6 +1033,7 @@
         // Phase 3: contact + list echoes.
         subscribeContactUpserted(applyContactUpsertedEcho).then((unlisten) => { unlistenContactUpserted = unlisten; });
         subscribeContactRemoved(applyContactRemovedEcho).then((unlisten) => { unlistenContactRemoved = unlisten; });
+        subscribeContactSaveFailed(applyContactSaveFailedEcho).then((unlisten) => { unlistenContactSaveFailed = unlisten; });
         subscribeContactFavoriteChanged(applyContactFavoriteEcho).then((unlisten) => { unlistenContactFavorite = unlisten; });
         subscribeContactListUpserted(applyContactListUpsertedEcho).then((unlisten) => { unlistenContactListUpserted = unlisten; });
         subscribeContactListRemoved(applyContactListRemovedEcho).then((unlisten) => { unlistenContactListRemoved = unlisten; });
@@ -1076,6 +1108,7 @@
     if (unlistenEventRemoved) unlistenEventRemoved();
     if (unlistenContactUpserted) unlistenContactUpserted();
     if (unlistenContactRemoved) unlistenContactRemoved();
+    if (unlistenContactSaveFailed) unlistenContactSaveFailed();
     if (unlistenContactFavorite) unlistenContactFavorite();
     if (unlistenContactListUpserted) unlistenContactListUpserted();
     if (unlistenContactListRemoved) unlistenContactListRemoved();
@@ -1650,19 +1683,33 @@
     }
   }
 
-  /** Surface SMTP failures as a console error + non-fatal sync toast. */
+  /** Surface an outbox send outcome. Transient (still queued, will retry) is an
+   *  informational notice, not an error — the mail is safe, so panicking the
+   *  user with a red banner over a Bridge blip or a wifi drop is wrong. Only a
+   *  terminal failure (retries exhausted, message returned to Drafts) is an
+   *  error and rolls the optimistic Sent placeholder back. */
   function applySendFailedEcho(ev: MailSendFailedEvent) {
+    const subject = ev.subject || '(no subject)';
+    if (ev.transient) {
+      console.warn(`Send delayed for ${ev.accountId}:`, ev.error);
+      showToast(`Sending "${subject}" — delayed, will keep trying.`);
+      // Leave the optimistic Sent placeholder in place: the message is still on
+      // its way, and it reappears from the server copy once it actually sends.
+      return;
+    }
     console.error(`Send failed for ${ev.accountId}:`, ev.error);
-    syncErrors = [...syncErrors, `${ev.accountId}: ${ev.error}`];
-    // Roll back the oldest optimistic Sent placeholder for this account
-    // (FIFO — send-failed doesn't carry the message id, and SMTP sends settle
-    // in order). The outbox row stays 'pending' for flush_outbox to retry.
+    showToast(`Couldn't send "${subject}" — moved to Drafts.`);
+    // Terminal: the message left the outbox for Drafts, so drop the oldest
+    // optimistic Sent placeholder for this account (FIFO — the event carries no
+    // message id, and SMTP sends settle in order). The Drafts copy arrives on
+    // the next sync.
     const idx = pendingSendIds.findIndex((p) => p.accountId === ev.accountId);
     if (idx >= 0) {
       const { id } = pendingSendIds[idx];
       pendingSendIds = pendingSendIds.filter((_, i) => i !== idx);
       emails = emails.filter((e) => e.id !== id);
     }
+    void handleSyncAccount(ev.accountId);
   }
 
   // ── Calendar echo handlers ──────────────────────────────
@@ -1699,7 +1746,34 @@
 
   // ── Contact echo handlers ───────────────────────────────
 
+  // Optimistic contact writes in flight, keyed by the contact id the UI used.
+  // `prev` is the contact as it was before the edit (null for a creation), so
+  // a contacts:contact-save-failed echo can put it back. Cleared by the
+  // upserted/removed echo that confirms the write.
+  const pendingContactOps = new Map<string, { accountId: string; prev: FullContact | null }>();
+
+  function applyContactSaveFailedEcho(ev: ContactSaveFailedEvent) {
+    const pending = pendingContactOps.get(ev.contactId);
+    pendingContactOps.delete(ev.contactId);
+    if (pending) {
+      accounts = accounts.map((a) => {
+        if (a.id !== pending.accountId) return a;
+        if (pending.prev === null) {
+          return { ...a, contacts: a.contacts.filter((c) => c.id !== ev.contactId) };
+        }
+        const prev = pending.prev;
+        const idx = a.contacts.findIndex((c) => c.id === prev.id);
+        const next = idx >= 0 ? a.contacts.map((c, i) => (i === idx ? prev : c)) : [...a.contacts, prev];
+        return { ...a, contacts: next };
+      });
+      if (ev.op === 'delete' && pending.prev) selectedContactId = pending.prev.id;
+    }
+    const what = pending?.prev?.name ?? 'contact';
+    showToast(`${ev.op === 'delete' ? 'Delete' : 'Save'} of ${what} failed — ${ev.error}`);
+  }
+
   function applyContactUpsertedEcho(ev: ContactUpsertedEvent) {
+    pendingContactOps.delete(ev.requestedId);
     accounts = accounts.map((a) => {
       if (a.id !== ev.accountId) return a;
       const idx = a.contacts.findIndex((c) => c.id === ev.requestedId || c.id === ev.contact.id);
@@ -1714,6 +1788,7 @@
   }
 
   function applyContactRemovedEcho(ev: ContactRemovedEvent) {
+    pendingContactOps.delete(ev.contactId);
     accounts = accounts.map((a) =>
       a.id === ev.accountId
         ? { ...a, contacts: a.contacts.filter((c) => c.id !== ev.contactId) }
@@ -2577,6 +2652,10 @@
       subject: draft.subject,
       bodyHtml: draft.body,
       attachments: draft.attachments.map((a) => ({ name: a.name, path: a.path })),
+      replyToEmailId:
+        (composeMode === 'reply' || composeMode === 'replyAll') && composeReplyTo
+          ? composeReplyTo.id
+          : null,
     };
 
     // Capture state before closing the compose pane
@@ -2612,12 +2691,10 @@
     // triggered by the mail:sent listener wired in onMount.
     fireSendEmail(accountId, outbound);
 
-    // Mark the original email as replied (\Answered) when replying. Network-
-    // bearing — the echo updates isReplied when the IMAP write completes.
-    if ((mode === 'reply' || mode === 'replyAll') && replyTo) {
-      patchEmail(replyTo.id, { isReplied: true });
-      fireToggleReplied(accountId, replyTo.id, true);
-    }
+    // The \Answered flag is no longer set optimistically here: the backend sets
+    // it only once SMTP accepts (replyToEmailId on the outbound), then emits a
+    // 'replied' flag echo. Marking it at compose time mislabelled a reply that
+    // in fact failed to send as "You replied".
 
     // Remove the sent draft from the emails array and the DB copy (IMAP sync
     // will fetch the Sent copy). If the SMTP send fails, the outbox row stays
@@ -3018,6 +3095,17 @@
       pushUndo({ view: 'contacts', action: 'createContact', contactId: contact.id }, 'Contact created — Ctrl+Z to undo');
     }
 
+    // Optimistic, like mail (operator ruling 2026-08-30): show the edit now,
+    // let the CardDAV PUT confirm it through the upserted echo, and roll back
+    // on contacts:contact-save-failed. Waiting for the echo left the old
+    // name on screen until the next sync.
+    pendingContactOps.set(contact.id, { accountId: acct.id, prev: existing >= 0 ? { ...acct.contacts[existing] } : null });
+    accounts = accounts.map((a) => {
+      if (a.id !== acct.id) return a;
+      const next = existing >= 0 ? a.contacts.map((c, i) => (i === existing ? contact : c)) : [...a.contacts, contact];
+      return { ...a, contacts: next };
+    });
+
     if (acct.cardDavSettings?.url) {
       fireSaveContactEntry(acct.id, contact);
     }
@@ -3030,6 +3118,9 @@
     const contactToDelete = acct.contacts.find((c) => c.id === contactId);
     if (contactToDelete) {
       pushUndo({ view: 'contacts', action: 'deleteContact', prevContact: { ...contactToDelete } }, 'Contact deleted — Ctrl+Z to undo');
+      // Optimistic removal; restored by the save-failed echo if the DELETE fails.
+      pendingContactOps.set(contactId, { accountId: acct.id, prev: { ...contactToDelete } });
+      accounts = accounts.map((a) => (a.id === acct.id ? { ...a, contacts: a.contacts.filter((c) => c.id !== contactId) } : a));
     }
 
     if (acct.cardDavSettings?.url) {
@@ -3429,14 +3520,14 @@
   />
 {/if}
 
-{#if activityToastShown && activityLines.length > 0}
+{#if activityToastShown && activityToastLines.length > 0}
   <div class="undo-toast activity-toast" class:stacked={toastMessage !== null} role="status" aria-live="polite">
     <svg class="activity-spinner" width="16" height="16" viewBox="0 0 20 20" aria-hidden="true">
       <circle cx="10" cy="10" r="8" fill="none" stroke="var(--border)" stroke-width="2" />
       <circle cx="10" cy="10" r="8" fill="none" stroke="var(--accent-text)" stroke-width="2" stroke-dasharray="28 22" stroke-linecap="round" />
     </svg>
     <div class="activity-lines">
-      {#each activityLines as line (line)}<div>{line}</div>{/each}
+      {#each activityToastLines as line (line)}<div>{line}</div>{/each}
     </div>
   </div>
 {/if}

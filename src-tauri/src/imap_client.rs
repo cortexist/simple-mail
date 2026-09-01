@@ -89,14 +89,89 @@ pub(crate) type ImapSession = async_imap::Session<Box<dyn ImapTransport>>;
 /// hanging its caller forever. Every connect in the app funnels through here —
 /// sync, Sent-folder append, outbox reconcile, offline download — so this is
 /// the one choke point that keeps them all cancellable.
+///
+/// Retried, but only for transport failures that a cold start explains:
+/// launching right after boot races protonmail-bridge binding 127.0.0.1:1143
+/// (connection refused) and wifi association giving resolved a usable uplink
+/// (temporary failure in name resolution). Both clear on their own within
+/// seconds, so surfacing them as a hard sync error just trains the user to
+/// re-sync by hand. Nothing else is retried — a refused login, a bad TLS cert
+/// or a stalled greeting is a real fault and repeating it only delays the
+/// message that says so.
 pub async fn connect(settings: &MailServerSettings) -> Result<ImapSession> {
-    match tokio::time::timeout(std::time::Duration::from_secs(30), connect_inner(settings)).await {
-        Ok(r) => r,
-        Err(_) => bail!(
-            "IMAP connect to {}:{} timed out after 30s (server or connection-limit stall)",
-            settings.incoming_server, settings.incoming_port
-        ),
+    // 1+2+4+8 = 15s of patience, front-loaded. Each retried failure returns
+    // immediately (refused/NXDOMAIN never stall), so this is wall-clock cost
+    // only when the wait is the actual fix.
+    const BACKOFF_MS: [u64; 4] = [1000, 2000, 4000, 8000];
+
+    let mut attempt = 0usize;
+    loop {
+        let outcome =
+            match tokio::time::timeout(std::time::Duration::from_secs(30), connect_inner(settings)).await {
+                Ok(r) => r,
+                // A stall is not a cold start — it burns the full 30s per try,
+                // so retrying it would blow the bound this function promises.
+                Err(_) => bail!(
+                    "IMAP connect to {}:{} timed out after 30s (server or connection-limit stall)",
+                    settings.incoming_server, settings.incoming_port
+                ),
+            };
+
+        match outcome {
+            Ok(session) => {
+                if attempt > 0 {
+                    log::info!(
+                        "IMAP connect to {}:{} succeeded on attempt {} — transport was still coming up",
+                        settings.incoming_server, settings.incoming_port, attempt + 1
+                    );
+                }
+                return Ok(session);
+            }
+            Err(e) if attempt < BACKOFF_MS.len() && is_transient_transport(&e) => {
+                let delay = BACKOFF_MS[attempt];
+                log::warn!(
+                    "IMAP connect to {}:{} failed ({:#}); transport not ready, retrying in {}ms ({}/{})",
+                    settings.incoming_server, settings.incoming_port, e, delay,
+                    attempt + 1, BACKOFF_MS.len()
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
     }
+}
+
+/// True when the connect failed in a way that means "not up *yet*" rather than
+/// "misconfigured". Matched on the error chain's text because the DNS case
+/// arrives from the resolver as an uncategorised `io::Error` with no kind to
+/// test — `ErrorKind::ConnectionRefused` alone would miss it.
+fn is_transient_transport(err: &anyhow::Error) -> bool {
+    // Never retry past a TLS or auth failure that merely happens to mention a
+    // refused connection somewhere in its chain.
+    let full = format!("{:#}", err).to_ascii_lowercase();
+    if full.contains("tls handshake failed") || is_auth_rejection(&full) {
+        return false;
+    }
+
+    for cause in err.chain() {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            if matches!(
+                io_err.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::ConnectionReset
+            ) {
+                return true;
+            }
+        }
+    }
+
+    // Resolver failures while the link is still associating.
+    full.contains("temporary failure in name resolution")
+        || full.contains("failed to lookup address information")
+        || full.contains("name or service not known")
 }
 
 async fn connect_inner(settings: &MailServerSettings) -> Result<ImapSession> {
@@ -359,9 +434,9 @@ pub async fn sync_folder(
         // round trip. See `parse_delivered_to` for why PEEK and why these
         // three fields specifically.
         let query = if is_gmail {
-            "(UID FLAGS ENVELOPE X-GM-LABELS BODY.PEEK[HEADER.FIELDS (DELIVERED-TO X-ORIGINAL-TO X-ENVELOPE-TO)])"
+            "(UID FLAGS X-GM-LABELS BODY.PEEK[HEADER.FIELDS (FROM TO CC REPLY-TO SUBJECT DATE MESSAGE-ID DELIVERED-TO X-ORIGINAL-TO X-ENVELOPE-TO)])"
         } else {
-            "(UID FLAGS ENVELOPE BODY.PEEK[HEADER.FIELDS (DELIVERED-TO X-ORIGINAL-TO X-ENVELOPE-TO)])"
+            "(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO CC REPLY-TO SUBJECT DATE MESSAGE-ID DELIVERED-TO X-ORIGINAL-TO X-ENVELOPE-TO)])"
         };
 
         log::info!("sync_folder {}/{}: uid_fetch range='{}' query='{}'", account_id, local_folder, range, query);
@@ -520,9 +595,9 @@ pub async fn sync_folder(
 
                 // Batch envelope fetch for the missing UIDs.
                 let query = if is_gmail {
-                    "(UID FLAGS ENVELOPE X-GM-LABELS)"
+                    "(UID FLAGS X-GM-LABELS BODY.PEEK[HEADER.FIELDS (FROM TO CC REPLY-TO SUBJECT DATE MESSAGE-ID DELIVERED-TO X-ORIGINAL-TO X-ENVELOPE-TO)])"
                 } else {
-                    "(UID FLAGS ENVELOPE)"
+                    "(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO CC REPLY-TO SUBJECT DATE MESSAGE-ID DELIVERED-TO X-ORIGINAL-TO X-ENVELOPE-TO)])"
                 };
                 for chunk in missing.chunks(100) {
                     let range: Vec<String> = chunk.iter().map(|u| u.to_string()).collect();
@@ -926,7 +1001,7 @@ fn pick_delivered_to(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_auth_rejection, pick_delivered_to};
+    use super::{is_auth_rejection, is_transient_transport, pick_delivered_to};
 
     /// Verbatim from a live `imap.mail.com:993` LOGIN — the failure that got
     /// reported as a broken SSL/TLS connection, because the cause was buried
@@ -948,6 +1023,100 @@ mod tests {
         ] {
             assert!(is_auth_rejection(detail), "should classify: {detail}");
         }
+    }
+
+    // ── Cold-start transport classification ──────────────
+
+    /// The two failures a launch-right-after-boot actually produces: bridge
+    /// not yet bound to 127.0.0.1:1143, and resolved with no uplink because
+    /// wifi is still associating. Both must be retried, not reported.
+    #[test]
+    fn retries_the_cold_start_failures() {
+        let refused = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "Connection refused (os error 111)",
+        ))
+        .context("Failed to connect to IMAP server 127.0.0.1:1143");
+        assert!(is_transient_transport(&refused));
+
+        // Verbatim shape of the resolver failure — an uncategorised io::Error,
+        // so only the text identifies it.
+        let dns = anyhow::Error::new(std::io::Error::other(
+            "failed to lookup address information: Temporary failure in name resolution",
+        ))
+        .context("Failed to connect to IMAP server imap.privateemail.com:993");
+        assert!(is_transient_transport(&dns));
+    }
+
+    /// Real faults must fail on the first attempt. Retrying a wrong password
+    /// or an untrusted cert only delays the message that explains it.
+    #[test]
+    fn does_not_retry_real_faults() {
+        let auth = anyhow::anyhow!(
+            "IMAP server mail.example.com:993 rejected the credentials for 'zero' \
+             ([AUTHENTICATIONFAILED] Invalid credentials)"
+        );
+        assert!(!is_transient_transport(&auth));
+
+        let tls = anyhow::Error::new(std::io::Error::other("certificate verify failed"))
+            .context("TLS handshake failed for IMAP mail.example.com:993 using implicit TLS");
+        assert!(!is_transient_transport(&tls));
+    }
+
+    /// A cert failure whose chain happens to mention a refused connection is
+    /// still a cert failure — the TLS guard has to outrank the io::ErrorKind
+    /// walk, or a pinning break would silently burn the whole backoff budget.
+    #[test]
+    fn tls_failure_outranks_a_refused_cause() {
+        let mixed = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        ))
+        .context("TLS handshake failed for IMAP 127.0.0.1:1143 using implicit TLS");
+        assert!(!is_transient_transport(&mixed));
+    }
+
+    /// End-to-end proof the loop actually backs off and then gives up, rather
+    /// than retrying forever or returning instantly. Ignored by default: it
+    /// spends the real 15s budget. Run with
+    /// `cargo test --lib exhausts_the_backoff_budget -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn exhausts_the_backoff_budget_then_reports() {
+        let settings = crate::sync_state::MailServerSettings {
+            protocol: "imap".into(),
+            // Port 1 on loopback: nothing binds it, so every attempt is
+            // refused immediately and only the sleeps take time.
+            incoming_server: "127.0.0.1".into(),
+            incoming_port: 1,
+            incoming_username: "nobody".into(),
+            incoming_password: "nothing".into(),
+            incoming_security: "ssl".into(),
+            smtp_server: String::new(),
+            smtp_port: 0,
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+            smtp_security: String::new(),
+            sync_interval_minutes: 5,
+        };
+
+        let started = std::time::Instant::now();
+        let err = super::connect(&settings).await.unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= std::time::Duration::from_secs(15),
+            "should have spent the full 1+2+4+8s budget, took {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(25),
+            "should give up after the budget, not keep retrying; took {elapsed:?}"
+        );
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("Failed to connect to IMAP server 127.0.0.1:1"),
+            "final error should be the underlying refusal, got: {msg}"
+        );
     }
 
     /// Transport and protocol faults must keep the old, unmassaged message —
@@ -1057,127 +1226,55 @@ fn flag_to_str(flag: &Flag<'_>) -> String {
 
 /// Extract sender name and email from IMAP envelope.
 fn parse_envelope(fetch: &Fetch) -> (String, String, Vec<(String, String)>, Vec<(String, String)>, String, String, String, String, bool) {
-    let envelope = fetch.envelope();
-    let (from_name, from_email) = if let Some(env) = &envelope {
-        let from = env.from.as_ref().and_then(|v| v.first());
-        let name = from
-            .and_then(|a| a.name.as_ref())
-            .map(|n| decode_mime_header(&String::from_utf8_lossy(n)))
-            .unwrap_or_default();
-        let mailbox = from
-            .and_then(|a| a.mailbox.as_ref())
-            .map(|m| String::from_utf8_lossy(m).to_string())
-            .unwrap_or_default();
-        let host = from
-            .and_then(|a| a.host.as_ref())
-            .map(|h| String::from_utf8_lossy(h).to_string())
-            .unwrap_or_default();
-        let email = if !mailbox.is_empty() && !host.is_empty() {
-            format!("{}@{}", mailbox, host)
-        } else {
-            mailbox
-        };
-        (name, email)
-    } else {
-        (String::new(), String::new())
+    // Built from the raw header block, NOT from the server's ENVELOPE.
+    //
+    // ENVELOPE is the server re-serialising addresses into IMAP quoted strings,
+    // and Proton Bridge gets that wrong for non-ASCII display names: it emitted
+    // `"Zero \uea00"` (Go-style escaping of a private-use glyph) on 2026-08-30,
+    // which is not a legal IMAP quoted string, so imap-proto rejected the whole
+    // FETCH response and the folder could never sync again while that message
+    // existed. A `BODY.PEEK[HEADER.FIELDS (...)]` section comes back as a
+    // byte-counted literal and is passed through untouched; mail-parser then
+    // does the RFC 5322/2047 work the server was doing badly. Same round trip,
+    // one header section (see `parse_delivered_to` for why only one).
+    let raw = match fetch.header() {
+        Some(h) => h,
+        None => return Default::default(),
+    };
+    let msg = match mail_parser::MessageParser::default().parse_headers(raw) {
+        Some(m) => m,
+        None => return Default::default(),
     };
 
-    let to_list = if let Some(env) = &envelope {
-        env.to.as_ref().map(|addrs| {
-            addrs.iter().map(|a| {
-                let name = a.name.as_ref()
-                    .map(|n| decode_mime_header(&String::from_utf8_lossy(n)))
-                    .unwrap_or_default();
-                let mailbox = a.mailbox.as_ref()
-                    .map(|m| String::from_utf8_lossy(m).to_string())
-                    .unwrap_or_default();
-                let host = a.host.as_ref()
-                    .map(|h| String::from_utf8_lossy(h).to_string())
-                    .unwrap_or_default();
-                let email = if !mailbox.is_empty() && !host.is_empty() {
-                    format!("{}@{}", mailbox, host)
-                } else {
-                    mailbox
-                };
-                (name, email)
-            }).collect()
-        }).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    fn pair(a: &mail_parser::Addr<'_>) -> (String, String) {
+        (
+            a.name().map(|n| n.trim().to_string()).unwrap_or_default(),
+            a.address().map(|e| e.trim().to_string()).unwrap_or_default(),
+        )
+    }
+    fn list(addr: Option<&mail_parser::Address<'_>>) -> Vec<(String, String)> {
+        addr.map(|a| a.iter().map(pair).collect()).unwrap_or_default()
+    }
 
-    let cc_list = if let Some(env) = &envelope {
-        env.cc.as_ref().map(|addrs| {
-            addrs.iter().map(|a| {
-                let name = a.name.as_ref()
-                    .map(|n| decode_mime_header(&String::from_utf8_lossy(n)))
-                    .unwrap_or_default();
-                let mailbox = a.mailbox.as_ref()
-                    .map(|m| String::from_utf8_lossy(m).to_string())
-                    .unwrap_or_default();
-                let host = a.host.as_ref()
-                    .map(|h| String::from_utf8_lossy(h).to_string())
-                    .unwrap_or_default();
-                let email = if !mailbox.is_empty() && !host.is_empty() {
-                    format!("{}@{}", mailbox, host)
-                } else {
-                    mailbox
-                };
-                (name, email)
-            }).collect()
-        }).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    let reply_to = if let Some(env) = &envelope {
-        env.reply_to.as_ref()
-            .and_then(|v| v.first())
-            .map(|a| {
-                let mailbox = a.mailbox.as_ref()
-                    .map(|m| String::from_utf8_lossy(m).to_string())
-                    .unwrap_or_default();
-                let host = a.host.as_ref()
-                    .map(|h| String::from_utf8_lossy(h).to_string())
-                    .unwrap_or_default();
-                if !mailbox.is_empty() && !host.is_empty() {
-                    format!("{}@{}", mailbox, host)
-                } else {
-                    mailbox
-                }
+    let (from_name, from_email) = msg.from().and_then(|a| a.first()).map(pair).unwrap_or_default();
+    let to_list = list(msg.to());
+    let cc_list = list(msg.cc());
+    let reply_to = msg.reply_to().and_then(|a| a.first()).map(|a| pair(a).1).unwrap_or_default();
+    // Keep the angle brackets: the rest of the app stores Message-IDs as the
+    // header value, which is how ENVELOPE delivered them.
+    let message_id = msg.message_id().map(|m| format!("<{}>", m.trim_matches(|c| c == '<' || c == '>'))).unwrap_or_default();
+    let subject = msg.subject().map(|s| s.trim().to_string()).unwrap_or_default();
+    let date = msg
+        .date()
+        .map(|d| d.to_rfc3339())
+        .or_else(|| {
+            // mail-parser gave up on the date; fall back to the raw header text
+            // and the loose parsers below, as before.
+            msg.header_raw("Date").map(|d| {
+                DateTime::parse_from_rfc2822(d.trim())
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_else(|_| parse_loose_date(d).unwrap_or_else(|| d.trim().to_string()))
             })
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    let message_id = if let Some(env) = &envelope {
-        env.message_id.as_ref()
-            .map(|m| String::from_utf8_lossy(m).trim().to_string())
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    let subject = envelope
-        .as_ref()
-        .and_then(|e| e.subject.as_ref())
-        .map(|s| decode_mime_header(&String::from_utf8_lossy(s)))
-        .unwrap_or_default();
-
-    let date = envelope
-        .as_ref()
-        .and_then(|e| e.date.as_ref())
-        .map(|d| {
-            let raw = String::from_utf8_lossy(d);
-            // Parse RFC 2822 date to ISO 8601 for correct sorting
-            DateTime::parse_from_rfc2822(raw.trim())
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_else(|_| {
-                    // Try common IMAP date variants
-                    parse_loose_date(&raw)
-                        .unwrap_or_else(|| raw.to_string())
-                })
         })
         .unwrap_or_default();
 

@@ -10,6 +10,23 @@
   let { children }: Props = $props();
 
   onMount(() => {
+    // Renderer errors into the backend log file (no devtools in a release
+    // build). Best effort: never throws, never recurses.
+    if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+      import('@tauri-apps/api/core').then(({ invoke }) => {
+        const send = (level: string, message: string) => {
+          try { invoke('frontend_log', { level, message: message.slice(0, 4000) }).catch(() => {}); } catch { /* ignore */ }
+        };
+        const fmt = (e: unknown): string => e instanceof Error ? `${e.message}\n${e.stack ?? ''}` : String(e);
+        window.addEventListener('error', (ev) => send('error', `uncaught: ${ev.message} @ ${ev.filename}:${ev.lineno}:${ev.colno}\n${fmt(ev.error)}`));
+        window.addEventListener('unhandledrejection', (ev) => send('error', `unhandled rejection: ${fmt(ev.reason)}`));
+        const origError = console.error.bind(console);
+        console.error = (...args: unknown[]) => { origError(...args); send('error', args.map(fmt).join(' ')); };
+        const origWarn = console.warn.bind(console);
+        console.warn = (...args: unknown[]) => { origWarn(...args); send('warn', args.map(fmt).join(' ')); };
+      }).catch(() => {});
+    }
+
     let bubble: HTMLDivElement | null = null;
     let arrow: HTMLDivElement | null = null;
     let showTimeout: ReturnType<typeof setTimeout> | null = null;

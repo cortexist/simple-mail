@@ -23,6 +23,14 @@ export interface ContactRemovedEvent {
   seq: number;
 }
 
+export interface ContactSaveFailedEvent {
+  accountId: string;
+  contactId: string;
+  op: 'save' | 'delete';
+  error: string;
+  seq: number;
+}
+
 export interface ContactFavoriteChangedEvent {
   contactId: string;
   isFavorite: boolean;
@@ -93,6 +101,18 @@ export async function subscribeContactUpserted(handler: ContactUpsertedHandler):
 
 export async function subscribeContactRemoved(handler: ContactRemovedHandler): Promise<UnlistenFn> {
   return listen<ContactRemovedEvent>('contacts:contact-removed', (event) => {
+    const ev = event.payload;
+    const k = seqKey('contact', ev.contactId);
+    if (inFlightCounts.has(k)) decOp(k);
+    handler(ev);
+  });
+}
+
+export type ContactSaveFailedHandler = (ev: ContactSaveFailedEvent) => void;
+
+/** The rollback signal for optimistic contact saves/deletes. */
+export async function subscribeContactSaveFailed(handler: ContactSaveFailedHandler): Promise<UnlistenFn> {
+  return listen<ContactSaveFailedEvent>('contacts:contact-save-failed', (event) => {
     const ev = event.payload;
     const k = seqKey('contact', ev.contactId);
     if (inFlightCounts.has(k)) decOp(k);

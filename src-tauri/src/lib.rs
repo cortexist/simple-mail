@@ -27,6 +27,7 @@ use log::LevelFilter;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
+use tauri::Emitter;
 
 // ── Serde models (match the TypeScript types) ───────────
 
@@ -3184,6 +3185,7 @@ async fn send_email(
 /// Flush the outbox queue (retry pending sends).
 #[tauri::command]
 async fn flush_outbox(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     account_id: String,
 ) -> Result<usize, String> {
@@ -3209,15 +3211,15 @@ async fn flush_outbox(
 
     // Read pending queue entries (after reconcile, these include anything we
     // flipped back from 'sending').
-    let conn_data: Vec<(String, String, String, String, String, String, String, String)> = {
+    let conn_data: Vec<(String, String, String, String, String, String, String, String, Option<String>)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn.prepare(
-            "SELECT id, to_addrs, cc_addrs, bcc_addrs, subject, body_html, attachments, message_id
+            "SELECT id, to_addrs, cc_addrs, bcc_addrs, subject, body_html, attachments, message_id, reply_to_email_id
              FROM outbox_queue WHERE account_id = ?1 AND status = 'pending' ORDER BY created_at"
         ).map_err(|e| e.to_string())?;
-        let out: Vec<(String, String, String, String, String, String, String, String)> = stmt
+        let out = stmt
             .query_map(rusqlite::params![account_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?))
             })
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
@@ -3225,16 +3227,18 @@ async fn flush_outbox(
         out
     };
 
+    let storage_dir = state.storage_dir.clone();
     let mut sent_count = 0usize;
 
-    for (id, to_json, cc_json, bcc_json, subject, body_html, att_json, message_id) in conn_data {
+    for (id, to_json, cc_json, bcc_json, subject, body_html, att_json, message_id, reply_to) in conn_data {
         let email = smtp_client::OutboundEmail {
             to: serde_json::from_str(&to_json).unwrap_or_default(),
             cc: serde_json::from_str(&cc_json).unwrap_or_default(),
             bcc: serde_json::from_str(&bcc_json).unwrap_or_default(),
-            subject,
+            subject: subject.clone(),
             body_html,
             attachments: serde_json::from_str(&att_json).unwrap_or_default(),
+            reply_to_email_id: reply_to.clone(),
         };
 
         // Mark as sending before the SMTP call so a crash here is recoverable
@@ -3246,18 +3250,34 @@ async fn flush_outbox(
 
         let mid = if message_id.is_empty() { None } else { Some(message_id.as_str()) };
         match smtp_client::send_email(&settings, &from_email, &from_name, &email, mid).await {
-            Ok(_raw) => {
-                let conn = state.db.lock().map_err(|e| e.to_string())?;
-                conn.execute("UPDATE outbox_queue SET status = 'sent' WHERE id = ?1", rusqlite::params![id]).ok();
+            Ok(raw) => {
+                {
+                    let conn = state.db.lock().map_err(|e| e.to_string())?;
+                    conn.execute("UPDATE outbox_queue SET status = 'sent' WHERE id = ?1", rusqlite::params![id]).ok();
+                }
+                // Same Sent-folder save the interactive path does — the retry
+                // path used to omit it, leaving no Sent copy on non-Proton
+                // accounts after a retry-after-failure.
+                mail_service::save_to_sent(&settings, &account_id, &raw).await;
+                smtp_client::remove_spool(&storage_dir, &id);
+                if let Some(reply_id) = reply_to.as_deref() {
+                    mail_service::mark_original_replied(&state.db, &app, &account_id, reply_id).await;
+                }
+                let _ = app.emit("mail:sent", account_id.clone());
                 sent_count += 1;
             }
             Err(e) => {
-                log::error!("Outbox retry failed for account {} queue entry {}: {}", account_id, id, e);
-                let conn = state.db.lock().map_err(|e| e.to_string())?;
-                conn.execute(
-                    "UPDATE outbox_queue SET status = 'pending', error = ?2, retry_count = retry_count + 1 WHERE id = ?1",
-                    rusqlite::params![id, e.to_string()],
-                ).ok();
+                let detail = format!("{:#}", e);
+                log::error!("Outbox retry failed for account {} queue entry {}: {}", account_id, id, detail);
+                let outcome = mail_service::note_send_failure(&state.db, &storage_dir, &account_id, &id, &detail).await;
+                let (transient, msg) = match outcome {
+                    mail_service::FailureOutcome::Retrying =>
+                        (true, format!("Sending delayed, will keep trying: {}", detail)),
+                    mail_service::FailureOutcome::MovedToDrafts =>
+                        (false, format!("Couldn't send — moved to Drafts: {}", detail)),
+                };
+                let seq = state.next_seq();
+                events::emit_mail_send_failed(&app, &account_id, &msg, transient, &subject, seq);
             }
         }
     }
@@ -4054,9 +4074,9 @@ async fn sync_contacts(
                     );
                     // Still track the resource_state so etag sync works for this book
                     conn.execute(
-                        "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id)
-                         VALUES (?1,?2,?3,?4,?5)",
-                        rusqlite::params![account_id, book.url, contact.resource_url, contact.etag, existing_id],
+                        "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id, vcard_uid)
+                         VALUES (?1,?2,?3,?4,?5,?6)",
+                        rusqlite::params![account_id, book.url, contact.resource_url, contact.etag, existing_id, contact.uid],
                     ).ok();
                     continue;
                 }
@@ -4100,9 +4120,9 @@ async fn sync_contacts(
                 write_contact_children(&conn, &contact_id, &contact.emails, &contact.phones, &contact.addresses);
 
                 conn.execute(
-                    "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id)
-                     VALUES (?1,?2,?3,?4,?5)",
-                    rusqlite::params![account_id, book.url, contact.resource_url, contact.etag, contact_id],
+                    "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id, vcard_uid)
+                     VALUES (?1,?2,?3,?4,?5,?6)",
+                    rusqlite::params![account_id, book.url, contact.resource_url, contact.etag, contact_id, contact.uid],
                 ).ok();
 
                 // Remember this UID so subsequent address books won't create duplicates
@@ -4118,9 +4138,9 @@ async fn sync_contacts(
                 if !contact.uid.is_empty() {
                     if let Some(existing_id) = synced_uids.get(&contact.uid) {
                         conn.execute(
-                            "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id)
-                             VALUES (?1,?2,?3,?4,?5)",
-                            rusqlite::params![account_id, book.url, contact.resource_url, contact.etag, existing_id],
+                            "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id, vcard_uid)
+                             VALUES (?1,?2,?3,?4,?5,?6)",
+                            rusqlite::params![account_id, book.url, contact.resource_url, contact.etag, existing_id, contact.uid],
                         ).ok();
                         continue;
                     }
@@ -4167,8 +4187,8 @@ async fn sync_contacts(
                     write_contact_children(&conn, &contact_id, &contact.emails, &contact.phones, &contact.addresses);
 
                     conn.execute(
-                        "UPDATE carddav_resource_state SET etag = ?3 WHERE account_id = ?1 AND resource_url = ?2",
-                        rusqlite::params![account_id, contact.resource_url, contact.etag],
+                        "UPDATE carddav_resource_state SET etag = ?3, vcard_uid = ?4 WHERE account_id = ?1 AND resource_url = ?2",
+                        rusqlite::params![account_id, contact.resource_url, contact.etag, contact.uid],
                     ).ok();
 
                     if !contact.uid.is_empty() {
@@ -4612,28 +4632,46 @@ async fn save_contact_entry(
     let event_account_id = account_id.clone();
     let event_requested_id = contact_id.clone();
     let result: Result<String, String> = async {
-    let dav_settings = {
+    // Per-login, like sync_contacts: `contacts` and `carddav_resource_state` rows
+    // are keyed by the LOGIN id, so `account_id` is rebound to it for the whole
+    // body. Looking them up by the account id (2026-08-30) found nothing for an
+    // identity sharing a login, so every edit became a "new" contact with a
+    // fresh UID -- a duplicate on the server, had the PUT not failed.
+    let (account_id, dav_settings) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::load_carddav_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
+        let login = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+        let settings = sync_state::load_carddav_settings(&conn, &login)
             .map_err(|e| e.to_string())?
-            .ok_or("No CardDAV settings configured")?
+            .ok_or("No CardDAV settings configured")?;
+        (login.to_string(), settings)
     };
 
     // Look up existing resource_url + etag + collection_url
-    let existing: Option<(String, String, String)> = {
+    let existing: Option<(String, String, String, String)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT rs.resource_url, rs.etag, rs.collection_url FROM carddav_resource_state rs WHERE rs.account_id = ?1 AND rs.contact_id = ?2",
+            "SELECT rs.resource_url, rs.etag, rs.collection_url, rs.vcard_uid FROM carddav_resource_state rs WHERE rs.account_id = ?1 AND rs.contact_id = ?2",
             rusqlite::params![account_id, contact_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).ok()
     };
 
     let is_new = existing.is_none();
-    let uid = if is_new { uuid::Uuid::new_v4().to_string() } else { contact_id.clone() };
+    // The UID written into the card must be the one the server already holds:
+    // Radicale answers 409 to a PUT whose UID differs from the file's, and the
+    // local contact id never was that UID (2026-08-30). Rows synced before the
+    // vcard_uid column existed fall back to the href basename, which is the
+    // UID for Radicale/DAVx5-written files.
+    let uid = match &existing {
+        None => uuid::Uuid::new_v4().to_string(),
+        Some((res, _, _, vuid)) if !vuid.is_empty() => vuid.clone(),
+        Some((res, _, _, _)) => res.rsplit('/').next().unwrap_or("")
+            .trim_end_matches(".vcf").to_string(),
+    };
+    let uid = if uid.is_empty() { contact_id.clone() } else { uid };
 
     // For new contacts, pick the first address book
-    let book_url = if let Some((_, _, ref coll)) = existing {
+    let book_url = if let Some((_, _, ref coll, _)) = existing {
         coll.clone()
     } else {
         let normalized = normalize_url(&dav_settings.url);
@@ -4645,7 +4683,7 @@ async fn save_contact_entry(
         books.into_iter().next().map(|b| b.url).ok_or("No address books found")?
     };
 
-    let (resource_url, etag) = existing.map(|(r, e, _)| (r, e)).unwrap_or_default();
+    let (resource_url, etag) = existing.map(|(r, e, _, _)| (r, e)).unwrap_or_default();
 
     let fn_first = first_name.clone().unwrap_or_default();
     let fn_last = last_name.clone().unwrap_or_default();
@@ -4720,23 +4758,23 @@ async fn save_contact_entry(
             conn.execute(
                 "INSERT INTO contacts (id, account_id, name, first_name, last_name, middle_name, prefix, suffix, email, initials, color, phone, mobile, job_title, department, organization, address, birthday, notes, is_favorite, photo_url, rev)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
-                rusqlite::params![local_id, account_id, name, first_name, last_name, middle_name, prefix, suffix, primary_email, initials, color, primary_phone, primary_mobile, job_title, department, organization, address_scalar, birthday, notes, is_favorite as i32, photo_url, new_rev],
+                rusqlite::params![local_id, account_id, name, parsed.first_name, parsed.last_name, parsed.middle_name, parsed.prefix, parsed.suffix, primary_email, initials, color, primary_phone, primary_mobile, job_title, department, organization, address_scalar, birthday, notes, is_favorite as i32, photo_url, new_rev],
             ).map_err(|e| e.to_string())?;
 
             write_contact_children_local(&conn, &local_id, &emails, &phones, &addresses);
 
             let res_url = format!("{}/{}.vcf", book_url.trim_end_matches('/'), uid);
             conn.execute(
-                "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id)
-                 VALUES (?1,?2,?3,?4,?5)",
-                rusqlite::params![account_id, book_url, res_url, new_etag, local_id],
+                "INSERT OR REPLACE INTO carddav_resource_state (account_id, collection_url, resource_url, etag, contact_id, vcard_uid)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![account_id, book_url, res_url, new_etag, local_id, uid],
             ).map_err(|e| e.to_string())?;
             local_id
         } else {
             let initials = make_initials(&name, &primary_email);
             conn.execute(
                 "UPDATE contacts SET name=?2, email=?3, initials=?4, first_name=?5, last_name=?6, middle_name=?7, prefix=?8, suffix=?9, phone=?10, mobile=?11, job_title=?12, department=?13, organization=?14, address=?15, birthday=?16, notes=?17, is_favorite=?18, photo_url=?19, rev=?20 WHERE id=?1",
-                rusqlite::params![contact_id, name, primary_email, initials, first_name, last_name, middle_name, prefix, suffix, primary_phone, primary_mobile, job_title, department, organization, address_scalar, birthday, notes, is_favorite as i32, photo_url, new_rev],
+                rusqlite::params![contact_id, name, primary_email, initials, parsed.first_name, parsed.last_name, parsed.middle_name, parsed.prefix, parsed.suffix, primary_phone, primary_mobile, job_title, department, organization, address_scalar, birthday, notes, is_favorite as i32, photo_url, new_rev],
             ).map_err(|e| e.to_string())?;
 
             write_contact_children_local(&conn, &contact_id, &emails, &phones, &addresses);
@@ -4752,6 +4790,13 @@ async fn save_contact_entry(
     Ok(local_id)
     }.await;
 
+    match &result {
+        Ok(id) => log::info!("save_contact_entry: {} saved as {}", event_requested_id, id),
+        Err(e) => {
+            log::warn!("save_contact_entry: {} failed: {}", event_requested_id, e);
+            events::emit_contact_save_failed(&app, &event_account_id, &event_requested_id, "save", e, seq);
+        }
+    }
     if let Ok(canonical_id) = &result {
         let contact_opt: Option<FullContact> = {
             if let Ok(conn) = state.db.lock() {
@@ -4894,11 +4939,15 @@ async fn delete_contact_entry(
     let event_account_id = account_id.clone();
     let event_contact_id = contact_id.clone();
     let result: Result<(), String> = async {
-    let dav_settings = {
+    // Per-login, same reason as save_contact_entry: resource rows are keyed by
+    // the login id, not the account id.
+    let (account_id, dav_settings) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::load_carddav_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
+        let login = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+        let settings = sync_state::load_carddav_settings(&conn, &login)
             .map_err(|e| e.to_string())?
-            .ok_or("No CardDAV settings configured")?
+            .ok_or("No CardDAV settings configured")?;
+        (login.to_string(), settings)
     };
 
     let (resource_url, etag): (String, String) = {
@@ -4928,10 +4977,29 @@ async fn delete_contact_entry(
     Ok(())
     }.await;
 
-    if result.is_ok() {
-        events::emit_contact_removed(&app, &event_account_id, &event_contact_id, seq);
+    match &result {
+        Ok(()) => events::emit_contact_removed(&app, &event_account_id, &event_contact_id, seq),
+        Err(e) => {
+            log::warn!("delete_contact_entry: {} failed: {}", event_contact_id, e);
+            events::emit_contact_save_failed(&app, &event_account_id, &event_contact_id, "delete", e, seq);
+        }
     }
     result
+}
+
+// ── Frontend log sink ─────────────────────────────────────
+
+/// Uncaught JS errors, unhandled rejections and console.error from the webview,
+/// written to the same log file as the backend. Added 2026-08-30 after a modal
+/// that would not close could only be diagnosed by guesswork: a release build
+/// has no devtools, so this is the only window into the renderer.
+#[tauri::command]
+fn frontend_log(level: String, message: String) {
+    match level.as_str() {
+        "error" => log::error!("[frontend] {}", message),
+        "warn" => log::warn!("[frontend] {}", message),
+        _ => log::info!("[frontend] {}", message),
+    }
 }
 
 // ── Toggle Contact Favorite (local-only) ─────────────────
@@ -6424,6 +6492,7 @@ pub fn run() {
             save_contact_list,
             delete_contact_list,
             toggle_contact_favorite,
+            frontend_log,
             add_ignored_address,
             remove_ignored_address,
             get_ignored_addresses,

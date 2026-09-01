@@ -53,6 +53,10 @@ export interface MailSyncCompletedEvent {
 export interface MailSendFailedEvent {
   accountId: string;
   error: string;
+  /** true: still queued, will retry — inform without alarming. false: retries
+   *  exhausted, the message was returned to Drafts. */
+  transient: boolean;
+  subject: string;
   seq: number;
 }
 
@@ -108,6 +112,9 @@ export interface OutboundEmailPayload {
   subject: string;
   bodyHtml: string;
   attachments: { name: string; path: string }[];
+  /** When this is a reply, the local id of the message being replied to. The
+   *  \Answered flag is set on it only after SMTP accepts. */
+  replyToEmailId?: string | null;
 }
 
 /** Everything `save_draft` persists: the display fields the message list
