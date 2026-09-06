@@ -480,6 +480,7 @@ mod send_tests {
             subject: "send-as test".into(),
             body_html: "<p>hello</p>".into(),
             attachments: vec![],
+            reply_to_email_id: None,
         };
         let raw = send_email(
             &local_settings(),

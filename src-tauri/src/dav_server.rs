@@ -1093,6 +1093,8 @@ fn load_contacts_as_vcards(
             birthday: c.birthday,
             photo_url: c.photo_url,
             rev: c.rev,
+            notes: c.notes,
+            extra_props: Vec::new(),
             resource_url: String::new(),
             etag: String::new(),
         };

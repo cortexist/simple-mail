@@ -4100,8 +4100,8 @@ async fn sync_contacts(
 
                 conn.execute(
                     "INSERT OR IGNORE INTO contacts
-                     (id, account_id, name, first_name, last_name, middle_name, prefix, suffix, email, initials, color, phone, mobile, job_title, department, organization, address, birthday, photo_url, is_favorite, rev)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,0,?20)",
+                     (id, account_id, name, first_name, last_name, middle_name, prefix, suffix, email, initials, color, phone, mobile, job_title, department, organization, address, birthday, photo_url, is_favorite, rev, notes, extra_props)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,0,?20,?21,?22)",
                     rusqlite::params![
                         contact_id, account_id, contact.full_name,
                         contact.first_name, contact.last_name, contact.middle_name,
@@ -4114,6 +4114,8 @@ async fn sync_contacts(
                         contact.birthday,
                         contact.photo_url,
                         contact.rev,
+                        contact.notes,
+                        serde_json::to_string(&contact.extra_props).unwrap_or_else(|_| "[]".into()),
                     ],
                 ).ok();
 
@@ -4168,7 +4170,7 @@ async fn sync_contacts(
                     });
 
                     conn.execute(
-                        "UPDATE contacts SET name=?2, email=?3, first_name=?4, last_name=?5, middle_name=?6, prefix=?7, suffix=?8, phone=?9, mobile=?10, job_title=?11, department=?12, organization=?13, address=?14, birthday=?15, photo_url=?16, rev=?17 WHERE id=?1",
+                        "UPDATE contacts SET name=?2, email=?3, first_name=?4, last_name=?5, middle_name=?6, prefix=?7, suffix=?8, phone=?9, mobile=?10, job_title=?11, department=?12, organization=?13, address=?14, birthday=?15, photo_url=?16, rev=?17, notes=?18, extra_props=?19 WHERE id=?1",
                         rusqlite::params![
                             contact_id, contact.full_name, email,
                             contact.first_name, contact.last_name, contact.middle_name,
@@ -4181,6 +4183,8 @@ async fn sync_contacts(
                             contact.birthday,
                             contact.photo_url,
                             contact.rev,
+                            contact.notes,
+                            serde_json::to_string(&contact.extra_props).unwrap_or_else(|_| "[]".into()),
                         ],
                     ).ok();
 
@@ -4721,6 +4725,21 @@ async fn save_contact_entry(
 
     let new_rev = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
 
+    // Properties this app does not model, as last synced: they ride along on the
+    // PUT so a save here never strips them from the server copy.
+    let extra_props: Vec<String> = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT extra_props FROM contacts WHERE id = ?1",
+            rusqlite::params![contact_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+    };
+
     let parsed = carddav_client::ParsedContact {
         uid: uid.clone(),
         full_name: name.clone(),
@@ -4738,6 +4757,8 @@ async fn save_contact_entry(
         birthday: birthday.clone(),
         photo_url: photo_url.clone(),
         rev: Some(new_rev.clone()),
+        notes: notes.clone().filter(|n| !n.trim().is_empty()),
+        extra_props,
         resource_url,
         etag,
     };
