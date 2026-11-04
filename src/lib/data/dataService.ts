@@ -654,6 +654,33 @@ export async function saveAttachment(accountId: string, emailId: string, attachm
   await inv('save_attachment', { accountId, emailId, attachmentIndex, savePath });
 }
 
+/** Parse an .ics attachment for review. Nothing is written to the calendar —
+ *  importing is a separate saveCalendarEvent call the user confirms. */
+export async function previewCalendarAttachment(
+  accountId: string,
+  emailId: string,
+  attachmentIndex: number,
+): Promise<import('$lib/types').CalendarInvite | null> {
+  if (!isTauri()) return null;
+  const inv = await getInvoke();
+  if (!inv) return null;
+  return (await inv('preview_calendar_attachment', { accountId, emailId, attachmentIndex })) as import('$lib/types').CalendarInvite;
+}
+
+/** RSVP to a meeting invitation. Sends an iTIP reply to the organiser the
+ *  moment it is called; returns the address it went to. */
+export async function respondToCalendarInvite(
+  accountId: string,
+  emailId: string,
+  attachmentIndex: number,
+  response: 'accepted' | 'declined' | 'tentative',
+): Promise<string | null> {
+  if (!isTauri()) return null;
+  const inv = await getInvoke();
+  if (!inv) return null;
+  return (await inv('respond_to_calendar_invite', { accountId, emailId, attachmentIndex, response })) as string;
+}
+
 // ── Connection tests ────────────────────────────────────
 
 export async function testImapConnection(settings: MailServerSettings): Promise<void> {

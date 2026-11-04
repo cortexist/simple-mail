@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Email } from '$lib/types';
   import { formatFullDate } from '$lib/utils';
-  import { shouldForceSaveAs } from '$lib/utils/attachments';
+  import { isCalendarAttachment, shouldForceSaveAs } from '$lib/utils/attachments';
   import { ensureReadableTextColors } from '$lib/readableColors';
   import { buildMailDocument, isHtmlDocument, stripStyleBlocks, unwrapHtmlDocument } from '$lib/emailBody';
   import { beginRenderTrace, installRenderTraceConsole, DISABLED_TRACE, type RenderTrace } from '$lib/renderTrace';
@@ -19,6 +19,10 @@
     onFocus?: () => void;
     onOpenAttachment?: (index: number) => void;
     onSaveAttachment?: (index: number, filename: string) => void;
+    /** Show an .ics attachment's contents in-app. Calendar invitations get
+     * this instead of Open: a desktop with no .ics handler can't open them,
+     * and the user wants to read the invitation before importing it. */
+    onPreviewCalendar?: (index: number) => void;
     /** Open a draft's attachment — a local file recorded in its draftData,
      * not a synced MIME part, so it takes a different backend path. */
     onOpenDraftAttachment?: (index: number) => void;
@@ -29,24 +33,35 @@
     onLabelClick?: (label: string) => void;
   }
 
-  let { email, loadingBody = false, bodyFailed = false, darkMode = false, isJunk = false, focused = false, onFocus, onOpenAttachment, onSaveAttachment, onOpenDraftAttachment, showAllHeaders = $bindable(false), multiSelectCount = 0, onLabelClick }: Props = $props();
+  let { email, loadingBody = false, bodyFailed = false, darkMode = false, isJunk = false, focused = false, onFocus, onOpenAttachment, onSaveAttachment, onPreviewCalendar, onOpenDraftAttachment, showAllHeaders = $bindable(false), multiSelectCount = 0, onLabelClick }: Props = $props();
 
   // ── Attachment context menu ──
-  let attachMenu: { x: number; y: number; index: number; filename: string; unsafe: boolean } | null = $state(null);
+  let attachMenu: { x: number; y: number; index: number; filename: string; unsafe: boolean; calendar: boolean } | null = $state(null);
 
   function openAttachMenu(e: MouseEvent, index: number, filename: string, mimeType: string) {
     e.preventDefault();
-    attachMenu = { x: e.clientX, y: e.clientY, index, filename, unsafe: shouldForceSaveAs(filename, mimeType) };
+    attachMenu = {
+      x: e.clientX, y: e.clientY, index, filename,
+      unsafe: shouldForceSaveAs(filename, mimeType),
+      calendar: isCalendarAttachment(filename, mimeType),
+    };
   }
 
   function closeAttachMenu() { attachMenu = null; }
 
   function activateAttachment(index: number, filename: string, mimeType: string) {
-    if (shouldForceSaveAs(filename, mimeType)) {
+    if (isCalendarAttachment(filename, mimeType) && onPreviewCalendar) {
+      onPreviewCalendar(index);
+    } else if (shouldForceSaveAs(filename, mimeType)) {
       onSaveAttachment?.(index, filename);
     } else {
       onOpenAttachment?.(index);
     }
+  }
+
+  function doPreviewAttach() {
+    if (attachMenu) onPreviewCalendar?.(attachMenu.index);
+    closeAttachMenu();
   }
 
   function doOpenAttach() {
@@ -549,9 +564,18 @@
                 onclick={() => activateAttachment(attachment.index, attachment.filename, attachment.mimeType)}
                 oncontextmenu={(e) => openAttachMenu(e, attachment.index, attachment.filename, attachment.mimeType)}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
-                </svg>
+                {#if isCalendarAttachment(attachment.filename, attachment.mimeType)}
+                  <!-- A calendar icon: this chip opens the invitation in-app,
+                       not in whatever the desktop has registered for .ics. -->
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="4.5" width="18" height="16" rx="2" />
+                    <path d="M3 9.5h18M8 2.5v4M16 2.5v4" />
+                  </svg>
+                {:else}
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+                  </svg>
+                {/if}
                 <span class="attachment-name">{attachment.filename}</span>
                 {#if attachment.size > 0}
                   <span class="attachment-size">{formatBytes(attachment.size)}</span>
@@ -586,6 +610,9 @@
 
         {#if attachMenu}
           <div class="attach-context-menu" style="left: {attachMenu.x}px; top: {attachMenu.y}px;">
+            {#if attachMenu.calendar && onPreviewCalendar}
+              <button class="attach-menu-item" onclick={doPreviewAttach}>{t('readingPane.attachPreview')}</button>
+            {/if}
             <button class="attach-menu-item" onclick={doOpenAttach} disabled={attachMenu.unsafe}>{t('readingPane.attachOpen')}</button>
             <button class="attach-menu-item" onclick={doSaveAttach}>{t('readingPane.attachSaveAs')}</button>
           </div>

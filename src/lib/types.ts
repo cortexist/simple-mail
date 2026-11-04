@@ -83,6 +83,9 @@ export interface Email {
   /** Inbox priority bucket (true = Priority, false = Regular). */
   isFocused?: boolean;
   replyTo?: string;
+  /** A reply cannot reach anyone (no-reply address, or a very confident model
+   * verdict). Reply / Reply All are disabled; Forward stays available. */
+  noReply?: boolean;
   messageId?: string;
   /** SPF/DKIM/DMARC authentication results, e.g. "spf=pass dkim=pass dmarc=pass" */
   authResults?: string;
@@ -140,6 +143,33 @@ export interface CalendarEvent {
   alertMinutes?: number;     // minutes before event to alert; 0 = at time; undefined = no alert
 }
 
+/**
+ * A calendar invitation parsed out of an `.ics` attachment, shown for review
+ * before the user decides whether to import it into the calendar.
+ */
+export interface CalendarInvite {
+  /** iCalendar UID, carried into the imported event. */
+  uid: string;
+  /** iTIP METHOD: 'REQUEST' | 'CANCEL' | 'REPLY' | 'PUBLISH' | '' when absent. */
+  method: string;
+  title: string;
+  /** Local-time or UTC ISO string, as written in the invitation. */
+  start: string;
+  end: string;
+  isAllDay: boolean;
+  location?: string;
+  description?: string;
+  organizer?: EventAttendee;
+  attendees: EventAttendee[];
+  recurrence?: EventRecurrence;
+  alertMinutes?: number;
+  /** The zone the organiser wrote the times in, when the file names one.
+   *  `start`/`end` are already converted to UTC; this only labels them. */
+  sourceTzid?: string;
+  /** Attachment filename, so the preview can offer Save As… under it. */
+  filename: string;
+}
+
 export interface CalendarCategory {
   id: string;
   name: string;
@@ -184,6 +214,9 @@ export interface AiConfigView {
   draftModel: string;
   maxTokens: number;
   temperature: number;
+  decisionBaseUrl: string;
+  hasDecisionKey: boolean;
+  decisionModel: string;
 }
 
 /** Global LLM config sent to set_ai_config / test_ai_config. An empty apiKey
@@ -196,6 +229,11 @@ export interface AiConfigInput {
   draftModel: string;
   maxTokens: number;
   temperature: number;
+  /** Decision model (TypeSafe Jev protocol). Empty base URL = unset. */
+  decisionBaseUrl: string;
+  /** Same keep-on-empty contract as apiKey. */
+  decisionApiKey: string;
+  decisionModel: string;
 }
 
 /** Per-account AI feature toggles (all default off). */
@@ -204,6 +242,7 @@ export interface AccountAiFeatures {
   priorityDetect: boolean;
   autoDraft: boolean;
   externalAccess: boolean;
+  replyDetect: boolean;
 }
 
 export interface Account {

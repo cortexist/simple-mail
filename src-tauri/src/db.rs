@@ -336,6 +336,54 @@ mod tests {
     }
 
     #[test]
+    fn calendar_rows_saved_under_a_mailbox_view_are_relinked_to_its_login() {
+        let conn = legacy_db();
+        migrate_extract_logins(&conn);
+
+        // A second mailbox view sharing 'work''s login — the shape that made
+        // the bug visible.
+        conn.execute(
+            "INSERT INTO accounts (id, name, email, initials, color, login_id)
+             VALUES ('view2', 'Shaw', 'shaw@cortexist.com', 'S', '#e74856', 'work')",
+            [],
+        )
+        .unwrap();
+        // One event saved under the view id (wrong), one already under the
+        // login (right, from CalDAV sync).
+        conn.execute(
+            "INSERT INTO calendar_events (id, account_id, title, start, end, color, is_all_day, calendar_id)
+             VALUES ('ev-view', 'view2', 'Interview', '2026-09-24T16:00:00Z', '2026-09-24T17:00:00Z', '#000', 0, 'personal')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO calendar_events (id, account_id, title, start, end, color, is_all_day, calendar_id)
+             VALUES ('ev-login', 'work', 'Standup', '2026-09-24T09:00:00Z', '2026-09-24T09:15:00Z', '#000', 0, 'personal')",
+            [],
+        )
+        .unwrap();
+
+        migrate_relink_calendar_logins(&conn);
+
+        let owner: String = conn
+            .query_row("SELECT account_id FROM calendar_events WHERE id = 'ev-view'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(owner, "work", "the view's event should move to its login");
+
+        // Rows already keyed by login are left where they are, and a second
+        // run changes nothing.
+        migrate_relink_calendar_logins(&conn);
+        let untouched: String = conn
+            .query_row("SELECT account_id FROM calendar_events WHERE id = 'ev-login'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(untouched, "work");
+        let still: String = conn
+            .query_row("SELECT account_id FROM calendar_events WHERE id = 'ev-view'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(still, "work");
+    }
+
+    #[test]
     fn migration_seeds_a_login_per_account_without_moving_data() {
         let conn = legacy_db();
         migrate_extract_logins(&conn);
@@ -454,6 +502,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Add auth_results column to emails (idempotent)
     conn.execute_batch("ALTER TABLE emails ADD COLUMN auth_results TEXT NOT NULL DEFAULT ''").ok();
 
+    // Full header block of each synced message (idempotent) — read by the AI
+    // spam / phishing / replyability judgments. Empty for mail synced before
+    // this column existed.
+    conn.execute_batch("ALTER TABLE emails ADD COLUMN raw_headers TEXT NOT NULL DEFAULT ''").ok();
+
     // Add message_id column to outbox_queue (idempotent) — used to reconcile
     // "sending"-state rows after a crash by searching the Sent folder.
     conn.execute_batch("ALTER TABLE outbox_queue ADD COLUMN message_id TEXT NOT NULL DEFAULT ''").ok();
@@ -495,7 +548,39 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // Give every pre-existing account its own login (one-time, flagged).
     migrate_extract_logins(conn);
 
+    // Re-key calendar rows that were written under a mailbox-view id instead
+    // of its login id. Runs after migrate_extract_logins, which is what
+    // establishes accounts.login_id.
+    migrate_relink_calendar_logins(conn);
+
     Ok(())
+}
+
+/// Re-key calendar rows saved under an account id instead of its login id.
+///
+/// `save_calendar_event` used to write the caller's account id into
+/// `calendar_events.account_id` and the `caldav_*_state` tables, which hold a
+/// **login** id (see the module header). On a login with one mailbox the two
+/// are the same value and nothing showed; on a login with several mailbox
+/// views the rows landed under an id no query reads, so the events saved but
+/// never appeared and their progress spinner never cleared.
+///
+/// Rows are moved to the owning login. Only accounts whose id differs from
+/// their login id can be affected, so the update is a no-op on most installs,
+/// and re-running it changes nothing.
+fn migrate_relink_calendar_logins(conn: &Connection) {
+    for table in ["calendar_events", "caldav_resource_state", "caldav_collection_state"] {
+        conn.execute(
+            &format!(
+                "UPDATE {table}
+                    SET account_id = (SELECT a.login_id FROM accounts a WHERE a.id = {table}.account_id)
+                  WHERE account_id IN (
+                      SELECT id FROM accounts WHERE login_id != '' AND login_id != id
+                  )"
+            ),
+            [],
+        ).ok();
+    }
 }
 
 /// One-time: back-fill `logins` for databases created before logins existed.

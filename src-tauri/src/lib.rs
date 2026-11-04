@@ -16,6 +16,8 @@ mod ai_config;
 mod ai_service;
 mod agent_mcp;
 mod llm_client;
+mod decision_client;
+mod reply_policy;
 mod mail_service;
 mod search_text;
 mod bench;
@@ -167,6 +169,11 @@ pub struct Email {
     pub folder: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub reply_to: String,
+    /// A reply cannot reach anyone: a model said so with very high confidence,
+    /// or, with no model verdict, the reply address is a no-reply pattern
+    /// (reply_policy.rs). The UI disables Reply / Reply All.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_reply: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub message_id: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -462,6 +469,9 @@ struct AiConfigView {
     draft_model: String,
     max_tokens: i32,
     temperature: f64,
+    decision_base_url: String,
+    has_decision_key: bool,
+    decision_model: String,
 }
 
 #[tauri::command]
@@ -476,6 +486,9 @@ fn get_ai_config(state: tauri::State<'_, AppState>) -> Result<AiConfigView, Stri
         draft_model: cfg.draft_model,
         max_tokens: cfg.max_tokens,
         temperature: cfg.temperature,
+        has_decision_key: !cfg.decision_api_key.is_empty(),
+        decision_base_url: cfg.decision_base_url,
+        decision_model: cfg.decision_model,
     })
 }
 
@@ -485,11 +498,11 @@ fn set_ai_config(
     state: tauri::State<'_, AppState>,
     config: ai_config::AiConfig,
 ) -> Result<(), String> {
-    let has_key = {
+    let (has_key, has_decision_key) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         ai_config::save_ai_config(&conn, &config).map_err(|e| e.to_string())?;
         let stored = ai_config::load_ai_config(&conn).map_err(|e| e.to_string())?;
-        !stored.api_key.is_empty()
+        (!stored.api_key.is_empty(), !stored.decision_api_key.is_empty())
     };
     let seq = state.next_seq();
     events::emit_settings_ai_config_changed(&app, events::SettingsAiConfigChangedEvent {
@@ -500,6 +513,9 @@ fn set_ai_config(
         draft_model: config.draft_model.clone(),
         max_tokens: config.max_tokens,
         temperature: config.temperature,
+        decision_base_url: config.decision_base_url.clone(),
+        has_decision_key,
+        decision_model: config.decision_model.clone(),
         seq,
     });
     Ok(())
@@ -533,6 +549,28 @@ async fn test_ai_config(
     Ok(reply.trim().to_string())
 }
 
+/// Ask the decision model one trivial question to verify the endpoint answers
+/// the `/systemone` protocol. Returns a one-line description of the answer. A
+/// masked (empty) key falls back to the stored one, as in `test_ai_config`.
+#[tauri::command]
+async fn test_decision_config(
+    state: tauri::State<'_, AppState>,
+    config: ai_config::AiConfig,
+) -> Result<String, String> {
+    let mut cfg = config;
+    if cfg.decision_api_key.is_empty() {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        cfg.decision_api_key = ai_config::load_ai_config(&conn).map_err(|e| e.to_string())?.decision_api_key;
+    }
+    let client = decision_client::DecisionClient::new(&cfg.decision_base_url, &cfg.decision_api_key, &cfg.decision_model)?;
+    let questions = std::collections::HashMap::from([(
+        "greeting".to_string(),
+        decision_client::Question::noul("Is `text` a greeting?", "A greeting.", "Not a greeting."),
+    )]);
+    let p = client.ask_nouls(&serde_json::json!({ "text": "Hello there!" }), &questions).await?;
+    Ok(format!("P(greeting) = {:.2}", p.get("greeting").copied().unwrap_or_default()))
+}
+
 #[tauri::command]
 fn get_account_ai_features(
     state: tauri::State<'_, AppState>,
@@ -560,6 +598,7 @@ fn set_account_ai_features(
         priority_detect: features.priority_detect,
         auto_draft: features.auto_draft,
         external_access: features.external_access,
+        reply_detect: features.reply_detect,
         seq,
     });
     Ok(())
@@ -2111,8 +2150,8 @@ async fn sync_mail(
                     "INSERT OR IGNORE INTO emails
                      (id, account_id, from_name, from_email, from_initials, from_color,
                       subject, preview, body, date, is_read, is_starred, is_replied, has_attachment, folder, is_pinned,
-                      reply_to, message_id, auth_results, delivered_to)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,0,?16,?17,?18,?19)",
+                      reply_to, message_id, auth_results, delivered_to, raw_headers)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,0,?16,?17,?18,?19,?20)",
                     rusqlite::params![
                         email_id, account_id,
                         env.from_name, env.from_email, initials, color,
@@ -2127,6 +2166,7 @@ async fn sync_mail(
                         // "don't hide", but a known-and-unmatched address as
                         // "not mine". Conflating them would hide mail.
                         Some(env.delivered_to.as_str()).filter(|s| !s.is_empty()),
+                        env.raw_headers,
                     ],
                 ).ok();
 
@@ -2347,6 +2387,13 @@ async fn sync_mail(
                 Ok(n) if n > 0 => log::info!("ai classify [{}]: applied {} verdict(s)", acct, n),
                 Ok(_) => {}
                 Err(e) => log::error!("ai classify [{}] failed: {}", acct, e),
+            }
+            // Gated inside on ai_config + the account's reply_detect toggle.
+            // A failure leaves the address pattern in charge of that mail.
+            match ai_service::judge_replyability(&db, &app_for_ai, &acct).await {
+                Ok(n) if n > 0 => log::info!("ai replyability [{}]: {} verdict(s) differ from the pattern", acct, n),
+                Ok(_) => {}
+                Err(e) => log::error!("ai replyability [{}] failed: {}", acct, e),
             }
         });
     }
@@ -2720,16 +2767,18 @@ async fn fetch_email_body(
     // Need to fetch from IMAP
     let (settings, uid, imap_folder) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
+        let login = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+        let settings = sync_state::load_mail_settings(&conn, &login)
             .map_err(|e| e.to_string())?
             .ok_or("No mail settings")?;
 
-        // Find the UID for this email
+        // Find the UID for this email. `imap_uid_map.account_id` holds a
+        // login id, not an account id — see the `db` module header.
         let row: Option<(u32, String)> = conn
             .query_row(
                 "SELECT m.uid, e.folder FROM imap_uid_map m JOIN emails e ON e.id = m.email_id
                  WHERE m.email_id = ?1 AND m.account_id = ?2",
-                rusqlite::params![email_id, account_id],
+                rusqlite::params![email_id, login.as_str()],
                 |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?)),
             )
             .ok();
@@ -3006,29 +3055,47 @@ async fn fetch_previews_around(
     result
 }
 
-// ── Open attachment ─────────────────────────────────────
+// ── Attachments ─────────────────────────────────────────
 
-#[tauri::command]
-async fn open_attachment(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    account_id: String,
-    email_id: String,
+/// Strip any directory component from a MIME `filename` parameter.
+///
+/// The value comes from the sender, so `../` or an absolute path in it would
+/// otherwise steer our temp-file write outside the per-email directory.
+fn sanitize_attachment_filename(filename: &str) -> String {
+    let base = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches('.');
+    if base.is_empty() { "attachment".to_string() } else { base.to_string() }
+}
+
+/// Fetch one attachment's bytes from the server.
+///
+/// `imap_uid_map.account_id` holds a **login id** (see the `db` module
+/// header), and several mailbox views can share one login. The caller's
+/// account id is therefore resolved to its login before the UID lookup —
+/// matching on the raw account id made every attachment on a shared-login
+/// mailbox fail with "Email UID not found".
+async fn load_attachment_bytes(
+    state: &tauri::State<'_, AppState>,
+    account_id: &str,
+    email_id: &str,
     attachment_index: usize,
-) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-
-    // Resolve UID + IMAP folder from DB
+) -> Result<(String, Vec<u8>), String> {
+    // Resolve settings + UID + IMAP folder from DB
     let (settings, uid, imap_folder) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
+        let login = login::resolve(&conn, account_id).map_err(|e| e.to_string())?;
+        let settings = sync_state::load_mail_settings(&conn, &login)
             .map_err(|e| e.to_string())?
             .ok_or("No mail settings")?;
         let row: Option<(u32, String)> = conn
             .query_row(
                 "SELECT m.uid, e.folder FROM imap_uid_map m JOIN emails e ON e.id = m.email_id
                  WHERE m.email_id = ?1 AND m.account_id = ?2",
-                rusqlite::params![email_id, account_id],
+                rusqlite::params![email_id, login.as_str()],
                 |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?)),
             )
             .ok();
@@ -3054,19 +3121,34 @@ async fn open_attachment(
         .map_err(|e| format!("Body fetch failed: {:#}", e))?;
     session.logout().await.ok();
 
-    // Extract the requested attachment bytes
-    let (filename, bytes) = imap_client::extract_attachment_bytes(&raw, attachment_index)
-        .ok_or_else(|| format!("Attachment index {} not found", attachment_index))?;
+    imap_client::extract_attachment_bytes(&raw, attachment_index)
+        .ok_or_else(|| format!("Attachment index {} not found", attachment_index))
+}
+
+#[tauri::command]
+async fn open_attachment(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    email_id: String,
+    attachment_index: usize,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let (filename, bytes) = load_attachment_bytes(&state, &account_id, &email_id, attachment_index).await?;
 
     // Write to a per-email temp directory so different attachments don't collide
     let tmp_dir = std::env::temp_dir().join("mail_attachments").join(&email_id);
     std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
-    let tmp_path = tmp_dir.join(&filename);
+    let tmp_path = tmp_dir.join(sanitize_attachment_filename(&filename));
     std::fs::write(&tmp_path, &bytes).map_err(|e| e.to_string())?;
 
+    // A missing handler surfaces here as an opaque opener error — name the
+    // file so the user knows which one the desktop couldn't open, and that
+    // Save As is the way out.
     app.opener()
         .open_path(tmp_path.to_string_lossy().as_ref(), None::<&str>)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("No application is registered to open \"{}\" ({}). Use Save As… instead.", filename, e))?;
 
     Ok(())
 }
@@ -3123,50 +3205,201 @@ async fn save_attachment(
     attachment_index: usize,
     save_path: String,
 ) -> Result<(), String> {
-    // Resolve UID + IMAP folder from DB
-    let (settings, uid, imap_folder) = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?
-            .ok_or("No mail settings")?;
-        let row: Option<(u32, String)> = conn
-            .query_row(
-                "SELECT m.uid, e.folder FROM imap_uid_map m JOIN emails e ON e.id = m.email_id
-                 WHERE m.email_id = ?1 AND m.account_id = ?2",
-                rusqlite::params![email_id, account_id],
-                |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?)),
-            )
-            .ok();
-        let (uid, folder) = row.ok_or("Email UID not found")?;
-        (settings, uid, folder)
-    };
-
-    // Connect and fetch raw MIME
-    let mut session = imap_client::connect(&settings)
-        .await
-        .map_err(|e| format!("IMAP connect failed: {:#}", e))?;
-
-    let remote_folders = imap_client::list_folders(&mut session)
-        .await
-        .map_err(|e| e.to_string())?;
-    let imap_name = remote_folders.iter()
-        .find(|(_, mapped)| *mapped == imap_folder)
-        .map(|(name, _)| name.clone())
-        .unwrap_or_else(|| imap_folder.clone());
-
-    let raw = imap_client::fetch_raw(&mut session, &imap_name, uid)
-        .await
-        .map_err(|e| format!("Body fetch failed: {:#}", e))?;
-    session.logout().await.ok();
-
-    // Extract the requested attachment bytes
-    let (_filename, bytes) = imap_client::extract_attachment_bytes(&raw, attachment_index)
-        .ok_or_else(|| format!("Attachment index {} not found", attachment_index))?;
+    let (_filename, bytes) = load_attachment_bytes(&state, &account_id, &email_id, attachment_index).await?;
 
     // Write to the user-specified path
     std::fs::write(&save_path, &bytes).map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+// ── Calendar invitations (.ics attachments) ─────────────
+
+/// A calendar invitation parsed out of an `.ics` attachment, shown in the
+/// reading pane so the user can read it before deciding to import it.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarInvite {
+    /// iCalendar UID — carried into the imported event so a later update
+    /// from the same organizer lands on the same event.
+    pub uid: String,
+    /// iTIP METHOD: "REQUEST", "CANCEL", "REPLY", "PUBLISH", or "" when absent.
+    pub method: String,
+    pub title: String,
+    pub start: String,
+    pub end: String,
+    pub is_all_day: bool,
+    pub location: Option<String>,
+    pub description: Option<String>,
+    pub organizer: Option<EventAttendee>,
+    pub attendees: Vec<EventAttendee>,
+    pub recurrence: Option<RecurrenceParam>,
+    pub alert_minutes: Option<i32>,
+    /// The zone the organiser wrote the times in, when the file names one.
+    /// `start`/`end` are already converted; this is shown so a reader can see
+    /// the times are not the organiser's wall clock.
+    pub source_tzid: Option<String>,
+    /// Attachment filename, so the preview can offer "Save As…" under it.
+    pub filename: String,
+}
+
+/// Read the iTIP `METHOD` property from raw iCalendar text.
+fn ical_method(ical: &str) -> String {
+    for line in ical.lines() {
+        // METHOD is a top-level property; it carries no parameters in practice.
+        if let Some(rest) = line.trim().strip_prefix("METHOD:") {
+            return rest.trim().to_uppercase();
+        }
+    }
+    String::new()
+}
+
+/// Read the `SEQUENCE` of the invitation, which a reply must echo back.
+/// Absent means 0, per RFC 5545.
+fn ical_sequence(ical: &str) -> u32 {
+    for line in ical.lines() {
+        if let Some(rest) = line.trim().strip_prefix("SEQUENCE:") {
+            return rest.trim().parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+fn invite_attendee(name: &str, email: &str, role: &str) -> EventAttendee {
+    EventAttendee {
+        name: if name.is_empty() { email.to_string() } else { name.to_string() },
+        email: email.to_string(),
+        initials: make_initials(name, email),
+        color: make_avatar_color(email),
+        role: role.to_string(),
+    }
+}
+
+/// Parse raw iCalendar text into a previewable invitation.
+fn build_calendar_invite(ical: &str, filename: String) -> Result<CalendarInvite, String> {
+    let event = caldav_client::parse_ical_event_public(ical, "", "")
+        .ok_or("This attachment has no readable calendar event in it.")?;
+
+    let mut recurrence = event.rrule.as_deref().and_then(parse_rrule_to_recurrence);
+    if let (Some(rec), Some(exdates)) = (recurrence.as_mut(), event.exdates.clone()) {
+        if !exdates.is_empty() { rec.exdates = Some(exdates); }
+    }
+
+    Ok(CalendarInvite {
+        uid: event.uid,
+        method: ical_method(ical),
+        title: event.summary,
+        start: event.dtstart,
+        end: event.dtend,
+        is_all_day: event.is_all_day,
+        location: event.location,
+        description: event.description,
+        organizer: event.organizer.as_ref().map(|(name, email)| invite_attendee(name, email, "required")),
+        attendees: event.attendees.iter()
+            .map(|(name, email, role)| invite_attendee(name, email, role))
+            .collect(),
+        recurrence,
+        alert_minutes: event.alert_minutes,
+        source_tzid: event.source_tzid,
+        filename,
+    })
+}
+
+/// Parse an `.ics` attachment into a previewable invitation.
+///
+/// Nothing is written to the calendar here — the frontend shows the result
+/// and the user decides whether to import it via `save_calendar_event`.
+#[tauri::command]
+async fn preview_calendar_attachment(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    email_id: String,
+    attachment_index: usize,
+) -> Result<CalendarInvite, String> {
+    let (filename, bytes) = load_attachment_bytes(&state, &account_id, &email_id, attachment_index).await?;
+    build_calendar_invite(&String::from_utf8_lossy(&bytes), filename)
+}
+
+/// RSVP to a meeting invitation: mail the organiser an iTIP reply.
+///
+/// `response` is "accepted", "declined" or "tentative". Returns the address
+/// the reply went to, so the UI can say who was told.
+///
+/// This sends mail the moment it is called — the confirmation is the user
+/// clicking Accept/Decline/Tentative in the invitation preview.
+#[tauri::command]
+async fn respond_to_calendar_invite(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+    email_id: String,
+    attachment_index: usize,
+    response: String,
+) -> Result<String, String> {
+    let (partstat, verb) = match response.to_lowercase().as_str() {
+        "accepted" => ("ACCEPTED", "Accepted"),
+        "declined" => ("DECLINED", "Declined"),
+        "tentative" => ("TENTATIVE", "Tentatively accepted"),
+        other => return Err(format!("Unknown response \"{}\"", other)),
+    };
+
+    let (_filename, bytes) = load_attachment_bytes(&state, &account_id, &email_id, attachment_index).await?;
+    let ical = String::from_utf8_lossy(&bytes).to_string();
+
+    let event = caldav_client::parse_ical_event_public(&ical, "", "")
+        .ok_or("This attachment has no readable calendar event in it.")?;
+    let (_organizer_name, organizer_email) = event.organizer.clone()
+        .ok_or("This invitation names no organiser to reply to.")?;
+
+    // Who is replying: the mailbox this invitation was read in.
+    let (settings, my_email, my_name, my_alias) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let settings = sync_state::load_mail_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?
+            .ok_or("No mail settings")?;
+        let (name, email, alias): (String, String, String) = conn
+            .query_row(
+                "SELECT name, email, alias FROM accounts WHERE id = ?1",
+                rusqlite::params![account_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2).unwrap_or_default())),
+            )
+            .map_err(|e| e.to_string())?;
+        (settings, email, name, alias)
+    };
+
+    // Prefer the ATTENDEE entry the organiser addressed to us: replying under
+    // the exact address and CN they invited is what lets their calendar match
+    // the answer to the right row.
+    let mine = event.attendees.iter().find(|(_, email, _)| {
+        email.eq_ignore_ascii_case(&my_email) || (!my_alias.is_empty() && email.eq_ignore_ascii_case(&my_alias))
+    });
+    if mine.is_none() {
+        log::warn!(
+            "RSVP [{}]: {} is not listed as an attendee; replying under it anyway",
+            email_id, my_email
+        );
+    }
+    let (reply_name, reply_email) = match mine {
+        Some((name, email, _)) => (name.clone(), email.clone()),
+        None => (my_name.clone(), my_email.clone()),
+    };
+
+    let reply_ics = caldav_client::build_imip_reply(
+        &event, ical_sequence(&ical), &reply_name, &reply_email, partstat,
+    );
+    let subject = format!("{}: {}", verb, event.summary);
+    let html_body = format!(
+        "<p>{} <strong>{}</strong>.</p>",
+        verb.to_lowercase(), event.summary
+    );
+
+    smtp_client::send_invitation_reply(
+        &settings, &reply_email, &reply_name, &organizer_email, &subject, &html_body, &reply_ics,
+    )
+    .await
+    .map_err(|e| format!("Couldn't send the reply: {:#}", e))?;
+
+    log::info!("RSVP [{}]: {} sent to {}", email_id, partstat, organizer_email);
+    Ok(organizer_email)
 }
 
 // ── SMTP send command ───────────────────────────────────
@@ -3555,6 +3788,7 @@ async fn sync_calendars(
                     rrule: None,
                     exdates: None,
                     alert_minutes: None,
+                    source_tzid: None,
                     resource_url: String::new(), // new resource
                     etag: String::new(),
                 };
@@ -4316,10 +4550,19 @@ async fn save_calendar_event(
     let event_account_id = account_id.clone();
     let result: Result<String, String> = async {
     // Load CalDAV settings (optional — events can be saved locally without CalDAV)
-    let dav_settings = {
+    //
+    // `calendar_events` and the `caldav_*_state` tables are keyed by **login**,
+    // not by mailbox view (see the `db` module header). Resolve once here and
+    // use it for every one of them: writing the caller's account id into those
+    // columns hides the row from `query_events`, which reads by login — the
+    // event saves, nothing displays it, and the echo that clears the progress
+    // spinner never fires. `account_id` still addresses the `accounts` table
+    // and the echo, which the frontend matches against its own account id.
+    let (dav_settings, login_id) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        sync_state::load_caldav_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?
+        let login = login::resolve(&conn, &account_id).map_err(|e| e.to_string())?;
+        let settings = sync_state::load_caldav_settings(&conn, &login).map_err(|e| e.to_string())?;
+        (settings, login.as_str().to_string())
     };
 
     // Look up existing resource_url + etag + uid (if updating an existing event)
@@ -4327,7 +4570,7 @@ async fn save_calendar_event(
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT rs.resource_url, rs.etag, rs.uid FROM caldav_resource_state rs WHERE rs.account_id = ?1 AND rs.event_id = ?2",
-            rusqlite::params![account_id, event_id],
+            rusqlite::params![login_id, event_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).ok()
     };
@@ -4382,6 +4625,7 @@ async fn save_calendar_event(
                 rrule: rrule_str.clone(),
                 exdates: exdates_vec.clone(),
                 alert_minutes,
+                source_tzid: None,
                 resource_url,
                 etag,
             };
@@ -4407,14 +4651,14 @@ async fn save_calendar_event(
             // Look up calendar color from caldav_collection_state (single source of truth)
             let color: String = conn.query_row(
                 "SELECT color FROM caldav_collection_state WHERE account_id = ?1 AND collection_url = ?2",
-                rusqlite::params![account_id, calendar_id],
+                rusqlite::params![login_id, calendar_id],
                 |row| row.get(0),
             ).unwrap_or_else(|_| "#0078d4".to_string());
 
             conn.execute(
                 "INSERT INTO calendar_events (id, account_id, title, start, end, color, location, description, is_all_day, calendar_id, is_online_meeting, meeting_url, rrule, exdates, alert_minutes)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
-                rusqlite::params![local_id, account_id, title, start, end, color, location, description, is_all_day as i32, calendar_id, is_online_meeting as i32, meeting_url, rrule_str, exdates_str, alert_minutes],
+                rusqlite::params![local_id, login_id, title, start, end, color, location, description, is_all_day as i32, calendar_id, is_online_meeting as i32, meeting_url, rrule_str, exdates_str, alert_minutes],
             ).map_err(|e| e.to_string())?;
 
             // Insert attendees
@@ -4437,7 +4681,7 @@ async fn save_calendar_event(
             conn.execute(
                 "INSERT OR REPLACE INTO caldav_resource_state (account_id, collection_url, resource_url, etag, event_id, uid)
                  VALUES (?1,?2,?3,?4,?5,?6)",
-                rusqlite::params![account_id, calendar_id, res_url, etag_val, local_id, uid],
+                rusqlite::params![login_id, calendar_id, res_url, etag_val, local_id, uid],
             ).map_err(|e| e.to_string())?;
 
             local_id
@@ -4461,7 +4705,7 @@ async fn save_calendar_event(
             if let Some(etag) = caldav_etag {
                 conn.execute(
                     "UPDATE caldav_resource_state SET etag = ?3 WHERE account_id = ?1 AND event_id = ?2",
-                    rusqlite::params![account_id, event_id, etag],
+                    rusqlite::params![login_id, event_id, etag],
                 ).map_err(|e| e.to_string())?;
             }
             event_id.clone()
@@ -4500,6 +4744,7 @@ async fn save_calendar_event(
                 rrule: rrule_str.clone(),
                 exdates: exdates_vec.clone(),
                 alert_minutes,
+                source_tzid: None,
                 resource_url: String::new(),
                 etag: String::new(),
             };
@@ -4560,6 +4805,11 @@ async fn delete_calendar_event(
     let event_event_id = event_id.clone();
     let result: Result<(), String> = async {
     // Attempt CalDAV server delete if settings + resource state are available (non-fatal)
+    // `caldav_resource_state` is keyed by login, not by mailbox view.
+    let login_id = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        login::resolve(&conn, &account_id).map_err(|e| e.to_string())?.as_str().to_string()
+    };
     let caldav_info: Option<(sync_state::DavSettings, String, String)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let settings = sync_state::load_caldav_settings(&conn, &login::resolve(&conn, &account_id).map_err(|e| e.to_string())?)
@@ -4568,7 +4818,7 @@ async fn delete_calendar_event(
         let resource = settings.as_ref().and_then(|_| {
             conn.query_row(
                 "SELECT resource_url, etag FROM caldav_resource_state WHERE account_id = ?1 AND event_id = ?2",
-                rusqlite::params![account_id, event_id],
+                rusqlite::params![login_id, event_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             ).ok()
         });
@@ -4594,7 +4844,7 @@ async fn delete_calendar_event(
         conn.execute("DELETE FROM calendar_events WHERE id = ?1", rusqlite::params![event_id]).ok();
         conn.execute(
             "DELETE FROM caldav_resource_state WHERE account_id = ?1 AND event_id = ?2",
-            rusqlite::params![account_id, event_id],
+            rusqlite::params![login_id, event_id],
         ).ok();
     }
 
@@ -5355,6 +5605,7 @@ fn query_emails(conn: &Connection, view: &login::View) -> Vec<Email> {
     let mut recipients_by_email = query_recipients_for(conn, &in_view, params.as_slice());
     let mut attachments_by_email = query_attachments_for(conn, &in_view, params.as_slice());
     let mut labels_by_email = query_user_labels_for(conn, &in_view, params.as_slice());
+    let reply_verdicts = query_reply_verdicts_for(conn, &in_view, params.as_slice());
 
     // `body` is read to derive `search_text` and is not sent. The frontend only
     // ever used it at load time as the raw material for exactly this text, and
@@ -5388,6 +5639,10 @@ fn query_emails(conn: &Connection, view: &login::View) -> Vec<Email> {
         let attachments = attachments_by_email.remove(&id).unwrap_or_default();
         let labels = labels_by_email.remove(&id).unwrap_or_default();
         let search_text = search_text::build(&body);
+        let no_reply = reply_verdicts
+            .get(&id)
+            .copied()
+            .unwrap_or_else(|| reply_policy::pattern_says_no_reply(&fe, &reply_to));
         Email {
             id,
             from: Contact { name: imap_client::decode_mime_header(&fn_), email: fe, initials: fi, color: fc, photo_url },
@@ -5408,6 +5663,7 @@ fn query_emails(conn: &Connection, view: &login::View) -> Vec<Email> {
             attachments,
             folder,
             reply_to,
+            no_reply,
             message_id,
             auth_results,
             labels,
@@ -5488,6 +5744,21 @@ fn query_attachments_for(
 
 /// User-visible labels for every message matching `in_view`, sorted per id.
 /// Internal IMAP / Gmail markers are dropped and the leading `\\` stripped for display.
+/// Stored model replyability verdicts (`no_reply`) for every message matching
+/// `in_view`. A message absent here has no model verdict.
+fn query_reply_verdicts_for(
+    conn: &Connection,
+    in_view: &str,
+    params: &[&dyn rusqlite::ToSql],
+) -> std::collections::HashMap<String, bool> {
+    let sql = format!("SELECT email_id, no_reply FROM email_reply_verdict WHERE email_id IN {in_view}");
+    let Ok(mut stmt) = conn.prepare(&sql) else { return Default::default() };
+    let Ok(rows) = stmt.query_map(params, |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)? != 0))) else {
+        return Default::default();
+    };
+    rows.filter_map(|r| r.ok()).collect()
+}
+
 fn query_user_labels_for(
     conn: &Connection,
     in_view: &str,
@@ -6483,6 +6754,8 @@ pub fn run() {
             open_attachment,
             open_draft_attachment,
             save_attachment,
+            preview_calendar_attachment,
+            respond_to_calendar_invite,
             send_email,
             flush_outbox,
             discover_mail_settings,
@@ -6523,6 +6796,7 @@ pub fn run() {
             get_ai_config,
             set_ai_config,
             test_ai_config,
+            test_decision_config,
             get_account_ai_features,
             set_account_ai_features,
             classify_inbox,
@@ -6530,4 +6804,270 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An Outlook meeting request, trimmed to the properties the preview reads.
+    const OUTLOOK_INVITE: &str = "BEGIN:VCALENDAR\r\n\
+METHOD:REQUEST\r\n\
+PRODID:Microsoft Exchange Server 2010\r\n\
+VERSION:2.0\r\n\
+BEGIN:VEVENT\r\n\
+ORGANIZER;CN=Alex Rivera:mailto:organizer@partner.example\r\n\
+ATTENDEE;ROLE=REQ-PARTICIPANT;CN=Shaw Tan:mailto:attendee@consult.example\r\n\
+ATTENDEE;ROLE=OPT-PARTICIPANT;CN=Sam Patel:mailto:optional@partner.example\r\n\
+DESCRIPTION:Planning call\r\n\
+UID:040000008200E00074C5B7101A82E00800000000\r\n\
+SUMMARY:Quarterly Planning Review\r\n\
+DTSTART;TZID=SE Asia Standard Time:20260916T140000\r\n\
+DTEND;TZID=SE Asia Standard Time:20260916T150000\r\n\
+LOCATION:Microsoft Teams Meeting\r\n\
+BEGIN:VALARM\r\n\
+TRIGGER:-PT15M\r\n\
+ACTION:DISPLAY\r\n\
+END:VALARM\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+    #[test]
+    fn previews_an_outlook_meeting_request() {
+        let invite = build_calendar_invite(OUTLOOK_INVITE, "calendar.ics".into()).unwrap();
+
+        assert_eq!(invite.method, "REQUEST");
+        assert_eq!(invite.title, "Quarterly Planning Review");
+        assert_eq!(invite.start, "2026-09-16T14:00:00");
+        assert_eq!(invite.end, "2026-09-16T15:00:00");
+        assert!(!invite.is_all_day);
+        assert_eq!(invite.location.as_deref(), Some("Microsoft Teams Meeting"));
+        assert_eq!(invite.alert_minutes, Some(15));
+        assert!(invite.recurrence.is_none());
+
+        let organizer = invite.organizer.expect("organizer");
+        assert_eq!(organizer.email, "organizer@partner.example");
+        assert_eq!(organizer.initials, "AR");
+
+        assert_eq!(invite.attendees.len(), 2);
+        assert_eq!(invite.attendees[0].role, "required");
+        assert_eq!(invite.attendees[1].role, "optional");
+    }
+
+    /// The same request as Outlook actually sends it: times in the organiser's
+    /// zone, with a VTIMEZONE block defining that zone's offsets.
+    fn eastern_invite(dtstart: &str, dtend: &str) -> String {
+        format!("BEGIN:VCALENDAR\r\n\
+METHOD:REQUEST\r\n\
+PRODID:Microsoft Exchange Server 2010\r\n\
+VERSION:2.0\r\n\
+BEGIN:VTIMEZONE\r\n\
+TZID:Eastern Standard Time\r\n\
+BEGIN:STANDARD\r\n\
+DTSTART:16011101T020000\r\n\
+TZOFFSETFROM:-0400\r\n\
+TZOFFSETTO:-0500\r\n\
+RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=1SU;BYMONTH=11\r\n\
+END:STANDARD\r\n\
+BEGIN:DAYLIGHT\r\n\
+DTSTART:16010308T020000\r\n\
+TZOFFSETFROM:-0500\r\n\
+TZOFFSETTO:-0400\r\n\
+RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=2SU;BYMONTH=3\r\n\
+END:DAYLIGHT\r\n\
+END:VTIMEZONE\r\n\
+BEGIN:VEVENT\r\n\
+UID:040000008200E00074C5B7101A82E008\r\n\
+SUMMARY:Planning Review\r\n\
+DTSTART;TZID=Eastern Standard Time:{dtstart}\r\n\
+DTEND;TZID=Eastern Standard Time:{dtend}\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n")
+    }
+
+    #[test]
+    fn eastern_daylight_time_is_converted_to_utc() {
+        // 16 September is between the second Sunday of March and the first
+        // Sunday of November, so the zone is on EDT (UTC-4): 2 PM → 18:00Z.
+        let invite = build_calendar_invite(&eastern_invite("20260916T140000", "20260916T150000"), "calendar.ics".into()).unwrap();
+
+        assert_eq!(invite.start, "2026-09-16T18:00:00Z");
+        assert_eq!(invite.end, "2026-09-16T19:00:00Z");
+        assert_eq!(invite.source_tzid.as_deref(), Some("Eastern Standard Time"));
+    }
+
+    #[test]
+    fn eastern_standard_time_is_converted_to_utc() {
+        // January is outside daylight saving, so the zone is on EST (UTC-5).
+        let invite = build_calendar_invite(&eastern_invite("20260115T140000", "20260115T150000"), "calendar.ics".into()).unwrap();
+
+        assert_eq!(invite.start, "2026-01-15T19:00:00Z");
+        assert_eq!(invite.end, "2026-01-15T20:00:00Z");
+    }
+
+    #[test]
+    fn a_time_just_after_the_spring_switch_uses_the_new_offset() {
+        // The second Sunday of March 2026 is the 8th; 3 AM that day is already EDT.
+        let invite = build_calendar_invite(&eastern_invite("20260308T030000", "20260308T040000"), "calendar.ics".into()).unwrap();
+
+        assert_eq!(invite.start, "2026-03-08T07:00:00Z");
+    }
+
+    #[test]
+    fn a_time_just_before_the_spring_switch_uses_the_old_offset() {
+        let invite = build_calendar_invite(&eastern_invite("20260308T010000", "20260308T020000"), "calendar.ics".into()).unwrap();
+
+        assert_eq!(invite.start, "2026-03-08T06:00:00Z");
+    }
+
+    #[test]
+    fn southern_hemisphere_daylight_saving_spans_new_year() {
+        // Sydney: daylight from the first Sunday of October to the first
+        // Sunday of April, so January is on UTC+11, not the +10 standard.
+        let ical = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VTIMEZONE\r\n\
+TZID:AUS Eastern Standard Time\r\n\
+BEGIN:STANDARD\r\n\
+DTSTART:16010405T030000\r\n\
+TZOFFSETFROM:+1100\r\n\
+TZOFFSETTO:+1000\r\n\
+RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=1SU;BYMONTH=4\r\n\
+END:STANDARD\r\n\
+BEGIN:DAYLIGHT\r\n\
+DTSTART:16011004T020000\r\n\
+TZOFFSETFROM:+1000\r\n\
+TZOFFSETTO:+1100\r\n\
+RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=1SU;BYMONTH=10\r\n\
+END:DAYLIGHT\r\n\
+END:VTIMEZONE\r\n\
+BEGIN:VEVENT\r\n\
+UID:syd-1\r\n\
+SUMMARY:Sydney standup\r\n\
+DTSTART;TZID=\"AUS Eastern Standard Time\":20260115T090000\r\n\
+DTEND;TZID=\"AUS Eastern Standard Time\":20260115T093000\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+        let invite = build_calendar_invite(ical, "calendar.ics".into()).unwrap();
+
+        assert_eq!(invite.start, "2026-01-14T22:00:00Z");
+        // A quoted TZID parameter resolves the same as a bare one.
+        assert_eq!(invite.source_tzid.as_deref(), Some("AUS Eastern Standard Time"));
+    }
+
+    #[test]
+    fn a_utc_start_is_left_alone() {
+        let ical = OUTLOOK_INVITE.replace(
+            "DTSTART;TZID=SE Asia Standard Time:20260916T140000",
+            "DTSTART:20260916T140000Z",
+        );
+        let invite = build_calendar_invite(&ical, "calendar.ics".into()).unwrap();
+
+        assert_eq!(invite.start, "2026-09-16T14:00:00Z");
+        assert_eq!(invite.source_tzid, None);
+    }
+
+    #[test]
+    fn a_tzid_with_no_vtimezone_stays_a_wall_clock_reading() {
+        // OUTLOOK_INVITE names a zone but ships no VTIMEZONE to resolve it.
+        // Inventing an offset would be worse than showing the time as written.
+        let invite = build_calendar_invite(OUTLOOK_INVITE, "calendar.ics".into()).unwrap();
+
+        assert_eq!(invite.start, "2026-09-16T14:00:00");
+        assert_eq!(invite.source_tzid.as_deref(), Some("SE Asia Standard Time"));
+    }
+
+    #[test]
+    fn an_all_day_date_stays_floating() {
+        let ical = OUTLOOK_INVITE
+            .replace("DTSTART;TZID=SE Asia Standard Time:20260916T140000", "DTSTART;VALUE=DATE:20260916")
+            .replace("DTEND;TZID=SE Asia Standard Time:20260916T150000", "DTEND;VALUE=DATE:20260917");
+        let invite = build_calendar_invite(&ical, "calendar.ics".into()).unwrap();
+
+        assert!(invite.is_all_day);
+        assert_eq!(invite.start, "2026-09-16T00:00:00");
+    }
+
+    #[test]
+    fn recurring_invite_carries_its_rule() {
+        let ical = OUTLOOK_INVITE.replace(
+            "SUMMARY:",
+            "RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=WE\r\nSUMMARY:",
+        );
+        let recurrence = build_calendar_invite(&ical, "calendar.ics".into())
+            .unwrap()
+            .recurrence
+            .expect("recurrence");
+
+        assert_eq!(recurrence.freq, "weekly");
+        assert_eq!(recurrence.interval, 1);
+    }
+
+    #[test]
+    fn an_rsvp_carries_the_single_replying_attendee() {
+        let ical = eastern_invite("20260916T140000", "20260916T150000").replace(
+            "SUMMARY:Planning Review\r\n",
+            "SEQUENCE:3\r\n\
+ORGANIZER;CN=Jordan Lee:mailto:organizer@client.example\r\n\
+ATTENDEE;ROLE=REQ-PARTICIPANT;CN=Shaw Tan:mailto:attendee@consult.example\r\n\
+ATTENDEE;ROLE=REQ-PARTICIPANT;CN=Casey:mailto:colleague@client.example\r\n\
+SUMMARY:Planning Review\r\n",
+        );
+        let event = caldav_client::parse_ical_event_public(&ical, "", "").unwrap();
+
+        let reply = caldav_client::build_imip_reply(
+            &event, ical_sequence(&ical), "Shaw Tan", "attendee@consult.example", "ACCEPTED",
+        );
+
+        assert!(reply.contains("METHOD:REPLY"));
+        assert!(reply.contains("UID:040000008200E00074C5B7101A82E008"));
+        // The organiser matches a reply to a meeting by UID *and* SEQUENCE.
+        assert!(reply.contains("SEQUENCE:3"));
+        assert!(reply.contains("ORGANIZER;CN=Jordan Lee:mailto:organizer@client.example"));
+        assert!(reply.contains("ATTENDEE;CN=Shaw Tan;PARTSTAT=ACCEPTED:mailto:attendee@consult.example"));
+        // Only the replying attendee belongs in a reply — never the whole list.
+        assert_eq!(reply.matches("ATTENDEE").count(), 1);
+        assert!(!reply.contains("colleague@client.example"));
+        // Times echo back in UTC, so the organiser needs no VTIMEZONE to read them.
+        assert!(reply.contains("DTSTART:20260916T180000Z"));
+    }
+
+    #[test]
+    fn a_missing_sequence_replies_as_zero() {
+        assert_eq!(ical_sequence("BEGIN:VEVENT\r\nUID:x\r\n"), 0);
+        assert_eq!(ical_sequence("SEQUENCE:7\r\n"), 7);
+    }
+
+    #[test]
+    fn a_declined_rsvp_says_so() {
+        let ical = eastern_invite("20260916T140000", "20260916T150000").replace(
+            "SUMMARY:",
+            "ORGANIZER;CN=Joe:mailto:joe@example.com\r\nSUMMARY:",
+        );
+        let event = caldav_client::parse_ical_event_public(&ical, "", "").unwrap();
+        let reply = caldav_client::build_imip_reply(&event, 0, "Shaw", "shaw@example.com", "DECLINED");
+
+        assert!(reply.contains("PARTSTAT=DECLINED"));
+    }
+
+    #[test]
+    fn non_calendar_attachment_is_rejected() {
+        assert!(build_calendar_invite("just some text", "notes.txt".into()).is_err());
+    }
+
+    #[test]
+    fn method_defaults_to_empty_when_absent() {
+        assert_eq!(ical_method("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"), "");
+        assert_eq!(ical_method("METHOD:cancel\r\n"), "CANCEL");
+    }
+
+    #[test]
+    fn attachment_filenames_cannot_escape_their_directory() {
+        assert_eq!(sanitize_attachment_filename("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_attachment_filename("C:\\Windows\\evil.dll"), "evil.dll");
+        assert_eq!(sanitize_attachment_filename("report.pdf"), "report.pdf");
+        assert_eq!(sanitize_attachment_filename(".."), "attachment");
+        assert_eq!(sanitize_attachment_filename("  "), "attachment");
+    }
 }

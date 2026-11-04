@@ -52,6 +52,12 @@ pub struct EnvelopeInfo {
     pub body: String,
     /// Parsed Authentication-Results: "spf=pass dkim=pass dmarc=pass" etc.
     pub auth_results: String,
+    /// The message's full header block, verbatim — the evidence the spam,
+    /// phishing and replyability judgments read (Received chain, Return-Path,
+    /// List-*, Auto-Submitted, …). Filled only where the whole message is
+    /// fetched; empty otherwise.
+    #[serde(skip)]
+    pub raw_headers: String,
     /// Gmail labels (X-GM-LABELS) including internal markers like \Inbox or
     /// CATEGORY_PERSONAL. Empty for non-Gmail servers. Display-side strips the
     /// internal markers; storage keeps them so the Priority mapper can read
@@ -465,6 +471,7 @@ pub async fn sync_folder(
                     preview: String::new(),
                     body: String::new(),
                     auth_results: String::new(),
+                    raw_headers: String::new(),
                     labels: extract_gmail_labels(fetch),
                     attachments: Vec::new(),
                 };
@@ -533,6 +540,7 @@ pub async fn sync_folder(
                                 result.new_emails[idx].preview = preview;
                                 result.new_emails[idx].body = html;
                                 result.new_emails[idx].auth_results = auth;
+                                result.new_emails[idx].raw_headers = extract_raw_headers(&raw).to_string();
                                 result.new_emails[idx].has_attachment = has_attach;
                                 result.new_emails[idx].attachments = attach_meta;
                             }
@@ -626,6 +634,7 @@ pub async fn sync_folder(
                                         preview: String::new(),
                                         body: String::new(),
                                         auth_results: String::new(),
+                                        raw_headers: String::new(),
                                         labels: extract_gmail_labels(fetch),
                                         attachments: Vec::new(),
                                     });
@@ -1692,6 +1701,13 @@ fn decode_charset(charset: &str, bytes: &[u8]) -> String {
 
 /// Extract SPF, DKIM, and DMARC results from the Authentication-Results header.
 /// Returns a compact summary like "spf=pass dkim=pass dmarc=pass" or empty string if absent.
+/// The header section of a raw RFC 822 message: everything before the first
+/// blank line. A message with no body separator is all header.
+fn extract_raw_headers(raw: &str) -> &str {
+    let end = [raw.find("\r\n\r\n"), raw.find("\n\n")].into_iter().flatten().min();
+    end.map_or(raw, |i| &raw[..i])
+}
+
 fn extract_auth_results(raw: &str) -> String {
     if let Some(msg) = mail_parser::MessageParser::default().parse(raw.as_bytes()) {
         // mail_parser gives us header values; Authentication-Results may appear multiple times

@@ -17,7 +17,7 @@ import { listen, type UnlistenFn } from './safeListen';
 import { incNetwork, decNetwork, type Activity } from '$lib/networkActivity.svelte';
 import type { ComposeDraft } from '$lib/types';
 
-export type EmailFlagField = 'read' | 'starred' | 'replied' | 'pinned' | 'focused';
+export type EmailFlagField = 'read' | 'starred' | 'replied' | 'pinned' | 'focused' | 'noReply';
 
 export interface EmailFlagChangedEvent {
   accountId: string;

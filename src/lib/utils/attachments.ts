@@ -124,3 +124,22 @@ export function isArchiveAttachment(filename: string, mimeType?: string): boolea
 export function shouldForceSaveAs(filename: string, mimeType?: string): boolean {
   return isExecutableAttachment(filename, mimeType) || isArchiveAttachment(filename, mimeType);
 }
+
+// Calendar invitations — the app previews these itself (see InvitePreview),
+// since a desktop with no .ics handler otherwise leaves the user stuck.
+const CALENDAR_EXTENSIONS: ReadonlySet<string> = new Set(['ics', 'ical', 'ifb', 'icalendar', 'vcs']);
+
+const CALENDAR_MIME_TYPES: ReadonlySet<string> = new Set([
+  'text/calendar',
+  'application/ics',
+  'text/x-vcalendar',
+  'application/hbs-vcs',
+]);
+
+/** True for iCalendar invitations (.ics and friends). */
+export function isCalendarAttachment(filename: string, mimeType?: string): boolean {
+  const ext = getExtension(filename);
+  if (ext && CALENDAR_EXTENSIONS.has(ext)) return true;
+  if (mimeType && CALENDAR_MIME_TYPES.has(mimeType.toLowerCase().split(';')[0].trim())) return true;
+  return false;
+}

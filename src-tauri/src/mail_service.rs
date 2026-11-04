@@ -835,6 +835,8 @@ pub struct EmailFull {
     pub date: String,
     pub message_id: String,
     pub is_read: bool,
+    /// Reply-To header address; empty when the message had none.
+    pub reply_to: String,
 }
 
 /// Whether `email_id` is within `account_id`'s view — same scope as [`get`],
@@ -934,7 +936,8 @@ pub fn get(
     let login_id = view.login.as_str().to_string();
 
     let sql = format!(
-        "SELECT id, from_name, from_email, subject, preview, body, folder, date, COALESCE(message_id,''), is_read
+        "SELECT id, from_name, from_email, subject, preview, body, folder, date, COALESCE(message_id,''), is_read,
+                COALESCE(reply_to,'')
          FROM emails WHERE id = ?1 AND account_id = ?2{}",
         crate::login::mailbox_clause(view.mailbox.as_deref(), 3),
     );
@@ -956,6 +959,7 @@ pub fn get(
             date: row.get(7)?,
             message_id: row.get(8)?,
             is_read: row.get::<_, i32>(9)? != 0,
+            reply_to: row.get(10)?,
         }),
     ).optional().map_err(|e| e.to_string())
 }

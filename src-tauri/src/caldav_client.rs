@@ -41,6 +41,9 @@ pub struct ParsedEvent {
     pub rrule: Option<String>,
     pub exdates: Option<Vec<String>>,  // exception dates, e.g. ["2026-04-15"]
     pub alert_minutes: Option<i32>,
+    /// TZID the start time was written in, kept only so the UI can name the
+    /// organiser's zone. `dtstart`/`dtend` are already resolved to UTC.
+    pub source_tzid: Option<String>,
     pub resource_url: String,
     pub etag: String,
 }
@@ -601,7 +604,10 @@ fn parse_ical_event(ical_data: &str, resource_url: &str, etag: &str) -> Option<P
             Ok(c) => c,
             Err(_) => continue,
         };
-        for event in calendar.events {
+        // The file's own VTIMEZONE blocks are what turn a TZID on DTSTART into
+        // a real offset; collect them before reading the events.
+        let zones = parse_timezones(&calendar);
+        for event in &calendar.events {
             let mut uid = String::new();
             let mut summary = String::new();
             let mut dtstart = String::new();
@@ -614,6 +620,7 @@ fn parse_ical_event(ical_data: &str, resource_url: &str, etag: &str) -> Option<P
             let mut rrule: Option<String> = None;
             let mut exdates: Vec<String> = Vec::new();
             let mut alert_minutes: Option<i32> = None;
+            let mut source_tzid: Option<String> = None;
 
             // Parse VALARM from alarms sub-components
             for alarm in &event.alarms {
@@ -641,11 +648,12 @@ fn parse_ical_event(ical_data: &str, resource_url: &str, etag: &str) -> Option<P
                         if has_value_date || (val.len() == 8 && val.chars().all(|c| c.is_ascii_digit())) {
                             is_all_day = true;
                         }
-                        dtstart = normalize_ical_date(&val);
+                        source_tzid = tzid_param(prop);
+                        dtstart = normalize_ical_datetime(&val, source_tzid.as_deref(), &zones);
                     }
                     "DTEND" => {
                         let val = prop.value.clone().unwrap_or_default();
-                        dtend = normalize_ical_date(&val);
+                        dtend = normalize_ical_datetime(&val, tzid_param(prop).as_deref(), &zones);
                     }
                     "LOCATION" => location = prop.value.clone().filter(|s| !s.is_empty()),
                     "DESCRIPTION" => description = prop.value.clone().filter(|s| !s.is_empty()),
@@ -708,6 +716,7 @@ fn parse_ical_event(ical_data: &str, resource_url: &str, etag: &str) -> Option<P
                     rrule,
                     exdates: if exdates.is_empty() { None } else { Some(exdates) },
                     alert_minutes,
+                    source_tzid,
                     resource_url: resource_url.to_string(),
                     etag: etag.to_string(),
                 });
@@ -715,6 +724,260 @@ fn parse_ical_event(ical_data: &str, resource_url: &str, etag: &str) -> Option<P
         }
     }
     None
+}
+
+// ── Time zones ──────────────────────────────────────────
+//
+// A DTSTART like `DTSTART;TZID=Eastern Standard Time:20260916T140000` is a
+// wall-clock reading in the organiser's zone, not ours. Dropping the TZID and
+// storing the digits as-is makes the app show 2 PM to a reader anywhere on
+// earth, which is wrong everywhere except the organiser's desk — and wrong
+// silently, which is how a meeting gets missed.
+//
+// The offsets are taken from the VTIMEZONE block the sender ships in the same
+// file rather than from a zone database, so this works for Outlook's Windows
+// zone names ("Eastern Standard Time") and IANA names alike, without either a
+// name mapping table or a tz-data dependency.
+
+/// One observance of a VTIMEZONE — its STANDARD or DAYLIGHT block.
+#[derive(Debug, Clone)]
+struct Observance {
+    /// The UTC offset this observance puts the zone on, in seconds (TZOFFSETTO).
+    offset_secs: i32,
+    /// Wall-clock time of day the switch happens, from the observance's DTSTART.
+    switch_time: chrono::NaiveTime,
+    /// Month the switch recurs in (RRULE BYMONTH).
+    month: Option<u32>,
+    /// Weekday and ordinal from RRULE BYDAY: (Sunday, 2) for "2SU", (Sunday, -1) for "-1SU".
+    weekday: Option<(chrono::Weekday, i32)>,
+    /// The observance's own DTSTART, used when it carries no RRULE.
+    start: Option<chrono::NaiveDateTime>,
+}
+
+/// The observances of one VTIMEZONE, collected under its TZID.
+#[derive(Debug, Clone, Default)]
+struct TimeZoneDef {
+    standard: Option<Observance>,
+    daylight: Option<Observance>,
+}
+
+impl TimeZoneDef {
+    /// The UTC offset in effect at `local`, a wall-clock time in this zone.
+    ///
+    /// Zones that never switch carry a single observance and answer directly.
+    /// For the rest, both observances' switch instants are computed for
+    /// `local`'s year and the one before it, and the most recent switch at or
+    /// before `local` wins — which gets the southern hemisphere (where DST
+    /// spans new year) right without a hemisphere special case.
+    fn offset_at(&self, local: chrono::NaiveDateTime) -> i32 {
+        match (&self.standard, &self.daylight) {
+            (Some(std), None) => std.offset_secs,
+            (None, Some(dst)) => dst.offset_secs,
+            (None, None) => 0,
+            (Some(std), Some(dst)) => {
+                let year = chrono::Datelike::year(&local);
+                let mut best: Option<(chrono::NaiveDateTime, i32)> = None;
+                for obs in [std, dst] {
+                    for y in [year - 1, year] {
+                        let Some(at) = obs.switch_instant(y) else { continue };
+                        if at <= local && best.map_or(true, |(b, _)| at > b) {
+                            best = Some((at, obs.offset_secs));
+                        }
+                    }
+                }
+                // Before every computed switch (a date far in the past): the
+                // observance that would come second in the year is the one in
+                // effect leading up to the first switch.
+                best.map(|(_, off)| off).unwrap_or_else(|| {
+                    match (std.switch_instant(year), dst.switch_instant(year)) {
+                        (Some(s), Some(d)) if s < d => dst.offset_secs,
+                        _ => std.offset_secs,
+                    }
+                })
+            }
+        }
+    }
+}
+
+impl Observance {
+    /// The wall-clock instant this observance takes effect in `year`.
+    fn switch_instant(&self, year: i32) -> Option<chrono::NaiveDateTime> {
+        match (self.month, self.weekday) {
+            (Some(month), Some((weekday, nth))) => {
+                nth_weekday_of_month(year, month, weekday, nth).map(|d| d.and_time(self.switch_time))
+            }
+            // No recurrence rule: the observance applies from its own DTSTART on.
+            _ => self.start,
+        }
+    }
+}
+
+/// The `nth` `weekday` of `month`, counting from the end when `nth` is negative.
+///
+/// An `nth` past the end of the month clamps to the last matching day, which is
+/// how "5SU" is written in the wild when "last Sunday" is meant.
+fn nth_weekday_of_month(year: i32, month: u32, weekday: chrono::Weekday, nth: i32) -> Option<chrono::NaiveDate> {
+    use chrono::Datelike;
+
+    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1)?;
+    let mut days: Vec<chrono::NaiveDate> = Vec::with_capacity(5);
+    let mut day = first;
+    while day.month() == month {
+        if day.weekday() == weekday {
+            days.push(day);
+        }
+        day = day.succ_opt()?;
+    }
+    if days.is_empty() {
+        return None;
+    }
+    if nth < 0 {
+        let from_end = (-nth) as usize;
+        days.get(days.len().saturating_sub(from_end)).copied()
+    } else {
+        let idx = (nth.max(1) as usize - 1).min(days.len() - 1);
+        days.get(idx).copied()
+    }
+}
+
+/// Parse a TZOFFSETFROM/TZOFFSETTO value ("-0500", "+0800", "-050000") into seconds.
+fn parse_utc_offset(val: &str) -> Option<i32> {
+    let val = val.trim();
+    let (sign, digits) = match val.as_bytes().first()? {
+        b'-' => (-1, &val[1..]),
+        b'+' => (1, &val[1..]),
+        _ => (1, val),
+    };
+    if digits.len() < 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i32 = digits[0..2].parse().ok()?;
+    let minutes: i32 = digits[2..4].parse().ok()?;
+    let seconds: i32 = if digits.len() >= 6 { digits[4..6].parse().ok()? } else { 0 };
+    Some(sign * (hours * 3600 + minutes * 60 + seconds))
+}
+
+/// Parse an RRULE BYDAY token: "2SU" → (Sunday, 2), "-1SU" → (Sunday, -1), "SU" → (Sunday, 1).
+fn parse_byday(token: &str) -> Option<(chrono::Weekday, i32)> {
+    use chrono::Weekday::*;
+
+    let token = token.trim().to_uppercase();
+    let split = token.len().checked_sub(2)?;
+    let (ordinal, day) = token.split_at(split);
+    let weekday = match day {
+        "SU" => Sun, "MO" => Mon, "TU" => Tue, "WE" => Wed,
+        "TH" => Thu, "FR" => Fri, "SA" => Sat,
+        _ => return None,
+    };
+    let nth = if ordinal.is_empty() { 1 } else { ordinal.parse().ok()? };
+    Some((weekday, nth))
+}
+
+/// Read a VTIMEZONE observance (its STANDARD or DAYLIGHT block).
+fn parse_observance(properties: &[ical::property::Property]) -> Option<Observance> {
+    let mut offset_secs = None;
+    let mut switch_time = chrono::NaiveTime::from_hms_opt(2, 0, 0)?;
+    let mut month = None;
+    let mut weekday = None;
+    let mut start = None;
+
+    for prop in properties {
+        let Some(value) = prop.value.as_deref() else { continue };
+        match prop.name.as_str() {
+            "TZOFFSETTO" => offset_secs = parse_utc_offset(value),
+            "DTSTART" => {
+                // Local time in the zone, never UTC — RFC 5545 forbids a
+                // trailing Z here, so it parses as a naive datetime.
+                if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(value.trim(), "%Y%m%dT%H%M%S") {
+                    switch_time = chrono::NaiveDateTime::time(&dt);
+                    start = Some(dt);
+                }
+            }
+            "RRULE" => {
+                for part in value.split(';') {
+                    let (key, val) = part.split_once('=').unwrap_or((part, ""));
+                    match key.trim().to_uppercase().as_str() {
+                        "BYMONTH" => month = val.trim().parse::<u32>().ok().filter(|m| (1..=12).contains(m)),
+                        "BYDAY" => weekday = parse_byday(val),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(Observance { offset_secs: offset_secs?, switch_time, month, weekday, start })
+}
+
+/// Collect every VTIMEZONE in the file, keyed by TZID.
+fn parse_timezones(calendar: &ical::parser::ical::component::IcalCalendar) -> std::collections::HashMap<String, TimeZoneDef> {
+    use ical::parser::ical::component::IcalTimeZoneTransitionType;
+
+    let mut zones = std::collections::HashMap::new();
+    for tz in &calendar.timezones {
+        let Some(tzid) = tz.properties.iter()
+            .find(|p| p.name == "TZID")
+            .and_then(|p| p.value.as_deref())
+            .map(unquote_param)
+        else { continue };
+
+        let mut def = TimeZoneDef::default();
+        for transition in &tz.transitions {
+            let Some(obs) = parse_observance(&transition.properties) else { continue };
+            match transition.transition {
+                IcalTimeZoneTransitionType::STANDARD => def.standard = Some(obs),
+                IcalTimeZoneTransitionType::DAYLIGHT => def.daylight = Some(obs),
+            }
+        }
+        if def.standard.is_some() || def.daylight.is_some() {
+            zones.insert(tzid, def);
+        }
+    }
+    zones
+}
+
+/// Strip the quotes iCalendar allows around a parameter value.
+fn unquote_param(val: &str) -> String {
+    val.trim().trim_matches('"').to_string()
+}
+
+/// The TZID parameter of a property, unquoted.
+fn tzid_param(prop: &ical::property::Property) -> Option<String> {
+    prop.params.as_ref()?
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("TZID"))
+        .map(|(_, v)| unquote_param(&v.join(",")))
+        .filter(|s| !s.is_empty())
+}
+
+/// Normalize a DTSTART/DTEND value to ISO 8601, resolving `tzid` to UTC.
+///
+/// A value that is already UTC, or has no zone to resolve, falls through to
+/// [`normalize_ical_date`] unchanged. All-day dates stay floating: "the 16th"
+/// means the same calendar day whoever reads it.
+fn normalize_ical_datetime(
+    val: &str,
+    tzid: Option<&str>,
+    zones: &std::collections::HashMap<String, TimeZoneDef>,
+) -> String {
+    let clean = val.trim();
+    if clean.ends_with('Z') || clean.len() < 15 {
+        return normalize_ical_date(clean);
+    }
+
+    let Some(zone) = tzid.and_then(|id| zones.get(id)) else {
+        // No VTIMEZONE to resolve the name against — keep the wall clock
+        // reading rather than inventing an offset for it.
+        return normalize_ical_date(clean);
+    };
+
+    let Ok(local) = chrono::NaiveDateTime::parse_from_str(clean, "%Y%m%dT%H%M%S") else {
+        return normalize_ical_date(clean);
+    };
+
+    let utc = local - chrono::Duration::seconds(zone.offset_at(local) as i64);
+    utc.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 /// Normalize iCalendar date formats to ISO 8601.
@@ -1103,6 +1366,49 @@ pub fn parse_ical_event_public(ical_data: &str, resource_url: &str, etag: &str) 
 
 pub fn build_ical_event_public(event: &ParsedEvent) -> String {
     build_ical_event(event)
+}
+
+/// Build an iTIP reply (RFC 5546 METHOD:REPLY) — an RSVP to `event`'s organiser.
+///
+/// A reply carries only the one attendee who is answering, with their
+/// `PARTSTAT`. The `UID` and `SEQUENCE` are copied from the invitation so the
+/// organiser's calendar can match the answer to the right meeting and ignore
+/// an answer to a superseded version of it.
+pub fn build_imip_reply(
+    event: &ParsedEvent,
+    sequence: u32,
+    attendee_name: &str,
+    attendee_email: &str,
+    partstat: &str,
+) -> String {
+    let mut ical = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Mail//CalDAV//EN\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\n");
+    ical.push_str(&format!("UID:{}\r\n", event.uid));
+    ical.push_str(&format!("SEQUENCE:{}\r\n", sequence));
+    ical.push_str(&format!("DTSTAMP:{}Z\r\n", chrono::Utc::now().format("%Y%m%dT%H%M%S")));
+
+    if let Some((ref org_name, ref org_email)) = event.organizer {
+        ical.push_str(&format!("ORGANIZER;CN={}:mailto:{}\r\n", org_name, org_email));
+    }
+    ical.push_str(&format!(
+        "ATTENDEE;CN={};PARTSTAT={}:mailto:{}\r\n",
+        attendee_name, partstat, attendee_email
+    ));
+
+    // The times are echoed back so a calendar that never saw the request can
+    // still place the reply; they are written in UTC, which needs no VTIMEZONE.
+    if event.is_all_day {
+        let ds = event.dtstart.replace('-', "").replace("T00:00:00", "");
+        ical.push_str(&format!("DTSTART;VALUE=DATE:{}\r\n", &ds[..8.min(ds.len())]));
+    } else {
+        ical.push_str(&format!("DTSTART:{}\r\n", compact_ical_datetime(&event.dtstart)));
+        if !event.dtend.is_empty() {
+            ical.push_str(&format!("DTEND:{}\r\n", compact_ical_datetime(&event.dtend)));
+        }
+    }
+
+    ical.push_str(&format!("SUMMARY:{}\r\n", event.summary));
+    ical.push_str("END:VEVENT\r\nEND:VCALENDAR\r\n");
+    ical
 }
 
 /// Build an iMIP invitation ICS with METHOD:REQUEST for sending via email.

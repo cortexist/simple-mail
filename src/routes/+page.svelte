@@ -10,6 +10,7 @@
   import ContactsView from '$lib/components/ContactsView.svelte';
   import SettingsView from '$lib/components/SettingsView.svelte';
   import FolderModal from '$lib/components/FolderModal.svelte';
+  import InvitePreview from '$lib/components/InvitePreview.svelte';
   import {
     loadAccounts,
     loadTheme,
@@ -25,6 +26,8 @@
     addToSenderBlocklist,
     removeFromSenderBlocklist,
     saveAttachment,
+    previewCalendarAttachment,
+    respondToCalendarInvite,
     getOfflineDownloadStatus,
     addIgnoredAddress,
     removeIgnoredAddress,
@@ -215,9 +218,14 @@
   let unlistenDraftGenerated: (() => void) | null = null;
   let unlistenSettingsAiConfig: (() => void) | null = null;
   // Whether AI features are globally enabled — gates the "AI draft" button.
-  let aiEnabled = $state(false);
+  /** AI is on and a language model is set — drafting needs one. A decision
+   * model alone still triages mail but cannot write. */
+  let aiDraftAvailable = $state(false);
   // True while an AI draft is being generated (button shows a busy state).
   let aiDraftLoading = $state(false);
+  /** The email the composer asked an AI reply for; its `mail:draft-generated`
+   * is poured into that composer instead of opening a new draft. */
+  let aiDraftComposerTarget: string | null = null;
 
   // Settings state pushed to SettingsView via props. Initial values are
   // loaded once in onMount; subsequent changes arrive over settings:* events.
@@ -958,7 +966,7 @@
       // Move: Ctrl+Shift+V — toggle move menu in CommandBar
       if (mod && e.shiftKey && e.key === 'V') { e.preventDefault(); showMoveMenu = !showMoveMenu; return; }
       // Reply: Ctrl+R / Reply All: Ctrl+Shift+R
-      if (mod && e.key === 'r') { e.preventDefault(); handleCompose(e.shiftKey ? 'replyAll' : 'reply'); return; }
+      if (mod && e.key === 'r') { e.preventDefault(); if (!selectedEmail?.noReply) handleCompose(e.shiftKey ? 'replyAll' : 'reply'); return; }
       // Forward: Ctrl+Shift+F
       if (mod && e.shiftKey && e.key === 'F') { e.preventDefault(); handleCompose('forward'); return; }
       // Junk: Ctrl+J
@@ -1055,8 +1063,8 @@
       subscribeSettingsDavUsersChanged(applySettingsDavUsersEcho).then((u) => { unlistenSettingsDavUsers = u; });
       // AI config: track the global `enabled` flag so the "AI draft" button can
       // gate itself. Initial read + live updates via the settings echo.
-      getAiConfig().then((c) => { if (c) aiEnabled = c.enabled; }).catch(() => {});
-      subscribeSettingsAiConfigChanged((ev) => { aiEnabled = ev.enabled; }).then((u) => { unlistenSettingsAiConfig = u; });
+      getAiConfig().then((c) => { if (c) aiDraftAvailable = c.enabled && c.baseUrl.trim() !== ''; }).catch(() => {});
+      subscribeSettingsAiConfigChanged((ev) => { aiDraftAvailable = ev.enabled && ev.baseUrl.trim() !== ''; }).then((u) => { unlistenSettingsAiConfig = u; });
 
       // Initial settings reads — subsequent changes arrive via the echoes above.
       refreshStorageInfo();
@@ -1949,7 +1957,10 @@
     try {
       await openAttachment(activeAccountId, selectedEmail.id, attachmentIndex);
     } catch (err) {
+      // A missing desktop handler lands here too. Surfacing it is the whole
+      // point: silently doing nothing reads as a broken app.
       console.error('Failed to open attachment:', err);
+      syncErrors = [...syncErrors, String(err)];
     }
   }
 
@@ -1971,6 +1982,89 @@
       await saveAttachment(activeAccountId, selectedEmail.id, attachmentIndex, savePath);
     } catch (err) {
       console.error('Failed to save attachment:', err);
+      syncErrors = [...syncErrors, String(err)];
+    }
+  }
+
+  // ── Calendar invitations (.ics attachments) ──
+  // The preview is read-only; importing is a separate, explicit step so the
+  // user decides after reading what the invitation actually says.
+  let invitePreview = $state<{ invite: import('$lib/types').CalendarInvite; attachmentIndex: number } | null>(null);
+
+  async function handlePreviewCalendar(attachmentIndex: number) {
+    if (!selectedEmail || !activeAccountId) return;
+    try {
+      const invite = await previewCalendarAttachment(activeAccountId, selectedEmail.id, attachmentIndex);
+      if (invite) invitePreview = { invite, attachmentIndex };
+    } catch (err) {
+      console.error('Failed to read calendar attachment:', err);
+      syncErrors = [...syncErrors, String(err)];
+    }
+  }
+
+  let sendingRsvp = $state(false);
+
+  /** RSVP, then file the event unless it was declined. The reply is real mail
+   *  to the organiser, so it goes first: if it fails, nothing is filed and the
+   *  dialog stays open with the error. */
+  async function handleRespondInvite(response: 'accepted' | 'declined' | 'tentative', calendarId: string) {
+    const preview = invitePreview;
+    if (!preview || !selectedEmail || !activeAccountId) return;
+
+    sendingRsvp = true;
+    try {
+      const organizer = await respondToCalendarInvite(
+        activeAccountId, selectedEmail.id, preview.attachmentIndex, response,
+      );
+      if (response !== 'declined') {
+        handleImportInvite(calendarId);
+      } else {
+        invitePreview = null;
+      }
+      const verb = response === 'accepted' ? 'Accepted' : response === 'tentative' ? 'Tentatively accepted' : 'Declined';
+      showToast(`${verb} — reply sent to ${organizer ?? 'the organiser'}`);
+    } catch (err) {
+      console.error('Failed to send invitation reply:', err);
+      syncErrors = [...syncErrors, String(err)];
+    } finally {
+      sendingRsvp = false;
+    }
+  }
+
+  function handleImportInvite(calendarId: string) {
+    const preview = invitePreview;
+    if (!preview) return;
+    const { invite } = preview;
+    const category = calendarCategories.find((c) => c.id === calendarId);
+
+    handleSaveEvent({
+      id: crypto.randomUUID(),
+      title: invite.title || 'Untitled event',
+      start: new Date(invite.start),
+      end: new Date(invite.end),
+      color: category?.color ?? '#0078d4',
+      location: invite.location,
+      description: invite.description,
+      isAllDay: invite.isAllDay,
+      calendarId,
+      calendarName: category?.name ?? '',
+      // Deliberately no attendees. save_calendar_event treats an attendee
+      // list as "I am organising this" — it mails an iMIP REQUEST to everyone
+      // and PUTs the event with the user as ORGANIZER, which a scheduling
+      // CalDAV server would also act on. Importing someone else's invitation
+      // must not send mail, so it lands as a personal entry; the invitation
+      // email itself stays in the mailbox as the record of who is attending.
+      attendees: undefined,
+      recurrence: invite.recurrence,
+      isOnlineMeeting: false,
+      alertMinutes: invite.alertMinutes,
+    });
+
+    invitePreview = null;
+    // The RSVP path reports "Accepted — reply sent to …" instead; one toast
+    // per action.
+    if (!sendingRsvp) {
+      showToast(`Added "${invite.title || 'event'}" to ${category?.name ?? 'your calendar'}`);
     }
   }
 
@@ -2196,6 +2290,7 @@
         case 'replied': return { ...e, isReplied: ev.value };
         case 'pinned':  return { ...e, isPinned:  ev.value };
         case 'focused': return { ...e, isFocused: ev.value };
+        case 'noReply': return { ...e, noReply: ev.value };
       }
     };
     patchEmailEverywhere(ev.emailId, patch);
@@ -2371,24 +2466,34 @@
     });
   });
 
-  /** Request an AI-generated reply for the selected email. The draft arrives
-   * asynchronously via `mail:draft-generated` (applyDraftGeneratedEcho). */
+  /** Request an AI-generated reply to the email the composer is answering.
+   * The text arrives asynchronously via `mail:draft-generated`
+   * (applyDraftGeneratedEcho) and lands in the open composer. */
   function handleAiDraft() {
     const acct = activeAccount;
-    const email = selectedEmail;
+    const email = composeReplyTo;
     if (!acct || !email || aiDraftLoading) return;
     aiDraftLoading = true;
+    aiDraftComposerTarget = email.id;
     fireAiDraftReply(acct.id, email.id).catch((err) => {
       aiDraftLoading = false;
+      aiDraftComposerTarget = null;
       syncErrors = [...syncErrors, `${t('compose.aiDraftFailed')}: ${err}`];
     });
   }
 
-  /** Insert an AI-generated draft as an ephemeral Drafts entry and open it in
-   * the composer. Applied only for the active account (the request originated
-   * there); a mid-flight account switch silently drops the draft. */
+  /** Route a generated draft. One the composer asked for goes into that
+   * composer — or nowhere, if it was closed or moved on meanwhile. Any other
+   * (the MCP `mail.draft` tool) becomes an ephemeral Drafts entry opened in the
+   * composer; that is applied only for the active account the request came
+   * from, so a mid-flight account switch silently drops it. */
   function applyDraftGeneratedEcho(ev: MailDraftGeneratedEvent) {
     aiDraftLoading = false;
+    if (aiDraftComposerTarget !== null && ev.inReplyTo === aiDraftComposerTarget) {
+      aiDraftComposerTarget = null;
+      if (composeReplyTo?.id === ev.inReplyTo) composePaneRef?.insertAiDraft(ev.bodyHtml);
+      return;
+    }
     if (ev.accountId !== activeAccountId) return;
     const acct = activeAccount;
     if (!acct) return;
@@ -3159,7 +3264,7 @@
   let calendarViewRef = $state<{ navigateCalList: (key: string) => 'at-top' | 'at-bottom' | 'moved'; navigateMiniCal: (key: string) => void; navigateMainCal: (key: string) => void; goToToday: () => void; focusSearchResults: () => void; navigateSearchResults: (key: string) => boolean; toggleFocusedCalListItem: () => boolean; editSearchSelectedEvent: () => void; deleteSearchSelectedEvent: () => void; joinMeeting: () => boolean; hasDetailModal: () => boolean } | null>(null);
   let messageListRef = $state<{ cycleInboxTab: () => boolean } | null>(null);
   let readingPaneRef = $state<{ focus: () => void; scroll: (delta: number) => void; toggleHeaders: () => void } | null>(null);
-  let composePaneRef = $state<{ focus: () => void } | null>(null);
+  let composePaneRef = $state<{ focus: () => void; insertAiDraft: (html: string) => void } | null>(null);
   let titleBarRef = $state<{ focusSearch: () => void } | null>(null);
 
   let prevSearchFocus = $state<{ focusedPane: typeof focusedPane; calInnerPane: typeof calInnerPane; selectedEmailId: string; selectedContactId: string; activeNav: typeof activeNav } | null>(null);
@@ -3270,9 +3375,6 @@
         bind:showMoveMenu
         {multiSelectCount}
         {multiSelectHasUnread}
-        onAiDraft={handleAiDraft}
-        aiDraftEnabled={activeNav === 'mail' && aiEnabled && !!selectedEmail && activeFolder !== 'drafts'}
-        {aiDraftLoading}
       />
 
       <div class="network-indicator" class:active={networkActivity.count > 0} aria-hidden="true"></div>
@@ -3352,11 +3454,14 @@
               onSaveDraft={handleComposeSaveDraft}
               isSavedDraft={openedDraftSnapshot?.id === activeDraftId}
               autoFocus={composeAutoFocus}
+              aiDraftEnabled={aiDraftAvailable && !!composeReplyTo && (composeMode === 'reply' || composeMode === 'replyAll')}
+              {aiDraftLoading}
+              onAiDraft={handleAiDraft}
             /></div>
             {/key}
           {:else}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div style="display:contents" onmousedown={() => (focusedPane = 'reading')}><ReadingPane bind:this={readingPaneRef} email={selectedEmail} loadingBody={fetchingBodyId === selectedEmailId} bodyFailed={bodyFetchFailedId === selectedEmailId} darkMode={resolvedTheme === 'dark'} isJunk={activeFolder === 'junk'} focused={focusedPane === 'reading'} onFocus={() => (focusedPane = 'reading')} onOpenAttachment={handleOpenAttachment} onSaveAttachment={handleSaveAttachment} onOpenDraftAttachment={handleOpenDraftAttachment} bind:showAllHeaders {multiSelectCount} onLabelClick={handleLabelClick} /></div>
+            <div style="display:contents" onmousedown={() => (focusedPane = 'reading')}><ReadingPane bind:this={readingPaneRef} email={selectedEmail} loadingBody={fetchingBodyId === selectedEmailId} bodyFailed={bodyFetchFailedId === selectedEmailId} darkMode={resolvedTheme === 'dark'} isJunk={activeFolder === 'junk'} focused={focusedPane === 'reading'} onFocus={() => (focusedPane = 'reading')} onOpenAttachment={handleOpenAttachment} onSaveAttachment={handleSaveAttachment} onPreviewCalendar={handlePreviewCalendar} onOpenDraftAttachment={handleOpenDraftAttachment} bind:showAllHeaders {multiSelectCount} onLabelClick={handleLabelClick} /></div>
           {/if}
         {:else if activeNav === 'calendar'}
           <CalendarView
@@ -3517,6 +3622,19 @@
     dangerConfirm={true}
     onSubmit={() => commitEmptyFolder(emptyId)}
     onCancel={() => (folderModal = null)}
+  />
+{/if}
+
+{#if invitePreview}
+  {@const preview = invitePreview}
+  <InvitePreview
+    invite={preview.invite}
+    categories={calendarCategories}
+    onImport={handleImportInvite}
+    onRespond={handleRespondInvite}
+    sending={sendingRsvp}
+    onSaveAs={() => { invitePreview = null; handleSaveAttachment(preview.attachmentIndex, preview.invite.filename); }}
+    onClose={() => (invitePreview = null)}
   />
 {/if}
 

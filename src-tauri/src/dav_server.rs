@@ -1149,6 +1149,7 @@ fn load_events_as_ical(
             rrule,
             exdates,
             alert_minutes: e.alert_minutes,
+            source_tzid: None,
             resource_url: String::new(),
             etag: String::new(),
         };
