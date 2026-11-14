@@ -81,6 +81,9 @@ export interface SettingsAiConfigChangedEvent {
   draftModel: string;
   maxTokens: number;
   temperature: number;
+  decisionBaseUrl: string;
+  hasDecisionKey: boolean;
+  decisionModel: string;
   seq: number;
 }
 
@@ -90,6 +93,7 @@ export interface SettingsAiFeaturesChangedEvent {
   priorityDetect: boolean;
   autoDraft: boolean;
   externalAccess: boolean;
+  replyDetect: boolean;
   seq: number;
 }
 
@@ -536,6 +540,13 @@ export function fireSetAiConfig(config: AiConfigInput): Promise<void> {
 export function fireTestAiConfig(config: AiConfigInput): Promise<string> {
   if (!inTauri()) return Promise.resolve('');
   return invoke<string>('test_ai_config', { config });
+}
+
+/** Live test of the decision model endpoint (`/systemone`). Returns a one-line
+ * description of its answer to a trivial question; throws on failure. */
+export function fireTestDecisionConfig(config: AiConfigInput): Promise<string> {
+  if (!inTauri()) return Promise.resolve('');
+  return invoke<string>('test_decision_config', { config });
 }
 
 export async function getAccountAiFeatures(accountId: string): Promise<AccountAiFeatures | null> {

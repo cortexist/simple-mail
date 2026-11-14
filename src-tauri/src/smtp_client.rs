@@ -214,6 +214,36 @@ pub async fn send_invitation(
     html_body: &str,
     ics_data: &str,
 ) -> Result<()> {
+    send_calendar_message(settings, from_email, from_name, to_addresses, subject, html_body, ics_data, "REQUEST").await
+}
+
+/// Send an iTIP reply (an RSVP) to a meeting organiser.
+///
+/// The `method=REPLY` parameter is what makes this an RSVP rather than a note:
+/// it is the part Outlook and Google read to move the attendee out of
+/// "No response". A plain reply email, however politely worded, does not.
+pub async fn send_invitation_reply(
+    settings: &MailServerSettings,
+    from_email: &str,
+    from_name: &str,
+    organizer: &str,
+    subject: &str,
+    html_body: &str,
+    ics_data: &str,
+) -> Result<()> {
+    send_calendar_message(settings, from_email, from_name, &[organizer.to_string()], subject, html_body, ics_data, "REPLY").await
+}
+
+async fn send_calendar_message(
+    settings: &MailServerSettings,
+    from_email: &str,
+    from_name: &str,
+    to_addresses: &[String],
+    subject: &str,
+    html_body: &str,
+    ics_data: &str,
+    method: &str,
+) -> Result<()> {
     let transport = build_transport(settings).await?;
     let from_addr: lettre::Address = from_email.parse().context("Invalid from email address")?;
     let from_mailbox = Mailbox::new(Some(from_name.to_string()), from_addr);
@@ -232,14 +262,21 @@ pub async fn send_invitation(
         .body(html_body.to_string());
 
     let cal_part = SinglePart::builder()
-        .header(ContentType::parse("text/calendar; method=REQUEST; charset=UTF-8").unwrap())
+        .header(ContentType::parse(&format!("text/calendar; method={}; charset=UTF-8", method)).unwrap())
         .body(ics_data.to_string());
 
     let message = builder
         .multipart(MultiPart::mixed().singlepart(html_part).singlepart(cal_part))
-        .context("Failed to build invitation email")?;
+        .context("Failed to build calendar email")?;
 
-    transport.send(message).await.context("SMTP invitation send failed")?;
+    log::info!("SMTP: sending calendar {} to {} recipient(s)", method, to_addresses.len());
+    // Bounded like the main send path: a server that accepts TCP but withholds
+    // its banner would otherwise hang this future forever, and an RSVP that
+    // never returns reads as an app that has frozen.
+    tokio::time::timeout(std::time::Duration::from_secs(60), transport.send(message))
+        .await
+        .map_err(|_| anyhow::anyhow!("SMTP timed out after 60s (server or connection-limit stall)"))?
+        .context("SMTP calendar send failed")?;
     Ok(())
 }
 
@@ -480,6 +517,7 @@ mod send_tests {
             subject: "send-as test".into(),
             body_html: "<p>hello</p>".into(),
             attachments: vec![],
+            reply_to_email_id: None,
         };
         let raw = send_email(
             &local_settings(),

@@ -571,6 +571,9 @@ pub struct SettingsAiConfigChangedEvent {
     pub draft_model: String,
     pub max_tokens: i32,
     pub temperature: f64,
+    pub decision_base_url: String,
+    pub has_decision_key: bool,
+    pub decision_model: String,
     pub seq: u64,
 }
 
@@ -589,6 +592,7 @@ pub struct SettingsAiFeaturesChangedEvent {
     pub priority_detect: bool,
     pub auto_draft: bool,
     pub external_access: bool,
+    pub reply_detect: bool,
     pub seq: u64,
 }
 

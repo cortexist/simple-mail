@@ -20,6 +20,7 @@
     getAiConfig,
     fireSetAiConfig,
     fireTestAiConfig,
+    fireTestDecisionConfig,
     getAccountAiFeatures,
     fireSetAccountAiFeatures,
     getAgentServerStatus,
@@ -1040,18 +1041,28 @@
     { key: 'junkFilter', labelKey: 'settings.aiJunkFilter' },
     { key: 'priorityDetect', labelKey: 'settings.aiPriorityDetect' },
     { key: 'autoDraft', labelKey: 'settings.aiAutoDraft' },
+    { key: 'replyDetect', labelKey: 'settings.aiReplyDetect' },
     { key: 'externalAccess', labelKey: 'settings.aiExternalAccess' },
   ];
 
   let aiForm = $state({
     enabled: false,
-    baseUrl: 'https://api.openai.com/v1',
+    baseUrl: '',
     apiKey: '',
     classifyModel: 'gpt-4o-mini',
     draftModel: 'gpt-4o-mini',
     maxTokens: 1024,
     temperature: 0.2,
+    decisionBaseUrl: '',
+    decisionApiKey: '',
+    decisionModel: 'jev-latest',
   });
+  let decisionHasKey = $state(false);
+  let decisionKeyDirty = $state(false);
+  let showDecisionKey = $state(false);
+  let decisionTesting = $state(false);
+  let decisionTestResult = $state<string | null>(null);
+  let decisionTestError = $state<string | null>(null);
   let aiHasKey = $state(false);
   let aiKeyDirty = $state(false);
   let showAiKey = $state(false);
@@ -1066,7 +1077,7 @@
   // Feature flags for the account currently open in the Accounts tab.
   let selectedAccountAiFeatures = $derived<AccountAiFeatures>(
     (selectedAccountId ? aiFeaturesByAccount[selectedAccountId] : undefined)
-      ?? { junkFilter: false, priorityDetect: false, autoDraft: false, externalAccess: false }
+      ?? { junkFilter: false, priorityDetect: false, autoDraft: false, externalAccess: false, replyDetect: false }
   );
 
   async function loadAiSettings() {
@@ -1081,6 +1092,11 @@
       aiHasKey = cfg.hasKey;
       aiForm.apiKey = '';
       aiKeyDirty = false;
+      aiForm.decisionBaseUrl = cfg.decisionBaseUrl;
+      aiForm.decisionModel = cfg.decisionModel;
+      decisionHasKey = cfg.hasDecisionKey;
+      aiForm.decisionApiKey = '';
+      decisionKeyDirty = false;
     }
     const map: Record<string, AccountAiFeatures> = {};
     for (const a of accounts) {
@@ -1100,6 +1116,9 @@
       draftModel: aiForm.draftModel.trim(),
       maxTokens: aiForm.maxTokens,
       temperature: aiForm.temperature,
+      decisionBaseUrl: aiForm.decisionBaseUrl.trim(),
+      decisionApiKey: decisionKeyDirty ? aiForm.decisionApiKey : '',
+      decisionModel: aiForm.decisionModel.trim() || 'jev-latest',
     };
   }
 
@@ -1109,6 +1128,8 @@
       await fireSetAiConfig(aiConfigInput());
       if (aiKeyDirty && aiForm.apiKey) aiHasKey = true;
       aiForm.apiKey = ''; aiKeyDirty = false;
+      if (decisionKeyDirty && aiForm.decisionApiKey) decisionHasKey = true;
+      aiForm.decisionApiKey = ''; decisionKeyDirty = false;
       flashSaveSuccess();
     } catch (e) {
       aiSaveError = String(e);
@@ -1128,9 +1149,20 @@
     }
   }
 
+  async function testDecisionConfig() {
+    decisionTesting = true; decisionTestResult = null; decisionTestError = null;
+    try {
+      decisionTestResult = await fireTestDecisionConfig(aiConfigInput());
+    } catch (e) {
+      decisionTestError = String(e);
+    } finally {
+      decisionTesting = false;
+    }
+  }
+
   async function toggleAiFeature(accountId: string, key: keyof AccountAiFeatures) {
     const cur: AccountAiFeatures = aiFeaturesByAccount[accountId]
-      ?? { junkFilter: false, priorityDetect: false, autoDraft: false, externalAccess: false };
+      ?? { junkFilter: false, priorityDetect: false, autoDraft: false, externalAccess: false, replyDetect: false };
     const next: AccountAiFeatures = { ...cur, [key]: !cur[key] };
     aiFeaturesByAccount = { ...aiFeaturesByAccount, [accountId]: next };
     aiFeatureBusy = accountId;
@@ -1758,8 +1790,8 @@
         {:else if selectedTab === 'ai'}
           <!-- ── AI / Agent ── -->
           <section class="settings-section">
-            <h4 class="section-title">{t('settings.aiModelApi')}</h4>
-            <p class="dav-description">{t('settings.aiModelApiDesc')}</p>
+            <h4 class="section-title">{t('settings.aiFeatures')}</h4>
+            <p class="dav-description">{t('settings.aiFeaturesDesc')}</p>
             <div class="detail-form">
               <div class="form-row toggle-row">
                 <button type="button" class="toggle-switch" class:on={aiForm.enabled} aria-pressed={aiForm.enabled} aria-label={t('settings.aiEnable')} onclick={() => aiForm.enabled = !aiForm.enabled}>
@@ -1767,9 +1799,16 @@
                 </button>
                 <span class="form-label toggle-label">{t('settings.aiEnable')}</span>
               </div>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h4 class="section-title">{t('settings.aiModelApi')}</h4>
+            <p class="dav-description">{t('settings.aiModelApiDesc')}</p>
+            <div class="detail-form">
               <label class="form-row">
                 <span class="form-label">{t('settings.aiBaseUrl')}</span>
-                <input autocomplete="off" class="form-input" type="text" bind:value={aiForm.baseUrl} placeholder="http://127.0.0.1:8080/v1" />
+                <input autocomplete="off" class="form-input" type="text" bind:value={aiForm.baseUrl} placeholder="https://api.openai.com/v1" />
               </label>
               <label class="form-row">
                 <span class="form-label">{t('settings.aiApiKey')} {#if aiHasKey && !aiKeyDirty}<span class="dav-user-account">{t('settings.aiKeyStored')}</span>{/if}</span>
@@ -1808,12 +1847,52 @@
                   <input autocomplete="off" class="form-input port-input" type="number" step="0.1" min="0" max="2" bind:value={aiForm.temperature} />
                 </label>
               </div>
-              <p class="dav-description" style="margin-top:8px"><strong>{t('settings.aiPrivacyLabel')}</strong> {t('settings.aiPrivacyBody')}</p>
-              {#if aiSaveError}<div class="autodiscover-note error">{aiSaveError}</div>{/if}
               {#if aiTestError}<div class="autodiscover-note error">{t('settings.aiTestFailed')} {aiTestError}</div>{/if}
               {#if aiTestResult}<div class="autodiscover-note">{t('settings.aiTestReply')} {aiTestResult}</div>{/if}
               <div class="form-actions">
-                <button class="btn btn-secondary btn-sm" onclick={testAiConfig} disabled={aiTesting || !aiForm.baseUrl}>{aiTesting ? t('settings.aiTesting') : t('settings.aiTest')}</button>
+                <button class="btn btn-secondary btn-sm" onclick={testAiConfig} disabled={aiTesting || !aiForm.baseUrl.trim()}>{aiTesting ? t('settings.aiTesting') : t('settings.aiTest')}</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h4 class="section-title">{t('settings.aiDecisionApi')}</h4>
+            <p class="dav-description">{t('settings.aiDecisionApiDesc')}</p>
+            <div class="detail-form">
+              <label class="form-row">
+                <span class="form-label">{t('settings.aiBaseUrl')}</span>
+                <input autocomplete="off" class="form-input" type="text" bind:value={aiForm.decisionBaseUrl} placeholder="https://api.typesafe.ai/v1" />
+              </label>
+              <label class="form-row">
+                <span class="form-label">{t('settings.aiApiKey')} {#if decisionHasKey && !decisionKeyDirty}<span class="dav-user-account">{t('settings.aiKeyStored')}</span>{/if}</span>
+                <div class="password-wrapper">
+                  {#if showDecisionKey}
+                    <input autocomplete="off" class="form-input password-input" type="text" bind:value={aiForm.decisionApiKey} oninput={() => decisionKeyDirty = true} placeholder={decisionHasKey ? '••••••••' : t('settings.aiDecisionKeyPlaceholder')} />
+                  {:else}
+                    <input autocomplete="off" class="form-input password-input" type="password" bind:value={aiForm.decisionApiKey} oninput={() => decisionKeyDirty = true} placeholder={decisionHasKey ? '••••••••' : t('settings.aiDecisionKeyPlaceholder')} />
+                  {/if}
+                  <button class="password-toggle" type="button" onclick={() => showDecisionKey = !showDecisionKey} aria-label={showDecisionKey ? t('settings.hidePassword') : t('settings.showPassword')}>
+                    {#if showDecisionKey}
+                      <svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentColor" d="m9.343 18.782l-1.932-.518l.787-2.939a11 11 0 0 1-3.237-1.872l-2.153 2.154l-1.414-1.414l2.153-2.154a10.96 10.96 0 0 1-2.371-5.07l1.968-.359a9.002 9.002 0 0 0 17.713 0l1.968.358a10.96 10.96 0 0 1-2.372 5.071l2.154 2.154l-1.414 1.414l-2.154-2.154a11 11 0 0 1-3.237 1.872l.788 2.94l-1.932.517l-.788-2.94a11 11 0 0 1-3.74 0z"/></svg>
+                    {:else}
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+                    {/if}
+                  </button>
+                </div>
+              </label>
+              <label class="form-row">
+                <span class="form-label">{t('settings.aiDecisionModel')}</span>
+                <input autocomplete="off" class="form-input" type="text" bind:value={aiForm.decisionModel} placeholder="jev-latest" />
+              </label>
+              {#if decisionTestError}<div class="autodiscover-note error">{t('settings.aiTestFailed')} {decisionTestError}</div>{/if}
+              {#if decisionTestResult}<div class="autodiscover-note">{t('settings.aiTestReply')} {decisionTestResult}</div>{/if}
+              <div class="form-actions">
+                <button class="btn btn-secondary btn-sm" onclick={testDecisionConfig} disabled={decisionTesting || !aiForm.decisionBaseUrl.trim()}>{decisionTesting ? t('settings.aiTesting') : t('settings.aiTest')}</button>
+              </div>
+
+              <p class="dav-description" style="margin-top:8px"><strong>{t('settings.aiPrivacyLabel')}</strong> {t('settings.aiPrivacyBody')}</p>
+              {#if aiSaveError}<div class="autodiscover-note error">{aiSaveError}</div>{/if}
+              <div class="form-actions">
                 <button class="btn btn-primary btn-sm" onclick={saveAiConfig} disabled={aiSaving}>{aiSaving ? t('settings.aiSaving') : t('settings.aiSave')}</button>
               </div>
             </div>

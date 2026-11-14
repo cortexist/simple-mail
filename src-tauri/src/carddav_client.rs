@@ -45,6 +45,13 @@ pub struct ParsedContact {
     pub birthday: Option<String>,
     pub photo_url: Option<String>,
     pub rev: Option<String>,
+    /// NOTE, unescaped.
+    pub notes: Option<String>,
+    /// Every property this app does not model (X-*, CATEGORIES, custom fields from
+    /// other clients), kept verbatim as unfolded lines and written back on save.
+    /// Without this a save from here silently stripped them from the server copy;
+    /// observed 2026-09-05 with the agent cards' X-SMS-ADDRESS/X-AGENT-* fields.
+    pub extra_props: Vec<String>,
     pub resource_url: String,
     pub etag: String,
 }
@@ -602,6 +609,8 @@ fn parse_vcard(vcard_data: &str, resource_url: &str, etag: &str) -> Option<Parse
     let mut rev: Option<String> = None;
     let mut emails: Vec<ContactEmail> = Vec::new();
     let mut phones: Vec<ContactPhone> = Vec::new();
+    let mut notes_raw: Option<String> = None;
+    let mut extra_props: Vec<String> = Vec::new();
 
     // Simple line-by-line vCard parser since vcard_parser may fail on
     // non-standard cards. We handle the most common properties.
@@ -719,7 +728,15 @@ fn parse_vcard(vcard_data: &str, resource_url: &str, etag: &str) -> Option<Parse
                         }
                     }
                 }
-                _ => {}
+                "NOTE" => {
+                    if !value.is_empty() {
+                        notes_raw = Some(value.to_string());
+                    }
+                }
+                // Structural lines are ours to write; REV is regenerated on save;
+                // everything else is preserved verbatim.
+                "BEGIN" | "END" | "VERSION" | "PRODID" => {}
+                _ => extra_props.push(line.to_string()),
             }
         }
     }
@@ -733,6 +750,7 @@ fn parse_vcard(vcard_data: &str, resource_url: &str, etag: &str) -> Option<Parse
          .replace("\\\\", "\\")
     }
 
+    let notes = notes_raw.as_deref().map(vcard_unescape);
     full_name = vcard_unescape(&full_name);
     first_name = vcard_unescape(&first_name);
     last_name = vcard_unescape(&last_name);
@@ -797,9 +815,28 @@ fn parse_vcard(vcard_data: &str, resource_url: &str, etag: &str) -> Option<Parse
         birthday,
         photo_url,
         rev,
+        notes,
+        extra_props,
         resource_url: resource_url.to_string(),
         etag: etag.to_string(),
     })
+}
+
+/// Fold a content line at 75 octets with a CRLF + space continuation (RFC 6350
+/// §3.2), on character boundaries so multi-byte text is never split.
+fn fold_vcard_line(line: &str) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in line.chars() {
+        let w = ch.len_utf8();
+        if width + w > 75 {
+            out.push_str("\r\n ");
+            width = 1;
+        }
+        out.push(ch);
+        width += w;
+    }
+    out
 }
 
 /// Unfold vCard lines (RFC 6350: lines starting with space/tab are continuations).
@@ -1027,6 +1064,20 @@ fn build_vcard(contact: &ParsedContact) -> String {
         }
     }
 
+    if let Some(ref notes) = contact.notes {
+        if !notes.is_empty() {
+            vcard.push_str(&fold_vcard_line(&format!("NOTE:{}", esc(notes))));
+            vcard.push_str("\r\n");
+        }
+    }
+    // Properties this app does not model go back exactly as they came.
+    for line in &contact.extra_props {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        vcard.push_str(&fold_vcard_line(line));
+        vcard.push_str("\r\n");
+    }
+
     vcard.push_str(&format!("REV:{}Z\r\n", chrono::Utc::now().format("%Y%m%dT%H%M%S")));
     vcard.push_str("END:VCARD\r\n");
     vcard
@@ -1217,4 +1268,41 @@ pub fn parse_vcard_public(vcard_data: &str, resource_url: &str, etag: &str) -> O
 
 pub fn build_vcard_public(contact: &ParsedContact) -> String {
     build_vcard(contact)
+}
+
+#[cfg(test)]
+mod preserve_tests {
+    use super::*;
+
+    /// A card with properties this app does not model must come back from a
+    /// parse/build round trip with every one of them, plus its NOTE.
+    #[test]
+    fn unknown_properties_and_note_survive_a_round_trip() {
+        let card = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:agent-ides\r\nFN:IDES agent\r\nN:agent;IDES;;;\r\n\
+                    X-SMS-ADDRESS:ides@agents\r\nX-AGENT-COLOR:#9ece6a\r\nX-AGENT-SHAPE:3\r\n\
+                    CATEGORIES:agents\r\nNOTE:Files the biweekly IDES certification\\, then reports.\r\n\
+                    REV:20260904T000000Z\r\nEND:VCARD\r\n";
+        let parsed = parse_vcard_public(card, "/agents/agent-ides.vcf", "e1").expect("parses");
+        assert_eq!(parsed.notes.as_deref(), Some("Files the biweekly IDES certification, then reports."));
+        assert_eq!(parsed.extra_props.len(), 4, "X-* and CATEGORIES kept: {:?}", parsed.extra_props);
+
+        let out = build_vcard_public(&parsed);
+        for line in ["X-SMS-ADDRESS:ides@agents", "X-AGENT-COLOR:#9ece6a", "X-AGENT-SHAPE:3", "CATEGORIES:agents",
+                     "NOTE:Files the biweekly IDES certification\\, then reports."] {
+            assert!(out.contains(line), "missing {line} in\n{out}");
+        }
+        assert_eq!(out.matches("REV:").count(), 1, "REV is regenerated, not duplicated");
+        assert!(!out.contains("REV:20260904"), "the old REV must not be echoed");
+    }
+
+    #[test]
+    fn long_preserved_lines_are_folded() {
+        let long = format!("X-LONG:{}", "é".repeat(120));
+        let card = format!("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u\r\nFN:Long\r\n{}\r\nEND:VCARD\r\n", long);
+        let parsed = parse_vcard_public(&card, "/x.vcf", "").expect("parses");
+        let out = build_vcard_public(&parsed);
+        for l in out.split("\r\n") { assert!(l.len() <= 75, "line over 75 octets: {l:?}"); }
+        let unfolded = out.replace("\r\n ", "");
+        assert!(unfolded.contains(&long), "folded line unfolds back to the original");
+    }
 }

@@ -34,9 +34,6 @@
     showMoveMenu?: boolean;
     multiSelectCount?: number;
     multiSelectHasUnread?: boolean;
-    onAiDraft?: () => void;
-    aiDraftEnabled?: boolean;
-    aiDraftLoading?: boolean;
   }
 
   let {
@@ -70,9 +67,6 @@
     showMoveMenu = $bindable(false),
     multiSelectCount = 0,
     multiSelectHasUnread = false,
-    onAiDraft,
-    aiDraftEnabled = false,
-    aiDraftLoading = false,
   }: Props = $props();
 
   let moveTargetFolders = $derived(folders.filter((f) => f.id !== currentFolder));
@@ -119,12 +113,11 @@
         left.push({ kind: 'btn', id: 'junk', iconKey: isInJunk ? 'notJunk' : 'junk', label: isInJunk ? t('commandBar.notJunk') : t('commandBar.junk'), tooltip: isInJunk ? t('commandBar.notJunkTooltip') : t('commandBar.junkTooltip'), tooltipPosition: 'bottom', onClick: () => onJunk?.() });
         left.push({ kind: 'btn', id: 'move', isMove: true, iconKey: 'move', label: t('commandBar.move'), tooltip: t('commandBar.moveTo'), tooltipPosition: 'bottom', onClick: () => {} });
       } else if (email) {
-        left.push({ kind: 'btn', id: 'reply', iconKey: 'reply', label: t('compose.reply'), tooltip: t('commandBar.reply'), tooltipPosition: 'bottom', onClick: () => onCompose('reply') });
-        left.push({ kind: 'btn', id: 'replyAll', iconKey: 'replyAll', label: t('compose.replyAll'), tooltip: t('commandBar.replyAll'), tooltipPosition: 'bottom', onClick: () => onCompose('replyAll') });
+        // A reply to a no-reply sender would go nowhere; the tooltip says why.
+        const noReply = !!email.noReply;
+        left.push({ kind: 'btn', id: 'reply', iconKey: 'reply', label: t('compose.reply'), tooltip: noReply ? t('commandBar.noReply') : t('commandBar.reply'), tooltipPosition: 'bottom', onClick: () => onCompose('reply'), disabled: noReply });
+        left.push({ kind: 'btn', id: 'replyAll', iconKey: 'replyAll', label: t('compose.replyAll'), tooltip: noReply ? t('commandBar.noReply') : t('commandBar.replyAll'), tooltipPosition: 'bottom', onClick: () => onCompose('replyAll'), disabled: noReply });
         left.push({ kind: 'btn', id: 'forward', iconKey: 'forward', label: t('compose.forward'), tooltip: t('commandBar.forward'), tooltipPosition: 'bottom', onClick: () => onCompose('forward') });
-        if (aiDraftEnabled) {
-          left.push({ kind: 'btn', id: 'aiDraft', iconKey: 'aiDraft', label: t('compose.aiDraft'), tooltip: t('commandBar.aiDraft'), tooltipPosition: 'bottom', onClick: () => onAiDraft?.(), disabled: aiDraftLoading });
-        }
         if (email.isRead) {
           left.push({ kind: 'btn', id: 'markUnread', iconKey: 'unread', label: t('commandBar.unread'), tooltip: t('commandBar.markUnread'), tooltipPosition: 'bottom', onClick: () => onMarkUnread?.(), disabled: email.folder === 'drafts' });
         } else {
@@ -266,8 +259,6 @@
     <svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentColor" d="M9.28 5.22a.75.75 0 0 1 0 1.06l-4.47 4.47l4.47 4.47a.75.75 0 1 1-1.06 1.06l-5-5a.75.75 0 0 1 0-1.06l5-5a.75.75 0 0 1 1.06 0m4 0a.75.75 0 0 1 0 1.06L9.56 10h3.69A7.75 7.75 0 0 1 21 17.75v.5a.75.75 0 0 1-1.5 0v-.5a6.25 6.25 0 0 0-6.25-6.25H9.56l3.72 3.72a.75.75 0 1 1-1.06 1.06l-5-5a.75.75 0 0 1 0-1.06l5-5a.75.75 0 0 1 1.06 0"/></svg>
   {:else if key === 'forward'}
     <svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentColor" d="M14.72 6.28a.75.75 0 0 1 1.06-1.06l5 5a.75.75 0 0 1 0 1.06l-5 5a.75.75 0 1 1-1.06-1.06l3.72-3.72h-7.69a6.25 6.25 0 0 0-6.25 6.25v.5a.75.75 0 0 1-1.5 0v-.5A7.75 7.75 0 0 1 10.75 10h7.69z"/></svg>
-  {:else if key === 'aiDraft'}
-    <svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentColor" d="M9.5 3.25a.75.75 0 0 1 .71.51l1.06 3.14a4 4 0 0 0 2.5 2.5l3.14 1.06a.75.75 0 0 1 0 1.42l-3.14 1.06a4 4 0 0 0-2.5 2.5l-1.06 3.14a.75.75 0 0 1-1.42 0l-1.06-3.14a4 4 0 0 0-2.5-2.5L1.59 11.88a.75.75 0 0 1 0-1.42l3.14-1.06a4 4 0 0 0 2.5-2.5L8.29 3.76a.75.75 0 0 1 .71-.51m8 10.5a.75.75 0 0 1 .71.51l.49 1.45a2 2 0 0 0 1.24 1.24l1.45.49a.75.75 0 0 1 0 1.42l-1.45.49a2 2 0 0 0-1.24 1.24l-.49 1.45a.75.75 0 0 1-1.42 0l-.49-1.45a2 2 0 0 0-1.24-1.24l-1.45-.49a.75.75 0 0 1 0-1.42l1.45-.49a2 2 0 0 0 1.24-1.24l.49-1.45a.75.75 0 0 1 .71-.51"/></svg>
   {:else if key === 'replyStub'}
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 00-4-4H4"/></svg>
   {:else if key === 'replyAllStub'}

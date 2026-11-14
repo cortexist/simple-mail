@@ -29,9 +29,14 @@
     autoFocus?: boolean;
     onDiscard: () => void;
     onSaveDraft: () => void;
+    /** Show the AI Draft button — AI is on and this is a reply to a known email.
+     * The generated text arrives later through `insertAiDraft`. */
+    aiDraftEnabled?: boolean;
+    aiDraftLoading?: boolean;
+    onAiDraft?: () => void;
   }
 
-  let { mode, replyTo = null, draft = null, accountId = '', signature = '', onDraftChange, onSend, onDiscard, onSaveDraft, isSavedDraft = false, autoFocus = true }: Props = $props();
+  let { mode, replyTo = null, draft = null, accountId = '', signature = '', onDraftChange, onSend, onDiscard, onSaveDraft, isSavedDraft = false, autoFocus = true, aiDraftEnabled = false, aiDraftLoading = false, onAiDraft }: Props = $props();
 
   // Pre-fill fields based on compose mode
   let toField = $state('');
@@ -295,12 +300,12 @@
         subjectField = '';
         bodyHtml = `<br>${sig}`;
       } else if (mode === 'reply' && replyTo) {
-        toChips = [{ name: replyTo.from.name, email: replyTo.from.email, display: `${replyTo.from.name} <${replyTo.from.email}>` }];
+        toChips = [replyRecipient(replyTo)];
         ccChips = [];
         subjectField = `Re: ${replyTo.subject.replace(/^(Re|Fwd): /i, '')}`;
         bodyHtml = `<br>${sig}${buildQuotedBody(replyTo)}`;
       } else if (mode === 'replyAll' && replyTo) {
-        toChips = [{ name: replyTo.from.name, email: replyTo.from.email, display: `${replyTo.from.name} <${replyTo.from.email}>` }];
+        toChips = [replyRecipient(replyTo)];
         ccChips = replyTo.to
           .filter((c) => c.email !== 'you@company.com')
           .map((c) => ({ name: c.name, email: c.email, display: `${c.name} <${c.email}>` }));
@@ -400,6 +405,21 @@
     return result;
   }
 
+  /** Who a reply goes to: the Reply-To address when the message set one
+   *  (RFC 5322 §3.6.2), else the sender. Reply-To arrives as a bare address or
+   *  `Name <addr>`; when it is the sender's own address the sender's name is
+   *  kept. */
+  function replyRecipient(email: Email): RecipientChip {
+    const raw = email.replyTo?.trim() ?? '';
+    const m = raw.match(/^(.*?)\s*<([^>]+)>\s*$/);
+    const addr = (m ? m[2] : raw).trim();
+    if (!addr || addr.toLowerCase() === email.from.email.toLowerCase()) {
+      return { name: email.from.name, email: email.from.email, display: `${email.from.name} <${email.from.email}>` };
+    }
+    const name = m?.[1].replace(/^"|"$/g, '').trim() ?? '';
+    return { name: name || addr, email: addr, display: name ? `${name} <${addr}>` : addr };
+  }
+
   function signatureBlock(): string {
     if (!signature) return '';
     return `<div class="signature-block" style="margin-top:16px; color:#666;">${signature}</div>`;
@@ -447,7 +467,7 @@
       el.removeAttribute('face');
       el.removeAttribute('bgcolor');
       if (el.getAttribute('style')) {
-        for (const prop of ['color', 'background', 'background-color', 'font-family', 'font-size', '-webkit-text-fill-color']) {
+        for (const prop of ['color', 'background', 'background-color', 'font-family', 'font-size', '-webkit-text-fill-color', 'caret-color']) {
           el.style.removeProperty(prop);
         }
         if (!el.getAttribute('style')?.trim()) el.removeAttribute('style');
@@ -587,6 +607,33 @@
     editorEl?.focus();
   }
 
+  /** Put an AI-generated reply at the top of the body, above the signature and
+   *  the quoted original. What the user typed there is kept, below the draft;
+   *  a blank typing area (the initial `<br>`) is replaced outright. Parsed
+   *  through a <template> rather than Range.createContextualFragment, which
+   *  would run any <script> in the model's output on insertion. */
+  export function insertAiDraft(html: string) {
+    if (!editorEl) return;
+    const tail = Array.from(editorEl.childNodes).find(
+      (n) => n instanceof HTMLElement && (n.classList.contains('signature-block') || n.classList.contains('quote-block')),
+    );
+    const head = document.createRange();
+    head.setStart(editorEl, 0);
+    if (tail) head.setEndBefore(tail); else head.setEnd(editorEl, editorEl.childNodes.length);
+    if (head.toString().trim() === '') {
+      head.deleteContents();
+      // With no signature the cleared range held the quote's `<br><br>`
+      // spacer too — put it back so the draft doesn't butt against the quote.
+      if (tail instanceof HTMLElement && tail.classList.contains('quote-block')) html += '<br><br>';
+    }
+    const tpl = document.createElement('template');
+    tpl.innerHTML = sanitizeQuotedHtml(html);
+    head.collapse(true);
+    head.insertNode(tpl.content);
+    bodyHtml = editorEl.innerHTML;
+    editorEl.focus();
+  }
+
   function getModeLabel(): string {
     switch (mode) {
       case 'new': return t('compose.newMessage');
@@ -707,6 +754,12 @@
   <div class="compose-header">
     <h2 class="compose-title">{getModeLabel()}</h2>
     <div class="compose-header-actions">
+      {#if aiDraftEnabled}
+        <button class="compose-ai-btn" onclick={() => onAiDraft?.()} disabled={aiDraftLoading} data-tooltip={t('commandBar.aiDraft')} data-tooltip-position="bottom">
+          <svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentColor" d="M9.5 3.25a.75.75 0 0 1 .71.51l1.06 3.14a4 4 0 0 0 2.5 2.5l3.14 1.06a.75.75 0 0 1 0 1.42l-3.14 1.06a4 4 0 0 0-2.5 2.5l-1.06 3.14a.75.75 0 0 1-1.42 0l-1.06-3.14a4 4 0 0 0-2.5-2.5L1.59 11.88a.75.75 0 0 1 0-1.42l3.14-1.06a4 4 0 0 0 2.5-2.5L8.29 3.76a.75.75 0 0 1 .71-.51m8 10.5a.75.75 0 0 1 .71.51l.49 1.45a2 2 0 0 0 1.24 1.24l1.45.49a.75.75 0 0 1 0 1.42l-1.45.49a2 2 0 0 0-1.24 1.24l-.49 1.45a.75.75 0 0 1-1.42 0l-.49-1.45a2 2 0 0 0-1.24-1.24l-1.45-.49a.75.75 0 0 1 0-1.42l1.45-.49a2 2 0 0 0 1.24-1.24l.49-1.45a.75.75 0 0 1 .71-.51"/></svg>
+          <span>{t('compose.aiDraft')}</span>
+        </button>
+      {/if}
       <button class="compose-header-btn" onclick={onSaveDraft} data-tooltip={t('compose.saveDraftShortcut')} data-tooltip-position="bottom" aria-label={t('compose.saveDraft')}>
         <svg width="18" height="18" viewBox="0 0 16 16">
           <path fill="currentColor" d="M4 3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1V9.5A1.5 1.5 0 0 1 5.5 8h5A1.5 1.5 0 0 1 12 9.5V13a1 1 0 0 0 1-1V5.621a1 1 0 0 0-.293-.707l-1.621-1.621A1 1 0 0 0 10.379 3H10v1.5A1.5 1.5 0 0 1 8.5 6h-2A1.5 1.5 0 0 1 5 4.5V3zm2 0v1.5a.5.5 0 0 0 .5.5h2a.5.5 0 0 0 .5-.5V3zm5 10V9.5a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0-.5.5V13zM2 4a2 2 0 0 1 2-2h6.379a2 2 0 0 1 1.414.586l1.621 1.621A2 2 0 0 1 14 5.621V12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"/>
@@ -1075,7 +1128,41 @@
 
   .compose-header-actions {
     display: flex;
+    align-items: center;
     gap: 4px;
+  }
+
+  .compose-ai-btn {
+    height: 30px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 12px;
+    margin-right: 4px;
+    border-radius: 4px;
+    background: var(--accent);
+    color: var(--text-on-accent);
+    font-size: 13px;
+    font-weight: 600;
+    outline: none;
+  }
+
+  .compose-ai-btn:hover:not(:disabled) {
+    background: var(--accent-hover);
+  }
+
+  .compose-ai-btn:active:not(:disabled) {
+    background: var(--accent-active);
+  }
+
+  .compose-ai-btn:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
+  }
+
+  .compose-ai-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
 
   .compose-header-btn {
@@ -1455,6 +1542,16 @@
   :global([data-theme="dark"]) .compose-body :global(.signature-block),
   :global([data-theme="dark"]) .compose-body :global(.signature-block *:not(a)) {
     color: var(--text-secondary) !important;
+  }
+
+  /* The caret belongs to the editor, not the document. Mail written in WebKit
+     clients (Apple Mail, Safari) inlines `caret-color: rgb(0, 0, 0)` on its
+     elements, so editing inside such quoted content draws a black caret —
+     invisible on the dark theme's canvas. Display-time only, like the rule
+     above: the inline styles in the sent document stay untouched. */
+  .compose-body,
+  .compose-body :global(*) {
+    caret-color: var(--text-primary) !important;
   }
 
   /* Restore list styles inside editor (global reset strips them) */
