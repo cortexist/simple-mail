@@ -467,7 +467,7 @@
       el.removeAttribute('face');
       el.removeAttribute('bgcolor');
       if (el.getAttribute('style')) {
-        for (const prop of ['color', 'background', 'background-color', 'font-family', 'font-size', '-webkit-text-fill-color']) {
+        for (const prop of ['color', 'background', 'background-color', 'font-family', 'font-size', '-webkit-text-fill-color', 'caret-color']) {
           el.style.removeProperty(prop);
         }
         if (!el.getAttribute('style')?.trim()) el.removeAttribute('style');
@@ -1542,6 +1542,16 @@
   :global([data-theme="dark"]) .compose-body :global(.signature-block),
   :global([data-theme="dark"]) .compose-body :global(.signature-block *:not(a)) {
     color: var(--text-secondary) !important;
+  }
+
+  /* The caret belongs to the editor, not the document. Mail written in WebKit
+     clients (Apple Mail, Safari) inlines `caret-color: rgb(0, 0, 0)` on its
+     elements, so editing inside such quoted content draws a black caret —
+     invisible on the dark theme's canvas. Display-time only, like the rule
+     above: the inline styles in the sent document stay untouched. */
+  .compose-body,
+  .compose-body :global(*) {
+    caret-color: var(--text-primary) !important;
   }
 
   /* Restore list styles inside editor (global reset strips them) */
