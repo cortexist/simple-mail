@@ -1,5 +1,5 @@
 [package]
-name = "agentic-mail"
+name = "simple-mail"
 version = "0.9.17"
 description = "A privacy-focused desktop mail, calendar, and contacts client"
 authors = ["Cortexist, LLC"]

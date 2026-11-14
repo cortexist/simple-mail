@@ -210,7 +210,7 @@ pub async fn start_server(
 }
 
 async fn health() -> Response {
-    (StatusCode::OK, "agentic-mail MCP server").into_response()
+    (StatusCode::OK, "simple-mail MCP server").into_response()
 }
 
 // ── JSON-RPC plumbing ───────────────────────────────────
@@ -261,7 +261,7 @@ async fn rpc_handler(
         "initialize" => rpc_ok(id, json!({
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "agentic-mail", "version": env!("CARGO_PKG_VERSION") },
+            "serverInfo": { "name": "simple-mail", "version": env!("CARGO_PKG_VERSION") },
         })),
         "ping" => rpc_ok(id, json!({})),
         // Notifications carry no id and expect no response body.

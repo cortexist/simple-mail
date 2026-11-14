@@ -1,4 +1,4 @@
-# Agentic Mail — AI & External-Agent Task Breakdown
+# Simple Mail — AI & External-Agent Task Breakdown
 
 > Companion to [`agentic-ai-plan.md`](./agentic-ai-plan.md). Status: **P0–P4 all done.** All five phases implemented (backend + frontend), `cargo test` + `svelte-check` green. Notes: no `accounts.signature` column exists, so v1 drafts omit a signature; reference retrieval uses a simple JSON "pick ids" call (not OpenAI tool-calling); MCP transport is HTTP/JSON-RPC only (no stdio/SSE — both deferred). Remaining polish: X.2 README local-endpoint docs; SSE streaming for MCP; the deferred items below.
 > Legend — Size: **S** ≤½ day · **M** ~1–2 days · **L** ~3–5 days. Each task is meant to be roughly one PR.

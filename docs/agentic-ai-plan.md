@@ -1,4 +1,4 @@
-# Agentic Mail — AI & External-Agent Plan
+# Simple Mail — AI & External-Agent Plan
 
 > Status: **Planning** (not yet implemented). Saved 2026-06-23.
 > Scope: turn the mail app into (1) a **tool** external agents can drive, and (2) an **agent** with its own model harness.

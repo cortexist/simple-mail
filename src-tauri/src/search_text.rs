@@ -226,12 +226,12 @@ mod tests {
 
     /// Byte-for-byte agreement with the JS implementation over a real corpus.
     /// Run `node scripts/dump-search-text.mjs > corpus.json` first and point
-    /// `AGENTIC_MAIL_SEARCH_TEXT_CORPUS` at the file.
+    /// `SIMPLE_MAIL_SEARCH_TEXT_CORPUS` at the file.
     #[test]
     #[ignore]
     fn matches_the_js_implementation_over_the_corpus() {
-        let path = std::env::var("AGENTIC_MAIL_SEARCH_TEXT_CORPUS")
-            .expect("set AGENTIC_MAIL_SEARCH_TEXT_CORPUS to the dumped corpus JSON");
+        let path = std::env::var("SIMPLE_MAIL_SEARCH_TEXT_CORPUS")
+            .expect("set SIMPLE_MAIL_SEARCH_TEXT_CORPUS to the dumped corpus JSON");
         let data = std::fs::read_to_string(&path).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap();
         let mut mismatches = 0;

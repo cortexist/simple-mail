@@ -7,7 +7,7 @@
 //! and the WebKit children — so those are the only commands here. The runner
 //! owns the walk, the pacing and the log format.
 //!
-//! Inert unless both hold: a debug build, and `AGENTIC_MAIL_BENCH=1` in the
+//! Inert unless both hold: a debug build, and `SIMPLE_MAIL_BENCH=1` in the
 //! environment. Release builds register the commands but `bench_config` always
 //! answers `None`, so the frontend never starts. Sampling reads `/proc` and is
 //! Linux-only; `scripts/bench-reading.sh` is the intended entry point.
@@ -54,17 +54,17 @@ fn env_u64(name: &str, default: u64) -> u64 {
 /// `Some` only when a bench was asked for on a debug build.
 #[tauri::command]
 pub fn bench_config() -> Option<BenchConfig> {
-    if !cfg!(debug_assertions) || std::env::var("AGENTIC_MAIL_BENCH").ok().as_deref() != Some("1") {
+    if !cfg!(debug_assertions) || std::env::var("SIMPLE_MAIL_BENCH").ok().as_deref() != Some("1") {
         return None;
     }
     let default_log = dirs_home().join(".cortexist").join("mail").join("bench-reading.csv");
     Some(BenchConfig {
-        rounds: env_u64("AGENTIC_MAIL_BENCH_ROUNDS", 3) as u32,
-        settle_ms: env_u64("AGENTIC_MAIL_BENCH_SETTLE_MS", 1500),
-        round_idle_ms: env_u64("AGENTIC_MAIL_BENCH_ROUND_IDLE_MS", 15_000),
-        timeout_ms: env_u64("AGENTIC_MAIL_BENCH_TIMEOUT_MS", 10_000),
-        limit: env_u64("AGENTIC_MAIL_BENCH_LIMIT", 0) as usize,
-        log_path: std::env::var("AGENTIC_MAIL_BENCH_LOG")
+        rounds: env_u64("SIMPLE_MAIL_BENCH_ROUNDS", 3) as u32,
+        settle_ms: env_u64("SIMPLE_MAIL_BENCH_SETTLE_MS", 1500),
+        round_idle_ms: env_u64("SIMPLE_MAIL_BENCH_ROUND_IDLE_MS", 15_000),
+        timeout_ms: env_u64("SIMPLE_MAIL_BENCH_TIMEOUT_MS", 10_000),
+        limit: env_u64("SIMPLE_MAIL_BENCH_LIMIT", 0) as usize,
+        log_path: std::env::var("SIMPLE_MAIL_BENCH_LOG")
             .unwrap_or_else(|_| default_log.to_string_lossy().into_owned()),
     })
 }

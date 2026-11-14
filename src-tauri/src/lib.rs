@@ -6393,7 +6393,7 @@ fn recurrence_to_rrule(r: &RecurrenceParam) -> String {
 /// changes when that pressure arrives, not how much is held. Kept as a knob so
 /// the next experiment does not have to re-add it.
 ///
-/// `AGENTIC_MAIL_CACHE_MODEL=viewer|document-browser|browser`.
+/// `SIMPLE_MAIL_CACHE_MODEL=viewer|document-browser|browser`.
 #[cfg(target_os = "linux")]
 fn install_webview_cache_model<R: tauri::Runtime>(app: &tauri::App<R>) {
     use webkit2gtk::{CacheModel, WebContextExt, WebViewExt};
@@ -6401,7 +6401,7 @@ fn install_webview_cache_model<R: tauri::Runtime>(app: &tauri::App<R>) {
     if !cfg!(debug_assertions) {
         return;
     }
-    let model = match std::env::var("AGENTIC_MAIL_CACHE_MODEL").ok().as_deref() {
+    let model = match std::env::var("SIMPLE_MAIL_CACHE_MODEL").ok().as_deref() {
         Some("viewer") => CacheModel::DocumentViewer,
         Some("document-browser") => CacheModel::DocumentBrowser,
         Some("browser") => CacheModel::WebBrowser,

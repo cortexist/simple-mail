@@ -11,7 +11,7 @@
  * The bench must not touch the mailbox; it only reads.
  *
  * Runs only when the backend says a bench was requested (a debug build with
- * `AGENTIC_MAIL_BENCH=1`). `scripts/bench-reading.sh` sets that up and turns
+ * `SIMPLE_MAIL_BENCH=1`). `scripts/bench-reading.sh` sets that up and turns
  * the log into a report. Also reachable as `__mailBench` from the console.
  */
 
@@ -211,7 +211,7 @@ export function installBenchConsole(host: BenchHost) {
       stop() { stopRequested = true; },
       start(overrides: Partial<BenchConfig> = {}) {
         void invoke<BenchConfig | null>('bench_config').then((cfg) => {
-          if (!cfg) { console.warn('[mail-bench] not enabled: debug build + AGENTIC_MAIL_BENCH=1 required'); return; }
+          if (!cfg) { console.warn('[mail-bench] not enabled: debug build + SIMPLE_MAIL_BENCH=1 required'); return; }
           void run(host, { ...cfg, ...overrides });
         });
       },
